@@ -1,0 +1,18 @@
+﻿<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <rect x="0" y="0" width="1024" height="1024" rx="220" fill="#2563EB"/>
+
+  <rect x="245" y="180" width="430" height="550" rx="72" fill="#FFFFFF"/>
+  <rect x="550" y="180" width="125" height="125" rx="28" fill="#DBEAFE"/>
+
+  <rect x="300" y="315" width="250" height="24" rx="12" fill="#2563EB"/>
+  <rect x="300" y="372" width="290" height="24" rx="12" fill="#93C5FD"/>
+  <rect x="300" y="430" width="215" height="24" rx="12" fill="#93C5FD"/>
+
+  <rect x="520" y="472" width="340" height="295" rx="58" fill="#0F172A"/>
+  <rect x="568" y="520" width="244" height="140" rx="24" fill="#1E40AF"/>
+  <circle cx="760" cy="548" r="18" fill="#FACC15"/>
+  <rect x="594" y="610" width="102" height="22" rx="11" fill="#93C5FD"/>
+  <rect x="705" y="586" width="84" height="46" rx="14" fill="#DBEAFE"/>
+
+  <text x="616" y="732" fill="#FFFFFF" font-size="84" font-family="Inter, Segoe UI, Arial, sans-serif" font-weight="800" letter-spacing="4">SVG</text>
+</svg>

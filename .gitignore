@@ -1,0 +1,7 @@
+﻿node_modules/
+dist/
+src-tauri/target/
+src-tauri/updater/*.key
+src-tauri/updater/*.key.*
+*.log
+.DS_Store

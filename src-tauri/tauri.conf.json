@@ -1,0 +1,103 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "r0nix",
+  "mainBinaryName": "r0nix",
+  "version": "0.5.17",
+  "identifier": "com.r0nix.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "r0nix",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1200,
+        "minHeight": 800,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "capabilities": ["default"],
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": false,
+    "targets": "all",
+    "resources": [
+      "runtime"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "allowDowngrades": false,
+      "nsis": {
+        "installMode": "both",
+        "displayLanguageSelector": true,
+        "languages": [
+          "SimpChinese",
+          "English"
+        ],
+        "customLanguageFiles": {
+          "English": "windows/nsis-languages/English.nsh",
+          "SimpChinese": "windows/nsis-languages/SimpChinese.nsh"
+        },
+        "startMenuFolder": "r0nix",
+        "headerImage": "icons/installer-header.bmp",
+        "sidebarImage": "icons/installer-sidebar.bmp",
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "windows/nsis-hooks.nsh"
+      },
+      "wix": {
+        "language": [
+          "zh-CN",
+          "en-US"
+        ]
+      }
+    },
+    "macOS": {
+      "bundleName": "r0nix",
+      "minimumSystemVersion": "11.0",
+      "dmg": {
+        "windowSize": {
+          "width": 760,
+          "height": 460
+        },
+        "appPosition": {
+          "x": 210,
+          "y": 230
+        },
+        "applicationFolderPosition": {
+          "x": 550,
+          "y": 230
+        }
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://updates.example.com/r0nix/{{target}}/{{arch}}/{{current_version}}"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEQwQTY4RTMwQzEwRTkwMkQKUldRdGtBN0JNSTZtME43aFpNQkRDL0VIRU5GclNWd003a2xXYXd0aVVIK2l0TlRReTYxMUxIM1oK"
+    }
+  }
+}
+

@@ -1,0 +1,7 @@
+﻿<svg width="1024" height="1024" viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg">
+  <rect x="0" y="0" width="1024" height="1024" rx="220" fill="#0F172A"/>
+  <rect x="260" y="200" width="420" height="520" rx="72" fill="#FFFFFF"/>
+  <rect x="540" y="200" width="140" height="140" rx="30" fill="#0F172A"/>
+  <rect x="520" y="500" width="320" height="250" rx="52" fill="#FFFFFF"/>
+  <text x="605" y="674" fill="#0F172A" font-size="82" font-family="Inter, Segoe UI, Arial, sans-serif" font-weight="800" letter-spacing="3">SVG</text>
+</svg>

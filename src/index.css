@@ -1,0 +1,246 @@
+/* Swiss Design - Global Styles */
+:root {
+  /* Colors - Light Theme */
+  --bg-primary: #ffffff;
+  --text-primary: #18181b;
+  --text-secondary: #71717a;
+  --text-tertiary: #a1a1aa;
+  --accent-primary: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-light: #eff6ff;
+  --border-default: #e4e4e7;
+  --text-on-accent: #ffffff;
+  --chrome-surface-1: #f8fafc;
+  --chrome-surface-2: #f1f5f9;
+  --chrome-surface-3: #ffffff;
+  --chrome-surface-4: #e5e7eb;
+  --chrome-border: #d4d4d8;
+  --chrome-text: #18181b;
+  --chrome-muted: #71717a;
+
+  /* Spacing */
+  --spacing-xs: 4px;
+  --spacing-sm: 8px;
+  --spacing-md: 12px;
+  --spacing-lg: 16px;
+  --spacing-xl: 20px;
+  --spacing-2xl: 24px;
+  --spacing-3xl: 32px;
+
+  /* Border Radius */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+
+  /* Typography */
+  --font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+[data-theme="light"][data-theme-palette="graphite"] {
+  --chrome-surface-1: #f8fafc;
+  --chrome-surface-2: #f1f5f9;
+  --chrome-surface-3: #ffffff;
+  --chrome-surface-4: #e5e7eb;
+  --chrome-border: #d4d4d8;
+  --chrome-text: #18181b;
+  --chrome-muted: #71717a;
+}
+
+[data-theme="light"][data-theme-palette="default"] {
+  --chrome-surface-1: #f5f9ff;
+  --chrome-surface-2: #edf4ff;
+  --chrome-surface-3: #ffffff;
+  --chrome-surface-4: #dbeafe;
+  --chrome-border: #bfdbfe;
+  --chrome-text: #10243e;
+  --chrome-muted: #4a6280;
+}
+
+[data-theme="light"][data-theme-palette="slate"] {
+  --chrome-surface-1: #eef2f7;
+  --chrome-surface-2: #e2e8f0;
+  --chrome-surface-3: #f8fafc;
+  --chrome-surface-4: #cbd5e1;
+  --chrome-border: #94a3b8;
+  --chrome-text: #0f172a;
+  --chrome-muted: #475569;
+}
+
+[data-theme="light"][data-theme-palette="indigo"] {
+  --chrome-surface-1: #f2f2ff;
+  --chrome-surface-2: #e9e8ff;
+  --chrome-surface-3: #ffffff;
+  --chrome-surface-4: #ddd6fe;
+  --chrome-border: #c4b5fd;
+  --chrome-text: #1e1b4b;
+  --chrome-muted: #5b5b8c;
+}
+
+/* Dark Theme */
+[data-theme="dark"] {
+  --bg-primary: #18181b;
+  --text-primary: #fafafa;
+  --text-secondary: #a1a1aa;
+  --text-tertiary: #71717a;
+  --accent-primary: #3b82f6;
+  --accent-hover: #2563eb;
+  --accent-light: #1e3a8a;
+  --border-default: #3f3f46;
+  --text-on-accent: #ffffff;
+  --chrome-surface-1: #18181b;
+  --chrome-surface-2: #111114;
+  --chrome-surface-3: #1f1f23;
+  --chrome-surface-4: #27272a;
+  --chrome-border: #3f3f46;
+  --chrome-text: #f4f4f5;
+  --chrome-muted: #a1a1aa;
+}
+
+[data-theme="dark"][data-theme-palette="slate"] {
+  --chrome-surface-1: #0f172a;
+  --chrome-surface-2: #111827;
+  --chrome-surface-3: #172036;
+  --chrome-surface-4: #25324a;
+  --chrome-border: #334155;
+  --chrome-text: #e2e8f0;
+  --chrome-muted: #94a3b8;
+}
+
+[data-theme="dark"][data-theme-palette="default"] {
+  --chrome-surface-1: #101728;
+  --chrome-surface-2: #0e1422;
+  --chrome-surface-3: #182238;
+  --chrome-surface-4: #23314c;
+  --chrome-border: #3a4d72;
+  --chrome-text: #e3edff;
+  --chrome-muted: #9bb4d8;
+}
+
+[data-theme="dark"][data-theme-palette="indigo"] {
+  --chrome-surface-1: #141329;
+  --chrome-surface-2: #101022;
+  --chrome-surface-3: #1a1933;
+  --chrome-surface-4: #252345;
+  --chrome-border: #3a365d;
+  --chrome-text: #e7e7ff;
+  --chrome-muted: #b3b3d8;
+}
+
+[data-theme="light"][data-theme-accent="blue"] {
+  --accent-primary: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-light: #eff6ff;
+}
+
+[data-theme="light"][data-theme-accent="green"] {
+  --accent-primary: #059669;
+  --accent-hover: #047857;
+  --accent-light: #ecfdf5;
+}
+
+[data-theme="light"][data-theme-accent="orange"] {
+  --accent-primary: #ea580c;
+  --accent-hover: #c2410c;
+  --accent-light: #fff7ed;
+}
+
+[data-theme="light"][data-theme-accent="rose"] {
+  --accent-primary: #e11d48;
+  --accent-hover: #be123c;
+  --accent-light: #fff1f2;
+}
+
+[data-theme="light"][data-theme-accent="violet"] {
+  --accent-primary: #7c3aed;
+  --accent-hover: #6d28d9;
+  --accent-light: #f5f3ff;
+}
+
+[data-theme="dark"][data-theme-accent="blue"] {
+  --accent-primary: #60a5fa;
+  --accent-hover: #3b82f6;
+  --accent-light: rgba(30, 58, 138, 0.36);
+}
+
+[data-theme="dark"][data-theme-accent="green"] {
+  --accent-primary: #34d399;
+  --accent-hover: #10b981;
+  --accent-light: rgba(4, 120, 87, 0.42);
+}
+
+[data-theme="dark"][data-theme-accent="orange"] {
+  --accent-primary: #fb923c;
+  --accent-hover: #f97316;
+  --accent-light: rgba(154, 52, 18, 0.42);
+}
+
+[data-theme="dark"][data-theme-accent="rose"] {
+  --accent-primary: #fb7185;
+  --accent-hover: #f43f5e;
+  --accent-light: rgba(159, 18, 57, 0.42);
+}
+
+[data-theme="dark"][data-theme-accent="violet"] {
+  --accent-primary: #a78bfa;
+  --accent-hover: #8b5cf6;
+  --accent-light: rgba(76, 29, 149, 0.42);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: var(--font-family);
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+#root {
+  width: 100%;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Scrollbar Styling */
+::-webkit-scrollbar {
+  width: 12px;
+  height: 12px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-primary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-default);
+  border-radius: 6px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+/* Button Reset */
+button {
+  font-family: inherit;
+  font-size: inherit;
+  border: none;
+  background: none;
+  cursor: pointer;
+  outline: none;
+}
+
+/* Input Reset */
+input, textarea {
+  font-family: inherit;
+  font-size: inherit;
+  border: none;
+  outline: none;
+}

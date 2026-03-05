@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/r0nix-icon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>r0nix</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        background: #f5f7fb;
+      }
+      #app-splash {
+        position: fixed;
+        inset: 0;
+        z-index: 9999;
+        display: grid;
+        place-items: center;
+        background:
+          radial-gradient(circle at 20% 20%, rgba(59, 130, 246, 0.14), transparent 40%),
+          radial-gradient(circle at 80% 10%, rgba(14, 165, 233, 0.14), transparent 36%),
+          linear-gradient(180deg, #f8fbff 0%, #eef3fa 100%);
+        transition: opacity 220ms ease;
+      }
+      #app-splash.hide {
+        opacity: 0;
+        pointer-events: none;
+      }
+      .splash-card {
+        min-width: 280px;
+        padding: 28px 24px 20px;
+        border-radius: 16px;
+        border: 1px solid rgba(148, 163, 184, 0.24);
+        background: rgba(255, 255, 255, 0.9);
+        box-shadow: 0 24px 45px rgba(15, 23, 42, 0.12);
+        text-align: center;
+        font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      }
+      .splash-brand {
+        width: 52px;
+        height: 52px;
+        object-fit: contain;
+        display: block;
+        margin: 0 auto 12px;
+        border-radius: 12px;
+      }
+      .splash-title {
+        margin: 0;
+        color: #0f172a;
+        font-size: 22px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      .splash-version {
+        margin-top: 4px;
+        color: #475569;
+        font-size: 12px;
+      }
+      .splash-loader {
+        width: 28px;
+        height: 28px;
+        margin: 16px auto 10px;
+        border-radius: 50%;
+        border: 2px solid #bfdbfe;
+        border-top-color: #2563eb;
+        animation: splash-spin 1s linear infinite;
+      }
+      .splash-text {
+        margin: 0;
+        color: #334155;
+        font-size: 12px;
+      }
+      @keyframes splash-spin {
+        from { transform: rotate(0deg); }
+        to { transform: rotate(360deg); }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app-splash" role="status" aria-live="polite">
+      <div class="splash-card">
+        <img class="splash-brand" src="/r0nix-icon.svg" alt="r0nix" />
+        <h1 class="splash-title">r0nix</h1>
+        <div class="splash-version" id="app-splash-version">v%APP_VERSION%</div>
+        <div class="splash-loader"></div>
+        <p class="splash-text">Loading reader workspace...</p>
+      </div>
+    </div>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
