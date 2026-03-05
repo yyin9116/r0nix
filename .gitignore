@@ -5,3 +5,7 @@ src-tauri/updater/*.key
 src-tauri/updater/*.key.*
 *.log
 .DS_Store
+backup/
+demo-image/
+tmp/
+docs/
