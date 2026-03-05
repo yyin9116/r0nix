@@ -650,10 +650,25 @@
 .home-address-bar button {
   background: white;
   border: 1px solid var(--border-default);
-  padding: 6px 16px;
+  padding: 6px 10px;
   border-radius: 6px;
   font-size: 13px;
   font-weight: 600;
+}
+
+.home-address-go-btn,
+.home-address-fav-btn {
+  width: 32px;
+  min-width: 32px;
+  height: 32px;
+  padding: 0 !important;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.home-address-fav-btn[disabled] {
+  opacity: 0.45;
 }
 
 .home-address-hint {
@@ -1171,6 +1186,12 @@
   justify-content: center;
 }
 
+.home-address-fav-btn {
+  width: 32px;
+  height: 32px;
+  min-width: 32px;
+}
+
 .home-favorite-btn:hover,
 .home-favorite-remove:hover,
 .home-recent-locate:hover {
@@ -1453,4 +1474,15 @@
 [data-theme="dark"] .home-recent-item.state-missing {
   background: color-mix(in srgb, #5f1d24 44%, var(--chrome-surface-3));
   border-color: color-mix(in srgb, #ef4444 42%, var(--chrome-border));
+}
+
+/* synced polish */
+.home-recent-chip.strong {
+  font-weight: 700;
+}
+
+.home-recent-chip.read-progress {
+  background: transparent;
+  border-color: var(--accent-light);
+  color: var(--accent-primary);
 }

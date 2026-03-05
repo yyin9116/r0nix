@@ -3,17 +3,18 @@
   ChevronRight,
   Compass,
   FileText,
+  Files,
   FolderOpen,
-  Globe2,
   History,
   Library,
   Pin,
   PinOff,
   Plus,
+  Search,
   Settings,
   Trash2,
   X,
-} from "lucide-react";
+} from "../icons";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AppLanguage, FavoriteItem, FileItem, MainPanel, RecentFileItem, WebTabGroup, WebTabItem } from "../App";
 import type { LibraryCollection } from "./LibraryPanel";
@@ -223,7 +224,7 @@ function TabFavicon({ url, size = 14, className = "edge-favicon" }: { url: strin
   }, [url]);
 
   if (!url || candidates.length === 0 || candidateIndex >= candidates.length) {
-    return <Globe2 size={size} />;
+    return <Search size={size} />;
   }
 
   return (
@@ -1033,7 +1034,9 @@ function Sidebar({
                 title={resourceRootCollapsed ? text.expandResources : text.collapseResources}
               >
                 {resourceRootCollapsed ? <ChevronRight size={12} /> : <ChevronDown size={12} />}
-                <span className="edge-section-label edge-resource-title">{text.resources}</span>
+                <span className="edge-section-label edge-resource-title" aria-label={text.resources} title={text.resources}>
+                  <Files size={14} />
+                </span>
               </button>
 
               <div className={`edge-resource-root-body ${resourceRootCollapsed ? "collapsed" : "open"}`}>

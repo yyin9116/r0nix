@@ -9,3 +9,9 @@ backup/
 demo-image/
 tmp/
 docs/
+/icon
+/icon.*
+/icon*/
+**/*.md
+!README.md
+!readme.md

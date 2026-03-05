@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Download, FolderPlus, Library, Star, StarOff, Trash2 } from "lucide-react";
+import { Download, FolderPlus, Library, Star, StarOff, Trash2 } from "../icons";
 import type { AppLanguage, FavoriteItem, RecentFileItem } from "../App";
 import "./LibraryPanel.css";
 

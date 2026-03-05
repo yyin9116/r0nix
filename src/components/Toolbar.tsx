@@ -11,7 +11,7 @@ import {
   MoreHorizontal,
   Eye,
   Save,
-} from "lucide-react";
+} from "../icons";
 import "./Toolbar.css";
 
 interface ToolbarProps {

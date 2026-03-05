@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent, type WheelEvent } from "react";
-import { ArrowUpToLine, Bug, ChevronLeft, ChevronRight, FileCode2, FileImage, FileText, Files, FolderOpen, Globe2, Palette, PanelLeft, ScanSearch, Search, Star, StarOff, ZoomIn, ZoomOut } from "lucide-react";
+import { ArrowUpToLine, Bug, ChevronLeft, ChevronRight, FileCode2, FileImage, FileText, Files, FolderOpen, Languages, Palette, PanelLeft, ScanSearch, Search, Star, StarOff, ZoomIn, ZoomOut } from "../icons";
 import { OPS, TextLayer } from "pdfjs-dist";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import * as api from "../services/pdfApi";
@@ -2832,7 +2832,7 @@ function PDFViewer({
                 <button className="toolbar-action-btn icon-only has-tip" type="button" data-tip={t.toggleBackground} onClick={cycleViewerBg} aria-label={t.toggleBackground}><Palette size={15} /></button>
                 <button className={`toolbar-action-btn icon-only has-tip ${debugImageType ? "active" : ""}`} type="button" data-tip={t.debugType} onClick={toggleDebugImageType} disabled={!hasDoc} aria-label={t.debugType}><Bug size={15} /></button>
                 <div ref={langMenuRef} className="toolbar-lang">
-                  <button className="toolbar-action-btn icon-only has-tip" type="button" data-tip={t.lang} onClick={() => setLangMenu((v) => !v)} aria-label={t.lang}><Globe2 size={15} /></button>
+                  <button className="toolbar-action-btn icon-only has-tip" type="button" data-tip={t.lang} onClick={() => setLangMenu((v) => !v)} aria-label={t.lang}><Languages size={15} /></button>
                   {langMenu && (
                     <div className="toolbar-lang-menu">
                       <button type="button" onClick={() => { onLanguageChange("zh"); setLangMenu(false); }}>{t.zhName}</button>
@@ -2997,7 +2997,7 @@ function PDFViewer({
             <section className="home-address-card">
               <div className="home-card-title">{homeAddressTitle}</div>
               <div className="home-address-bar">
-                <Globe2 size={15} />
+                <Search size={14} />
                 <input
                   type="text"
                   value={homeUrl}
@@ -3007,21 +3007,29 @@ function PDFViewer({
                     if (e.key === "Enter") openHomeUrl();
                   }}
                 />
-                <button type="button" onClick={openHomeUrl} disabled={!homeUrl.trim()}>
-                  {homeAddressActionText}
+                <button
+                  type="button"
+                  className="home-address-go-btn"
+                  onClick={openHomeUrl}
+                  disabled={!homeUrl.trim()}
+                  title={homeAddressActionText}
+                  aria-label={homeAddressActionText}
+                >
+                  <ChevronRight size={14} />
                 </button>
                 <button
                   type="button"
-                  className="home-favorite-btn"
+                  className="home-favorite-btn home-address-fav-btn"
                   onClick={() => {
                     if (!normalizedHomeUrl) return;
                     const host = normalizedHomeUrl.replace(/^https?:\/\//i, "");
                     onAddWebFavorite(normalizedHomeUrl, host);
                   }}
                   disabled={!homeUrl.trim() || homeUrlSaved}
+                  title={homeUrlSaved ? homeSavedText : homeAddFavoriteText}
+                  aria-label={homeUrlSaved ? homeSavedText : homeAddFavoriteText}
                 >
-                  <Star size={13} />
-                  <span>{homeUrlSaved ? homeSavedText : homeAddFavoriteText}</span>
+                  <Star size={14} />
                 </button>
               </div>
               <p className="home-address-hint">{homeAddressHint}</p>
@@ -3062,7 +3070,7 @@ function PDFViewer({
                       setDragOverFavoriteId("");
                     }}
                   >
-                    {item.type === "web" ? <Globe2 size={14} /> : <FileText size={14} />}
+                    {item.type === "web" ? <Search size={14} /> : <FileText size={14} />}
                     <span className="home-favorite-main">
                       <span className="home-favorite-name">{item.title}</span>
                       <span className="home-favorite-path">{item.target}</span>

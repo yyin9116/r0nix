@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { X, Folder } from "lucide-react";
+import { X, Folder } from "../icons";
 import { open } from '@tauri-apps/plugin-dialog';
 import "./Settings.css";
 

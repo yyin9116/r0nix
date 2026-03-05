@@ -1,4 +1,4 @@
-import { ArrowLeft, Download, ExternalLink, FileText, RefreshCw, ZoomIn, ZoomOut } from "lucide-react";
+import { ArrowLeft, Download, ExternalLink, FileText, RefreshCw, ZoomIn, ZoomOut } from "../icons";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { AppLanguage, ImagePreviewItem } from "../App";
 import { createDefaultQuickLinks, type QuickLinkItem } from "../services/userSettings";

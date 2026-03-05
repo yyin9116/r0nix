@@ -6,7 +6,6 @@ import {
   Download,
   ExternalLink,
   FolderOpen,
-  Globe2,
   House,
   Info,
   Library,
@@ -17,11 +16,12 @@ import {
   Moon,
   Palette,
   Plus,
+  Search,
   Settings2,
   Sun,
   Trash2,
   Upload,
-} from "lucide-react";
+} from "./icons";
 import Sidebar from "./components/Sidebar";
 import LibraryPanel, { type LibraryCollection } from "./components/LibraryPanel";
 import PDFViewer from "./components/PDFViewer";
@@ -2713,7 +2713,7 @@ function App() {
                 </div>
                 <div className="topbar-menu-row">
                   <button type="button" className="topbar-menu-row-btn topbar-action">
-                    <span className="topbar-action-main"><Globe2 size={14} /><span>{text.recentLinksMenu}</span></span>
+                    <span className="topbar-action-main"><Search size={14} /><span>{text.recentLinksMenu}</span></span>
                     <span className="topbar-arrow">{">"}</span>
                   </button>
                   <div className="topbar-submenu">
@@ -2902,7 +2902,7 @@ function App() {
                         setMenuOpen(null);
                       }}
                     >
-                      <span className="topbar-action-main"><Globe2 size={14} /><span>{text.webPanelIframe}</span></span>
+                      <span className="topbar-action-main"><Search size={14} /><span>{text.webPanelIframe}</span></span>
                       {settings.webPanelMode === "iframe" ? <Check size={14} className="topbar-check" /> : null}
                     </button>
                     <button
@@ -2915,7 +2915,7 @@ function App() {
                       }}
                     >
                       <span className="topbar-action-main">
-                        <Globe2 size={14} />
+                        <Search size={14} />
                         <span>{nativeWebviewEnabled ? text.webPanelNative : `${text.webPanelNative} · ${text.desktopOnly}`}</span>
                       </span>
                       {settings.webPanelMode === "native_webview" ? <Check size={14} className="topbar-check" /> : null}
@@ -2924,7 +2924,7 @@ function App() {
                 </div>
                 <div className="topbar-menu-row">
                   <button type="button" className="topbar-menu-row-btn topbar-action">
-                    <span className="topbar-action-main"><Globe2 size={14} /><span>{text.networkMenu}</span></span>
+                    <span className="topbar-action-main"><Search size={14} /><span>{text.networkMenu}</span></span>
                     <span className="topbar-arrow">{">"}</span>
                   </button>
                   <div className="topbar-submenu">
@@ -2937,7 +2937,7 @@ function App() {
                         setMenuOpen(null);
                       }}
                     >
-                      <span className="topbar-action-main"><Globe2 size={14} /><span>{text.proxyEnabled}</span></span>
+                      <span className="topbar-action-main"><Search size={14} /><span>{text.proxyEnabled}</span></span>
                       {settings.proxyEnabled ? <Check size={14} className="topbar-check" /> : null}
                     </button>
                     <button
@@ -2948,7 +2948,7 @@ function App() {
                         setMenuOpen(null);
                       }}
                     >
-                      <span className="topbar-action-main"><Globe2 size={14} /><span>{text.proxyDisabled}</span></span>
+                      <span className="topbar-action-main"><Search size={14} /><span>{text.proxyDisabled}</span></span>
                       {!settings.proxyEnabled ? <Check size={14} className="topbar-check" /> : null}
                     </button>
                     <div className="topbar-divider" />
@@ -2987,7 +2987,7 @@ function App() {
                         setMenuOpen(null);
                       }}
                     >
-                      <span className="topbar-action-main"><Globe2 size={14} /><span>{text.focusWeb}</span></span>
+                      <span className="topbar-action-main"><Search size={14} /><span>{text.focusWeb}</span></span>
                       <span className="topbar-kbd">Ctrl+2</span>
                     </button>
                     <button type="button" className="topbar-action" onClick={() => { openSettingsPanel(); setMenuOpen(null); }}>
@@ -3034,7 +3034,7 @@ function App() {
                     setMenuOpen(null);
                   }}
                 >
-                  <span className="topbar-action-main"><Globe2 size={14} /><span>{text.focusWeb}</span></span>
+                  <span className="topbar-action-main"><Search size={14} /><span>{text.focusWeb}</span></span>
                   <span className="topbar-kbd">Ctrl+2</span>
                 </button>
                 <button type="button" className="topbar-action" onClick={() => { openSettingsPanel(); setMenuOpen(null); }}>

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { Copy, Image as ImageIcon } from "lucide-react";
+import { Copy, Image as ImageIcon } from "../icons";
 import "./ContextMenu.css";
 
 interface ContextMenuProps {

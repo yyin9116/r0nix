@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Bold, Code, FilePlus, Italic, Link, Save } from "lucide-react";
+import { Bold, Code, FilePlus, Italic, Link, Save } from "../icons";
 import * as api from "../services/pdfApi";
 import { markdownCache } from "../App";
 import "./MarkdownEditor.css";
