@@ -1,6 +1,6 @@
 [package]
 name = "r0nix"
-version = "0.5.17"
+version = "0.0.1"
 description = "PDF Reader with Swiss Design"
 authors = ["you"]
 edition = "2021"
