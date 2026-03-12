@@ -1,5 +1,7 @@
 use crate::pdf_manager::PDF_MANAGER;
-use crate::py_render::{get_page_count as get_pdf_page_count, render_page_png, render_page_svg};
+use crate::py_render::{
+    get_page_count as get_pdf_page_count, get_page_images_json, render_page_png, render_page_svg,
+};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use image::codecs::png::PngEncoder;
 use image::{imageops, ColorType, ImageEncoder, RgbaImage};
@@ -7,6 +9,7 @@ use pdf_core::{plan_visible_tiles, PdfInfo, TileReadyPayload, TileRequestAck, Ti
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tauri::{
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size, Url, WebviewUrl,
     WebviewWindowBuilder,
@@ -30,6 +33,20 @@ pub struct ProxyDownloadPayload {
     pub status_code: u16,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct WebviewPdfLinkPayload {
+    tab_id: String,
+    url: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct WebviewNavigatedPayload {
+    tab_id: String,
+    url: String,
+}
+
 fn native_webview_label(tab_id: &str) -> String {
     let mut label = String::from("webtab-");
     for ch in tab_id.chars() {
@@ -47,6 +64,84 @@ fn native_webview_label(tab_id: &str) -> String {
 
 fn parse_webview_url(url: &str) -> Result<Url, String> {
     Url::parse(url).map_err(|err| format!("invalid webview url: {err}"))
+}
+
+fn is_pdf_url(url: &str) -> bool {
+    let lowered_raw = url.to_ascii_lowercase();
+    if lowered_raw.contains(".pdf")
+        || lowered_raw.contains("%2epdf")
+        || lowered_raw.contains("%2fpdf")
+    {
+        return true;
+    }
+
+    if let Ok(parsed) = Url::parse(url) {
+        let path = parsed.path().to_ascii_lowercase();
+        if path.ends_with(".pdf") {
+            return true;
+        }
+        if path.contains("/pdf/") || path.contains("/pdfs/") || path.ends_with("/pdf") {
+            return true;
+        }
+        if path.contains("/download") && path.contains("pdf") {
+            return true;
+        }
+        for segment in path.split('/') {
+            if segment == "pdf" || segment == "pdfs" {
+                return true;
+            }
+        }
+        for (key, value) in parsed.query_pairs() {
+            let key = key.to_ascii_lowercase();
+            let value = value.to_ascii_lowercase();
+            if value.contains(".pdf") || value == "pdf" || value.contains("application/pdf") {
+                return true;
+            }
+            if (key == "format"
+                || key == "type"
+                || key == "mime"
+                || key == "output"
+                || key == "file"
+                || key == "filename")
+                && value.contains("pdf")
+            {
+                return true;
+            }
+        }
+        if parsed
+            .query()
+            .map(|value| {
+                let query = value.to_ascii_lowercase();
+                query.contains(".pdf")
+                    || query.contains("application/pdf")
+                    || query.contains("format=pdf")
+                    || query.contains("type=pdf")
+                    || query.contains("mime=pdf")
+                    || query.contains("output=pdf")
+            })
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        if parsed
+            .fragment()
+            .map(|value| {
+                let fragment = value.to_ascii_lowercase();
+                fragment.contains(".pdf")
+                    || fragment.contains("application/pdf")
+                    || fragment.contains("format=pdf")
+                    || fragment.contains("type=pdf")
+            })
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        return false;
+    }
+    lowered_raw.contains(".pdf")
+        || lowered_raw.contains("%2epdf")
+        || lowered_raw.contains("/pdf/")
+        || lowered_raw.contains("/pdfs/")
 }
 
 #[tauri::command]
@@ -171,20 +266,32 @@ pub async fn open_pdf(file_id: String, path: String) -> Result<PdfInfo, String> 
     let mut info = manager
         .open_document(file_id, &path)
         .map_err(|err| err.to_string())?;
+    drop(manager);
 
-    match get_pdf_page_count(&path) {
-        Ok(page_count) => {
-            manager
-                .set_page_count(&info.file_id, page_count)
-                .map_err(|err| err.to_string())?;
-            info.page_count = page_count;
-            eprintln!(
-                "[open_pdf] success file_id={} page_count={}",
-                info.file_id, info.page_count
-            );
+    let page_count_task_path = path.clone();
+    let page_count_task = tokio::task::spawn_blocking(move || get_pdf_page_count(&page_count_task_path));
+
+    match tokio::time::timeout(Duration::from_secs(8), page_count_task).await {
+        Ok(Ok(Ok(page_count))) => {
+            let mut manager = PDF_MANAGER.lock().await;
+            if let Err(err) = manager.set_page_count(&info.file_id, page_count) {
+                eprintln!("[open_pdf] set page count failed: {}", err);
+            } else {
+                info.page_count = page_count;
+                eprintln!(
+                    "[open_pdf] success file_id={} page_count={}",
+                    info.file_id, info.page_count
+                );
+            }
         }
-        Err(err) => {
+        Ok(Ok(Err(err))) => {
             eprintln!("[open_pdf] page count failed: {}", err);
+        }
+        Ok(Err(err)) => {
+            eprintln!("[open_pdf] page count task failed: {}", err);
+        }
+        Err(_) => {
+            eprintln!("[open_pdf] page count timed out, fallback to lazy loading");
         }
     }
 
@@ -361,6 +468,16 @@ pub async fn export_page_svg(file_id: String, page_no: usize) -> Result<String, 
 }
 
 #[tauri::command]
+pub async fn get_page_images(file_id: String, page_no: usize) -> Result<String, String> {
+    eprintln!("[get_page_images] file_id={} page={}", file_id, page_no);
+    let path = resolve_file_path(&file_id).await?;
+
+    tokio::task::spawn_blocking(move || get_page_images_json(&path, page_no))
+        .await
+        .map_err(|err| format!("get_page_images task failed: {err}"))?
+}
+
+#[tauri::command]
 pub async fn download_pdf_via_proxy(
     url: String,
     proxy_url: Option<String>,
@@ -455,6 +572,25 @@ pub async fn create_or_show_webview_tab(
         .skip_taskbar(true)
         .user_agent(DEFAULT_NATIVE_WEBVIEW_UA)
         .title(title.as_deref().unwrap_or("Web Tab"));
+    let nav_app = app.clone();
+    let nav_tab_id = tab_id.clone();
+    builder = builder.on_navigation(move |url| {
+        let next = url.as_str();
+        if is_pdf_url(next) {
+            let payload = WebviewPdfLinkPayload {
+                tab_id: nav_tab_id.clone(),
+                url: next.to_string(),
+            };
+            let _ = nav_app.emit("r0nix://webview-pdf-link", payload);
+            return false;
+        }
+        let payload = WebviewNavigatedPayload {
+            tab_id: nav_tab_id.clone(),
+            url: next.to_string(),
+        };
+        let _ = nav_app.emit("r0nix://webview-navigated", payload);
+        true
+    });
     if let Some(main) = app.get_webview_window("main") {
         if let Ok(size) = main.inner_size() {
             let width = (size.width as f64 * 0.82).max(920.0);

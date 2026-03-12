@@ -1,4 +1,3 @@
-import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./index.css";
@@ -11,9 +10,7 @@ const splashStartedAt =
     : Date.now();
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
+  <App />
 );
 
 const splashVersionEl = document.getElementById("app-splash-version");
@@ -29,12 +26,24 @@ if (splashEl) {
       : Date.now();
   const elapsed = Math.max(0, now - splashStartedAt);
   const waitMs = Math.max(0, SPLASH_MIN_DURATION_MS - elapsed);
-  window.setTimeout(() => {
-    requestAnimationFrame(() => {
-      splashEl.classList.add("hide");
-      window.setTimeout(() => {
+  const hideSplash = () => {
+    if (!splashEl.isConnected) return;
+    splashEl.classList.add("hide");
+    window.setTimeout(() => {
+      if (splashEl.isConnected) {
         splashEl.remove();
-      }, 260);
-    });
+      }
+    }, 260);
+  };
+
+  // In hidden/paused WebView (e.g. embedded preview), rAF may never fire.
+  window.setTimeout(() => {
+    hideSplash();
   }, waitMs);
+
+  window.setTimeout(() => {
+    if (splashEl.isConnected) {
+      hideSplash();
+    }
+  }, waitMs + 800);
 }

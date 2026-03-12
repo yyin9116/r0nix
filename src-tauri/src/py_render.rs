@@ -124,3 +124,83 @@ pub fn render_page_svg(path: &str, page_no: usize) -> Result<String, String> {
     })
     .map_err(|err| format!("pymupdf svg export failed: {err}"))
 }
+
+
+pub fn get_page_images_json(path: &str, page_no: usize) -> Result<String, String> {
+    ensure_python_runtime();
+    let path_owned = path.to_string();
+
+    Python::with_gil(|py| -> PyResult<String> {
+        let locals = PyDict::new_bound(py);
+        locals.set_item("path", path_owned.as_str())?;
+        locals.set_item("page_no", page_no as i32)?;
+
+        py.run_bound(
+            r#"
+import fitz
+import json
+
+doc = fitz.open(path)
+try:
+    total = int(doc.page_count)
+    if page_no <= 0 or page_no > total:
+        raise ValueError(f"page {page_no} out of range (1..={total})")
+
+    page = doc.load_page(page_no - 1)
+    page_w = float(page.rect.width or 1.0)
+    page_h = float(page.rect.height or 1.0)
+
+    items = []
+    for image in page.get_images(full=True):
+        xref = int(image[0])
+        width = int(image[2]) if len(image) > 2 else 0
+        height = int(image[3]) if len(image) > 3 else 0
+
+        ext = ""
+        try:
+            ext = str(doc.extract_image(xref).get("ext", ""))
+        except Exception:
+            ext = ""
+
+        rects = []
+        try:
+            rects = page.get_image_rects(xref)
+        except Exception:
+            rects = []
+
+        if not rects:
+            continue
+
+        for rect in rects:
+            x0 = max(0.0, min(1.0, float(rect.x0) / page_w))
+            y0 = max(0.0, min(1.0, float(rect.y0) / page_h))
+            x1 = max(0.0, min(1.0, float(rect.x1) / page_w))
+            y1 = max(0.0, min(1.0, float(rect.y1) / page_h))
+            left = min(x0, x1)
+            right = max(x0, x1)
+            top = min(y0, y1)
+            bottom = max(y0, y1)
+            items.append({
+                "xref": xref,
+                "pageNumber": int(page_no),
+                "width": width,
+                "height": height,
+                "extension": ext,
+                "bbox": [left, top, right, bottom],
+            })
+
+    result = json.dumps(items)
+finally:
+    doc.close()
+"#,
+            None,
+            Some(&locals),
+        )?;
+
+        let result_obj = locals
+            .get_item("result")?
+            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("missing result from python"))?;
+        result_obj.extract()
+    })
+    .map_err(|err| format!("pymupdf list images failed: {err}"))
+}

@@ -1,9 +1,12 @@
-export type DefaultExportFormat = "png" | "jpg" | "svg";
+import { START_PAGE_URL } from "../constants/startPage";
+
+export type DefaultExportFormat = "png" | "jpg";
 export type ThemeMode = "system" | "light" | "dark";
 export type ThemePalette = "default" | "graphite" | "slate" | "indigo";
-export type ThemeAccent = "blue" | "green" | "orange" | "rose" | "violet";
+export type ThemeAccent = "zinc" | "blue" | "green" | "orange" | "rose" | "violet";
 export type WebPdfOpenMode = "direct" | "download_then_open";
 export type WebPanelMode = "iframe" | "native_webview";
+export type AppLanguage = "zh-CN" | "en-US";
 
 export interface QuickLinkItem {
   id: string;
@@ -13,16 +16,17 @@ export interface QuickLinkItem {
 
 export function createDefaultQuickLinks(): QuickLinkItem[] {
   return [
-    { id: "ql-lime", title: "Lime Start", url: "https://limestart.cn" },
-    { id: "ql-google", title: "Google", url: "https://www.google.com" },
-    { id: "ql-github", title: "GitHub", url: "https://github.com" },
-    { id: "ql-wiki", title: "Wikipedia", url: "https://www.wikipedia.org" },
+    { id: "ql-arxiv", title: "arXiv", url: "https://arxiv.org" },
+    { id: "ql-scholar", title: "Google Scholar", url: "https://scholar.google.com" },
+    { id: "ql-semantic", title: "Semantic Scholar", url: "https://www.semanticscholar.org" },
+    { id: "ql-pubmed", title: "PubMed", url: "https://pubmed.ncbi.nlm.nih.gov" },
   ];
 }
 
 export interface UserSettings {
   defaultExportFormat: DefaultExportFormat;
   defaultSaveDir: string;
+  aiModelPath: string;
   openLinksInsideApp: boolean;
   proxyEnabled: boolean;
   proxyUrl: string;
@@ -33,32 +37,36 @@ export interface UserSettings {
   webPanelMode: WebPanelMode;
   newTabDefaultUrl: string;
   quickLinks: QuickLinkItem[];
+  language: AppLanguage;
 }
 
 export const USER_SETTINGS_KEY = "pdf_reader_user_settings_v2";
 export const USER_SETTINGS_EVENT = "pdf-reader-settings-updated";
 
 const DEFAULT_SETTINGS: UserSettings = {
-  defaultExportFormat: "svg",
+  defaultExportFormat: "png",
   defaultSaveDir: "",
+  aiModelPath: "",
   openLinksInsideApp: true,
   proxyEnabled: false,
   proxyUrl: "",
   themeMode: "system",
-  themePalette: "default",
-  themeAccent: "blue",
-  webPdfOpenMode: "direct",
-  webPanelMode: "iframe",
-  newTabDefaultUrl: "",
+  themePalette: "graphite",
+  themeAccent: "zinc",
+  webPdfOpenMode: "download_then_open",
+  webPanelMode: "native_webview",
+  newTabDefaultUrl: START_PAGE_URL,
   quickLinks: createDefaultQuickLinks(),
+  language: "zh-CN",
 };
 
 export function sanitizeUserSettings(raw: unknown): UserSettings {
   const parsed = raw && typeof raw === "object" ? (raw as Partial<UserSettings>) : {};
   const fmt = parsed.defaultExportFormat;
   const defaultExportFormat: DefaultExportFormat =
-    fmt === "png" || fmt === "jpg" || fmt === "svg" ? fmt : DEFAULT_SETTINGS.defaultExportFormat;
+    fmt === "png" || fmt === "jpg" ? fmt : DEFAULT_SETTINGS.defaultExportFormat;
   const defaultSaveDir = typeof parsed.defaultSaveDir === "string" ? parsed.defaultSaveDir : "";
+  const aiModelPath = typeof parsed.aiModelPath === "string" ? parsed.aiModelPath : "";
   const openLinksInsideApp =
     typeof parsed.openLinksInsideApp === "boolean"
       ? parsed.openLinksInsideApp
@@ -66,6 +74,7 @@ export function sanitizeUserSettings(raw: unknown): UserSettings {
   const proxyEnabled =
     typeof parsed.proxyEnabled === "boolean" ? parsed.proxyEnabled : DEFAULT_SETTINGS.proxyEnabled;
   const proxyUrl = typeof parsed.proxyUrl === "string" ? parsed.proxyUrl : DEFAULT_SETTINGS.proxyUrl;
+  const legacyAccentMigration = parsed.themeAccent === "blue" && (parsed.themePalette === undefined || parsed.themePalette === "default");
   const themeMode: ThemeMode =
     parsed.themeMode === "light" || parsed.themeMode === "dark" || parsed.themeMode === "system"
       ? parsed.themeMode
@@ -75,27 +84,33 @@ export function sanitizeUserSettings(raw: unknown): UserSettings {
     parsed.themePalette === "slate" ||
     parsed.themePalette === "indigo" ||
     parsed.themePalette === "graphite"
-      ? parsed.themePalette
+      ? legacyAccentMigration && parsed.themePalette === "default"
+        ? "graphite"
+        : parsed.themePalette
       : DEFAULT_SETTINGS.themePalette;
   const themeAccent: ThemeAccent =
+    parsed.themeAccent === "zinc" ||
     parsed.themeAccent === "green" ||
     parsed.themeAccent === "orange" ||
     parsed.themeAccent === "rose" ||
     parsed.themeAccent === "violet" ||
     parsed.themeAccent === "blue"
-      ? parsed.themeAccent
+      ? legacyAccentMigration
+        ? "zinc"
+        : parsed.themeAccent
       : DEFAULT_SETTINGS.themeAccent;
   const webPdfOpenMode: WebPdfOpenMode =
     parsed.webPdfOpenMode === "download_then_open" || parsed.webPdfOpenMode === "direct"
       ? parsed.webPdfOpenMode
       : DEFAULT_SETTINGS.webPdfOpenMode;
   const webPanelMode: WebPanelMode =
-    parsed.webPanelMode === "iframe"
-      ? "iframe"
+    parsed.webPanelMode === "iframe" || parsed.webPanelMode === "native_webview"
+      ? parsed.webPanelMode
       : DEFAULT_SETTINGS.webPanelMode;
   const newTabDefaultUrl =
     typeof parsed.newTabDefaultUrl === "string" ? parsed.newTabDefaultUrl : DEFAULT_SETTINGS.newTabDefaultUrl;
   const parsedQuickLinks = Array.isArray(parsed.quickLinks) ? parsed.quickLinks : [];
+  const language: AppLanguage = parsed.language === "en-US" || parsed.language === "zh-CN" ? parsed.language : DEFAULT_SETTINGS.language;
   const quickLinks = parsedQuickLinks
     .filter(
       (item): item is QuickLinkItem =>
@@ -109,6 +124,7 @@ export function sanitizeUserSettings(raw: unknown): UserSettings {
   return {
     defaultExportFormat,
     defaultSaveDir,
+    aiModelPath,
     openLinksInsideApp,
     proxyEnabled,
     proxyUrl,
@@ -119,6 +135,7 @@ export function sanitizeUserSettings(raw: unknown): UserSettings {
     webPanelMode,
     newTabDefaultUrl,
     quickLinks: quickLinks.length > 0 ? quickLinks : DEFAULT_SETTINGS.quickLinks,
+    language,
   };
 }
 

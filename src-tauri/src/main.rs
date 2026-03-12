@@ -88,6 +88,9 @@ fn main() {
             }
             match event {
                 WindowEvent::CloseRequested { api, .. } => {
+                    if cfg!(debug_assertions) {
+                        return;
+                    }
                     api.prevent_close();
                     let _ = window.hide();
                 }
@@ -114,6 +117,7 @@ fn main() {
             r0nix::tauri_commands::cancel_tile_request,
             r0nix::tauri_commands::export_page_png,
             r0nix::tauri_commands::export_page_svg,
+            r0nix::tauri_commands::get_page_images,
             r0nix::tauri_commands::download_pdf_via_proxy,
             r0nix::tauri_commands::create_or_show_webview_tab,
             r0nix::tauri_commands::navigate_webview_tab,

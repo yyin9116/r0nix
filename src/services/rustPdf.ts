@@ -99,6 +99,14 @@ export async function exportPageSvg(
   return await invoke<string>("export_page_svg", { fileId, pageNo });
 }
 
+
+export async function getPageImages(
+  fileId: string,
+  pageNo: number
+): Promise<string> {
+  return await invoke<string>("get_page_images", { fileId, pageNo });
+}
+
 function base64ToBytes(base64: string): Uint8Array {
   const binary = atob(base64);
   const bytes = new Uint8Array(binary.length);

@@ -35,12 +35,50 @@ function generateBrowserFileId() {
   return `browser-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = window.setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+
+    promise.then(
+      (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        window.clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
+}
+
 async function uploadFileInBrowserLocal(file: File): Promise<FileInfo> {
-  const ext = file.name.split('.').pop()?.toLowerCase();
-  if (ext !== 'pdf') {
-    throw new Error('Browser fallback currently supports PDF files only');
-  }
   const fileId = generateBrowserFileId();
+  const ext = file.name.split('.').pop()?.toLowerCase();
+  if (ext === 'md' || ext === 'markdown') {
+    const text = await file.text();
+    const words = text.trim() ? text.trim().split(/\s+/).length : 0;
+    const info: FileInfo = {
+      id: fileId,
+      name: file.name,
+      type: 'markdown',
+      path: file.name,
+      meta: {
+        words,
+        readTime: Math.max(1, Math.ceil(words / 220)),
+        size: `${(file.size / 1024).toFixed(1)} KB`,
+      },
+    };
+    browserLocalFiles.set(fileId, info);
+    return info;
+  }
+
+  if (ext !== 'pdf') {
+    throw new Error('Browser fallback currently supports PDF/Markdown files only');
+  }
+
   const data = new Uint8Array(await file.arrayBuffer());
   const doc = await loadPdfDocument(fileId, data);
   const info: FileInfo = {
@@ -117,11 +155,11 @@ export async function openFile(path: string): Promise<FileInfo> {
   debugLog('api.openFile', 'start', { path, isTauri });
   if (isTauri) {
     const fileId = `file-${Date.now()}`;
-    const info = await rustPdf.openPdf(fileId, path);
+    const info = await withTimeout(rustPdf.openPdf(fileId, path), 10000, 'Rust open_pdf');
     debugLog('api.openFile', 'rust open_pdf success', info);
     let pages = info.page_count;
     try {
-      const data = await rustPdf.readOpenedPdfBytes(info.file_id);
+      const data = await withTimeout(rustPdf.readOpenedPdfBytes(info.file_id), 8000, 'Rust read_opened_pdf_bytes');
       const doc = await loadPdfDocument(info.file_id, data);
       pages = doc.numPages;
       debugLog('api.openFile', 'pdfjs loaded', { pages });
@@ -160,11 +198,71 @@ export async function openFile(path: string): Promise<FileInfo> {
   }
 }
 
+export async function openMarkdownFile(path: string): Promise<FileInfo> {
+  const fileName = path.split(/[\\/]/).pop() || path;
+  const ext = fileName.split('.').pop()?.toLowerCase();
+  if (ext !== 'md' && ext !== 'markdown') {
+    throw new Error('Only markdown files are supported');
+  }
+
+  if (isTauri) {
+    const { readTextFile } = await import('@tauri-apps/plugin-fs');
+    const content = await readTextFile(path);
+    const words = content.trim() ? content.trim().split(/\s+/).length : 0;
+    return {
+      id: `md-${Date.now()}`,
+      name: fileName,
+      type: 'markdown',
+      path,
+      meta: {
+        words,
+        readTime: Math.max(1, Math.ceil(words / 220)),
+        size: `${(new TextEncoder().encode(content).length / 1024).toFixed(1)} KB`,
+      },
+    };
+  }
+
+  const response = await fetch(`${BROWSER_API_BASE}/api/files/open`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to open markdown file: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function readMarkdownText(path: string): Promise<string> {
+  if (isTauri) {
+    const { readTextFile } = await import('@tauri-apps/plugin-fs');
+    return readTextFile(path);
+  }
+
+  const response = await fetch(`${BROWSER_API_BASE}/api/markdown/by-path`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to read markdown: ${response.statusText}`);
+  }
+  const payload = (await response.json()) as { content?: string };
+  return payload.content || '';
+}
+
 export async function uploadFile(file: File): Promise<FileInfo> {
   if (isTauri) {
-    const { writeFile } = await import('@tauri-apps/plugin-fs');
+    const { writeFile, writeTextFile } = await import('@tauri-apps/plugin-fs');
 
     const tempPath = `${await getTempDir()}/${file.name}`;
+    const ext = file.name.split('.').pop()?.toLowerCase();
+    if (ext === 'md' || ext === 'markdown') {
+      const content = await file.text();
+      await writeTextFile(tempPath, content);
+      return openMarkdownFile(tempPath);
+    }
+
     const arrayBuffer = await file.arrayBuffer();
     await writeFile(tempPath, new Uint8Array(arrayBuffer));
 
@@ -354,21 +452,51 @@ export async function getPDFInfo(fileId: string): Promise<{
   }
 }
 
-// ============ PDF Image Extraction (Python backend only) ============
+// ============ PDF Image Extraction ============
 
-export async function getPDFImages(fileId: string): Promise<{ images: PDFImageInfo[] }> {
+export async function getPDFImages(
+  fileId: string,
+  pageNumber?: number
+): Promise<{ images: PDFImageInfo[] }> {
   if (isTauri) {
-    console.warn('[API Adapter] getPDFImages not implemented in Rust backend yet');
-    return { images: [] };
-  } else {
-    const response = await fetch(`http://localhost:8000/api/pdf/${fileId}/images`);
-
-    if (!response.ok) {
-      throw new Error(`Failed to get PDF images: ${response.statusText}`);
-    }
-
-    return response.json();
+    if (!pageNumber || pageNumber < 1) return { images: [] };
+    const json = await rustPdf.getPageImages(fileId, pageNumber);
+    const raw = JSON.parse(json) as unknown;
+    const images = Array.isArray(raw)
+      ? raw
+          .map((item): PDFImageInfo | null => {
+            if (!item || typeof item !== 'object') return null;
+            const obj = item as Record<string, unknown>;
+            const bboxRaw = obj.bbox;
+            const bbox =
+              Array.isArray(bboxRaw) && bboxRaw.length === 4
+                ? bboxRaw.map((v) => Number(v)).filter((v) => Number.isFinite(v))
+                : undefined;
+            return {
+              xref: Number(obj.xref) || 0,
+              pageNumber: Number(obj.pageNumber) || pageNumber,
+              width: Number(obj.width) || 0,
+              height: Number(obj.height) || 0,
+              extension: typeof obj.extension === 'string' ? obj.extension : '',
+              bbox: bbox && bbox.length === 4 ? bbox : undefined,
+            };
+          })
+          .filter((item): item is PDFImageInfo => Boolean(item))
+      : [];
+    return { images };
   }
+
+  const response = await fetch(`http://localhost:8000/api/pdf/${fileId}/images`);
+  if (!response.ok) {
+    throw new Error(`Failed to get PDF images: ${response.statusText}`);
+  }
+
+  const payload = (await response.json()) as { images?: PDFImageInfo[] };
+  const images = Array.isArray(payload.images) ? payload.images : [];
+  if (!pageNumber) return { images };
+  return {
+    images: images.filter((img) => Number(img.pageNumber) === pageNumber),
+  };
 }
 
 export async function getPDFImage(fileId: string, xref: number): Promise<Blob> {

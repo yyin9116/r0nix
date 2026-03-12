@@ -1,161 +1,115 @@
-import { useEffect, useRef } from "react";
-import { Copy, Image as ImageIcon } from "../icons";
-import "./ContextMenu.css";
+import React, { useEffect } from "react";
+import { Download, FileImage, X, MessageSquarePlus, Copy } from "lucide-react";
+
+export interface ContextMenuAction {
+  id: string;
+  label: string;
+  onSelect: () => void;
+  icon?: React.ReactNode;
+  disabled?: boolean;
+}
 
 interface ContextMenuProps {
   x: number;
   y: number;
+  isOpen: boolean;
+  title?: string;
+  actions: ContextMenuAction[];
   onClose: () => void;
-  onDownload: (format?: string) => void;
-  onCopy: () => void;
-  type: 'image' | 'page' | 'selection';
-  data?: any;
 }
 
-function ContextMenu({
-  x,
-  y,
-  onClose,
-  onDownload,
-  onCopy,
-  type,
-  data,
-}: ContextMenuProps) {
-  const menuRef = useRef<HTMLDivElement>(null);
+export function ContextMenu({ x, y, isOpen, title, actions, onClose }: ContextMenuProps) {
+  const adjustedX = Math.min(x, window.innerWidth - 260);
+  const adjustedY = Math.min(y, window.innerHeight - 320);
 
   useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        onClose();
-      }
+    if (!isOpen) return;
+    const handleGlobalClick = () => onClose();
+    const handleKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
     };
-
-    const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        onClose();
-      }
-    };
-
-    document.addEventListener("mousedown", handleClickOutside);
-    document.addEventListener("keydown", handleEscape);
-
+    window.addEventListener("mousedown", handleGlobalClick);
+    window.addEventListener("keydown", handleKey);
     return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-      document.removeEventListener("keydown", handleEscape);
+      window.removeEventListener("mousedown", handleGlobalClick);
+      window.removeEventListener("keydown", handleKey);
     };
-  }, [onClose]);
+  }, [isOpen, onClose]);
 
-  const handleMouseDown = (e: React.MouseEvent, action: () => void) => {
-    e.preventDefault();
-    e.stopPropagation();
-    action();
-    onClose();
-  };
+  if (!isOpen) return null;
 
   return (
     <div
-      ref={menuRef}
-      className="context-menu"
-      style={{ left: x, top: y }}
-      onMouseDown={(e) => e.stopPropagation()}
-      onContextMenu={(e) => e.preventDefault()}
+      style={{ top: adjustedY, left: adjustedX }}
+      className="fixed z-[120] w-64 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-xl border border-zinc-200/80 dark:border-zinc-800/80 shadow-2xl rounded-xl overflow-hidden font-sans text-[13px] text-zinc-800 dark:text-zinc-200"
+      onMouseDown={(event) => event.stopPropagation()}
     >
-      {/* Header Info */}
-      {type === 'image' && data?.imageInfo && (
-        <div className="context-menu-header">
-          <ImageIcon size={14} />
-          <span>
-            {data.imageInfo.width} × {data.imageInfo.height}
-            {data.imageInfo.extension && <span style={{ opacity: 0.7, marginLeft: 4 }}>• {data.imageInfo.extension.toUpperCase()}</span>}
-          </span>
-        </div>
-      )}
-      {type === 'selection' && (
-        <div className="context-menu-header">
-          <span>Selected Area</span>
-        </div>
-      )}
-      {type === 'page' && (
-        <div className="context-menu-header">
-          <span>Page {data?.pageNumber}</span>
-        </div>
-      )}
-
-      <div className="context-menu-group">
-        <div className="context-menu-label">Save as</div>
-
-        {/* Selection / Page Export Options */}
-        {(type === 'selection' || type === 'page') && (
-          <>
-           <button
-             className="context-menu-item"
-             onMouseDown={(e) => handleMouseDown(e, () => onDownload("svg"))}
-           >
-             <span className="format-badge">SVG</span>
-             <span>Save as Vector SVG</span>
-           </button>
-           <button
-             className="context-menu-item"
-             onMouseDown={(e) => handleMouseDown(e, () => onDownload("png"))}
-           >
-             <span className="format-badge">PNG</span>
-             <span>Save as PNG Image</span>
-           </button>
-          </>
-        )}
-
-        {/* Image Export Options */}
-        {type === 'image' && (
-          <>
-            <button
-              className="context-menu-item"
-              onMouseDown={(e) => handleMouseDown(e, () => onDownload("png"))}
-            >
-              <span className="format-badge">PNG</span>
-              <span>Save as PNG</span>
-            </button>
-
-            <button
-              className="context-menu-item"
-              onMouseDown={(e) => handleMouseDown(e, () => onDownload("jpg"))}
-            >
-              <span className="format-badge">JPG</span>
-              <span>Save as JPG</span>
-            </button>
-
-            <button
-              className="context-menu-item"
-              onMouseDown={(e) => handleMouseDown(e, () => onDownload("svg"))}
-            >
-              <span className="format-badge">SVG</span>
-              <span>Save as SVG</span>
-            </button>
-
-            <button
-              className="context-menu-item"
-              onMouseDown={(e) => handleMouseDown(e, () => onDownload("original"))}
-            >
-              <span className="format-badge">Raw</span>
-              <span>Save Original</span>
-            </button>
-          </>
-        )}
-      </div>
-
-      {type === 'image' && (
-        <>
-          <div className="context-menu-divider"></div>
-          <button
-            className="context-menu-item"
-            onMouseDown={(e) => handleMouseDown(e, onCopy)}
-          >
-            <Copy size={16} />
-            <span>Copy Image</span>
+      <div className="p-1.5 flex flex-col gap-0.5">
+        <div className="px-2 py-1.5 text-[11px] font-semibold text-zinc-400 dark:text-zinc-500 uppercase tracking-wider flex items-center justify-between">
+          <span>{title || "Actions"}</span>
+          <button className="p-1 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-400 dark:text-zinc-500" onClick={onClose} title="Close">
+            <X size={12} />
           </button>
-        </>
-      )}
+        </div>
+
+        {actions.map((action) => (
+          <button
+            key={action.id}
+            onClick={() => {
+              if (action.disabled) return;
+              action.onSelect();
+              onClose();
+            }}
+            disabled={action.disabled}
+            className="w-full flex items-center justify-between px-2 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors text-left group disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <div className="flex items-center gap-2.5 text-zinc-700 dark:text-zinc-300 group-hover:text-zinc-900 dark:group-hover:text-zinc-100">
+              {action.icon || <Download size={14} />}
+              <span className="font-medium">{action.label}</span>
+            </div>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
 
-export default ContextMenu;
+export function buildViewerContextActions(options: {
+  onCopyPageLabel: () => void;
+  onAddNote: () => void;
+  onExportPng: () => void;
+  onClose: () => void;
+  labels?: {
+    copyPageReference: string;
+    addNoteHere: string;
+    exportCurrentPng: string;
+    cancel: string;
+  };
+}): ContextMenuAction[] {
+  return [
+    {
+      id: "copy-page",
+      label: options.labels?.copyPageReference || "Copy page reference",
+      icon: <Copy size={14} />,
+      onSelect: options.onCopyPageLabel,
+    },
+    {
+      id: "add-note",
+      label: options.labels?.addNoteHere || "Add note here",
+      icon: <MessageSquarePlus size={14} />,
+      onSelect: options.onAddNote,
+    },
+    {
+      id: "export-png",
+      label: options.labels?.exportCurrentPng || "Export current page PNG",
+      icon: <FileImage size={14} />,
+      onSelect: options.onExportPng,
+    },
+    {
+      id: "close",
+      label: options.labels?.cancel || "Cancel",
+      icon: <X size={14} />,
+      onSelect: options.onClose,
+    },
+  ];
+}
