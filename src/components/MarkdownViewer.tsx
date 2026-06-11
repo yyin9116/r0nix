@@ -108,7 +108,8 @@ function renderInline(text: string, keyPrefix: string, onOpenExternal?: (url: st
           <button
             key={`${keyPrefix}-link-${start}`}
             type="button"
-            className="text-teal-600 dark:text-teal-400 underline underline-offset-2 hover:text-teal-700 dark:hover:text-teal-300 transition-colors"
+            className="underline underline-offset-2 transition-colors hover:opacity-85"
+            style={{ color: "var(--reader-accent)" }}
             onClick={() => onOpenExternal(url)}
             title={url}
           >
@@ -122,7 +123,8 @@ function renderInline(text: string, keyPrefix: string, onOpenExternal?: (url: st
             href={url}
             target="_blank"
             rel="noopener noreferrer"
-            className="text-teal-600 dark:text-teal-400 underline underline-offset-2 hover:text-teal-700 dark:hover:text-teal-300 transition-colors"
+            className="underline underline-offset-2 transition-colors hover:opacity-85"
+            style={{ color: "var(--reader-accent)" }}
             title={url}
           >
             {label}
@@ -297,7 +299,7 @@ export function MarkdownViewer({
   };
 
   const renderPreviewPane = () => (
-    <div className="h-full overflow-auto bg-gray-50 dark:bg-gray-950">
+    <div className="h-full overflow-auto bg-zinc-50 dark:bg-zinc-950">
       <article className="mx-auto w-full max-w-4xl px-6 py-8 space-y-1">
         {draft.trim().length === 0 ? (
           <div className="rounded-2xl border border-dashed border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-8 text-center text-sm text-gray-500 dark:text-gray-400">
@@ -311,7 +313,7 @@ export function MarkdownViewer({
   );
 
   const renderEditorPane = () => (
-    <div className="h-full p-4 bg-gray-50 dark:bg-gray-950">
+    <div className="h-full p-4 bg-zinc-50 dark:bg-zinc-950">
       <textarea
         value={draft}
         onChange={(event) => {
@@ -319,14 +321,14 @@ export function MarkdownViewer({
           setDraft(next);
           onContentChange?.(next);
         }}
-        className="h-full w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4 text-sm leading-6 font-mono text-gray-800 dark:text-gray-100 resize-none focus:outline-none focus:ring-2 focus:ring-teal-500"
+        className="h-full w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4 text-sm leading-6 font-mono text-gray-800 dark:text-gray-100 resize-none focus:outline-none focus:ring-2 focus:ring-[var(--reader-accent)]"
         spellCheck={false}
       />
     </div>
   );
 
   return (
-    <div className="flex h-full bg-gray-50 dark:bg-gray-950 text-gray-900 dark:text-gray-100 overflow-hidden">
+    <div className="flex h-full bg-zinc-50 dark:bg-zinc-950 text-gray-900 dark:text-gray-100 overflow-hidden">
       <div
         className={`${isOutlineOpen ? "w-64" : "w-0"} transition-[width] duration-200 ease-out bg-white dark:bg-gray-900 border-r border-gray-100 dark:border-gray-800 hidden md:flex md:flex-col shrink-0 overflow-hidden`}
       >
@@ -428,7 +430,8 @@ export function MarkdownViewer({
                   void handleSave();
                 }}
                 disabled={!isDirty || isSaving}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-teal-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-teal-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                className="inline-flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs font-medium transition-opacity hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+                style={{ backgroundColor: "var(--reader-accent)", color: "var(--reader-accent-contrast)" }}
               >
                 {isSaving ? (
                   <span className="animate-pulse">{t.saving}</span>
@@ -441,7 +444,7 @@ export function MarkdownViewer({
               </button>
             ) : null}
 
-            {statusHint ? <span className="text-xs text-teal-600 dark:text-teal-400">{statusHint}</span> : null}
+            {statusHint ? <span className="text-xs" style={{ color: "var(--reader-accent)" }}>{statusHint}</span> : null}
           </div>
         </div>
 

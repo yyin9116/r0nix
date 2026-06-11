@@ -65,6 +65,37 @@ const PAGE_OVERSCAN = 900;
 const ACTIVE_NEIGHBOR = 2;
 const TEXT_NOTE_DEFAULT_WIDTH = 0.22;
 const TEXT_NOTE_DEFAULT_HEIGHT = 0.08;
+type CanvasRenderTask = { cancel: () => void; promise: Promise<void> };
+const activeCanvasRenders = new WeakMap<HTMLCanvasElement, CanvasRenderTask>();
+
+async function cancelAndAwaitCanvasRender(canvas: HTMLCanvasElement) {
+  const existing = activeCanvasRenders.get(canvas);
+  if (!existing) return;
+  try {
+    existing.cancel();
+  } catch {
+    // ignore cancellation failures
+  }
+  try {
+    await existing.promise;
+  } catch {
+    // ignore render cancellation errors
+  } finally {
+    if (activeCanvasRenders.get(canvas) === existing) {
+      activeCanvasRenders.delete(canvas);
+    }
+  }
+}
+
+function trackCanvasRender(canvas: HTMLCanvasElement, task: CanvasRenderTask) {
+  activeCanvasRenders.set(canvas, task);
+  task.promise.finally(() => {
+    if (activeCanvasRenders.get(canvas) === task) {
+      activeCanvasRenders.delete(canvas);
+    }
+  });
+}
+
 const I18N = {
   "zh-CN": {
     outline: "大纲",
@@ -93,19 +124,19 @@ const I18N = {
     loadingPdf: "正在加载 PDF...",
     notesAnnotations: "笔记与批注",
     page: "第",
-    notesIntro: "使用工具栏在页面上创建真实批注。高亮、下划线、删除线和文本批注会按文档持久化保存。",
+    notesIntro: "先选批注工具，再在页面拖拽标注；也可在下方直接记录当前页笔记。",
     annotationTool: "批注工具",
     switchToAnnotationTool: "切换到批注工具后可进行标注",
     annotationsCount: "条批注",
-    dragToAnnotate: "在页面上拖拽即可创建批注。文本批注在松开鼠标后会要求输入内容。",
+    dragToAnnotate: "拖拽即可创建批注；选择“文本批注”后会在松开鼠标时输入内容。",
     addNoteTitle: "添加笔记",
     addNoteBtn: "添加笔记",
     addNotePlaceholder: "写下本页或当前选区的笔记...",
     storedWithPage: "保存到第 {page} 页",
     pageAnnotations: "页面批注",
-    noAnnotations: "当前页面还没有批注。",
+    noAnnotations: "本页暂无批注。请选择高亮/下划线/删除线/文本批注后在页面拖拽创建。",
     pageNotes: "页面笔记",
-    noNotes: "当前页面还没有笔记。",
+    noNotes: "本页暂无笔记。可在上方输入框填写并点击“添加笔记”。",
     selectedAnnotation: "已选批注",
     deleteAnnotation: "删除批注",
     deleteNote: "删除笔记",
@@ -130,11 +161,13 @@ const I18N = {
     copyPageReference: "复制页面引用",
     addNoteHere: "在此添加笔记",
     exportCurrentPng: "导出当前页 PNG",
+    exportCurrentSvg: "导出当前页 SVG",
     cancel: "取消",
     pdfImages: "PDF 图片",
     noPdfImages: "当前页未检测到可导出图片。",
     imageType: "类型",
     pngExported: "PNG 已导出",
+    svgExported: "SVG 已导出",
     rendering: "渲染中...",
     pdfNotLoaded: "PDF 文档尚未加载，请从资料库重新打开。",
   },
@@ -165,19 +198,19 @@ const I18N = {
     loadingPdf: "Loading PDF...",
     notesAnnotations: "Notes & Annotations",
     page: "Page",
-    notesIntro: "Use the toolbar to draw real annotations on the page. Highlights, underlines, strikeouts and text notes are stored per document.",
+    notesIntro: "Pick an annotation tool, then drag on the page to mark content. You can also write a page note below.",
     annotationTool: "Annotation tool",
     switchToAnnotationTool: "Switch to an annotation tool to draw",
     annotationsCount: "annotations",
-    dragToAnnotate: "Drag over the page to place an annotation. Text notes will ask for content after you release the mouse.",
+    dragToAnnotate: "Drag to create annotations; text notes will prompt for content on pointer release.",
     addNoteTitle: "Add note",
     addNoteBtn: "Add note",
     addNotePlaceholder: "Write a note about this page or the current selection...",
     storedWithPage: "Stored with page {page}",
     pageAnnotations: "Page annotations",
-    noAnnotations: "No annotations for this page yet.",
+    noAnnotations: "No annotations on this page yet. Choose a tool and drag on the page to create one.",
     pageNotes: "Page notes",
-    noNotes: "No notes for this page yet.",
+    noNotes: "No notes on this page yet. Type in the note box above and click Add note.",
     selectedAnnotation: "Selected annotation",
     deleteAnnotation: "Delete annotation",
     deleteNote: "Delete note",
@@ -202,11 +235,13 @@ const I18N = {
     copyPageReference: "Copy page reference",
     addNoteHere: "Add note here",
     exportCurrentPng: "Export current page PNG",
+    exportCurrentSvg: "Export current page SVG",
     cancel: "Cancel",
     pdfImages: "PDF Images",
     noPdfImages: "No exportable images detected on this page.",
     imageType: "Type",
     pngExported: "PNG exported",
+    svgExported: "SVG exported",
     rendering: "Rendering...",
     pdfNotLoaded: "PDF document is not loaded. Re-open the file from Library.",
   },
@@ -370,7 +405,7 @@ function PageCanvas({ doc, pageNo, zoomScale, active, enableTextLayer, onSize, o
     }
 
     let cancelled = false;
-    let renderTask: { cancel: () => void; promise: Promise<void> } | null = null;
+    let renderTask: CanvasRenderTask | null = null;
     const token = ++tokenRef.current;
 
     const run = async () => {
@@ -453,6 +488,8 @@ function PageCanvas({ doc, pageNo, zoomScale, active, enableTextLayer, onSize, o
       if (!canvas) return;
       const context = canvas.getContext("2d", { alpha: false });
       if (!context) return;
+      await cancelAndAwaitCanvasRender(canvas);
+      if (cancelled || token !== tokenRef.current) return;
 
       setStatus("rendering");
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -464,7 +501,8 @@ function PageCanvas({ doc, pageNo, zoomScale, active, enableTextLayer, onSize, o
       context.setTransform(dpr, 0, 0, dpr, 0, 0);
       context.clearRect(0, 0, viewport.width, viewport.height);
 
-      renderTask = page.render({ canvasContext: context, canvas, viewport });
+      renderTask = page.render({ canvasContext: context, canvas, viewport }) as unknown as CanvasRenderTask;
+      trackCanvasRender(canvas, renderTask);
       await renderTask.promise;
       if (cancelled || token !== tokenRef.current) return;
 
@@ -525,6 +563,11 @@ function PageCanvas({ doc, pageNo, zoomScale, active, enableTextLayer, onSize, o
     return () => {
       cancelled = true;
       renderTask?.cancel();
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const existing = activeCanvasRenders.get(canvas);
+        existing?.cancel();
+      }
       textLayerRef.current?.cancel();
     };
   }, [active, doc, enableTextLayer, onError, onSize, pageNo, zoomScale]);
@@ -607,7 +650,7 @@ function PageThumbnail({ doc, fileId, pageNo, active, scrollRootRef, onClick, on
     if (!shouldRender || (!doc && !fileId)) return;
 
     let cancelled = false;
-    let task: { cancel: () => void; promise: Promise<void> } | null = null;
+    let task: CanvasRenderTask | null = null;
     let objectUrl = "";
 
     const run = async () => {
@@ -615,12 +658,14 @@ function PageThumbnail({ doc, fileId, pageNo, active, scrollRootRef, onClick, on
       if (!canvas) return;
       const context = canvas.getContext("2d", { alpha: false });
       if (!context) return;
+      await cancelAndAwaitCanvasRender(canvas);
+      if (cancelled) return;
 
       if (doc) {
         const page = await doc.getPage(pageNo);
         if (cancelled) return;
         const viewport = page.getViewport({ scale: 1 });
-        const targetWidth = 96;
+        const targetWidth = 108;
         const thumbScale = targetWidth / Math.max(1, viewport.width);
         const thumbViewport = page.getViewport({ scale: thumbScale });
         const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
@@ -633,10 +678,8 @@ function PageThumbnail({ doc, fileId, pageNo, active, scrollRootRef, onClick, on
         context.fillStyle = "#ffffff";
         context.fillRect(0, 0, thumbViewport.width, thumbViewport.height);
 
-        task = page.render({ canvas, canvasContext: context, viewport: thumbViewport }) as unknown as {
-          cancel: () => void;
-          promise: Promise<void>;
-        };
+        task = page.render({ canvas, canvasContext: context, viewport: thumbViewport }) as unknown as CanvasRenderTask;
+        trackCanvasRender(canvas, task);
         await task.promise;
         if (cancelled) return;
         setReady(true);
@@ -662,7 +705,7 @@ function PageThumbnail({ doc, fileId, pageNo, active, scrollRootRef, onClick, on
       });
 
       if (cancelled) return;
-      const ratio = 96 / Math.max(1, image.width);
+      const ratio = 108 / Math.max(1, image.width);
       const drawWidth = Math.max(1, Math.round(image.width * ratio));
       const drawHeight = Math.max(1, Math.round(image.height * ratio));
       const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
@@ -686,6 +729,11 @@ function PageThumbnail({ doc, fileId, pageNo, active, scrollRootRef, onClick, on
     return () => {
       cancelled = true;
       task?.cancel();
+      const canvas = canvasRef.current;
+      if (canvas) {
+        const existing = activeCanvasRenders.get(canvas);
+        existing?.cancel();
+      }
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [active, doc, fileId, inView, pageNo]);
@@ -693,10 +741,10 @@ function PageThumbnail({ doc, fileId, pageNo, active, scrollRootRef, onClick, on
   return (
     <button
       ref={buttonRef}
-      className={`mx-auto flex flex-col items-center gap-2 p-2 rounded-md transition-all border ${
+      className={`mx-auto flex w-full flex-col items-center gap-2 p-2 rounded-lg transition-all border ${
         active
-          ? "border-zinc-900 dark:border-zinc-100 bg-zinc-100 dark:bg-zinc-800/80"
-          : "border-zinc-200 dark:border-zinc-700 hover:border-zinc-400 dark:hover:border-zinc-500"
+          ? "border-zinc-900/75 dark:border-zinc-100 bg-zinc-100 dark:bg-zinc-800/80 shadow-sm"
+          : "border-zinc-200 dark:border-zinc-700 hover:border-zinc-400 dark:hover:border-zinc-500 bg-white dark:bg-zinc-900"
       }`}
       onClick={() => onClick(pageNo)}
       title={`${pageLabel} ${pageNo}`}
@@ -707,7 +755,7 @@ function PageThumbnail({ doc, fileId, pageNo, active, scrollRootRef, onClick, on
         onContextMenu?.(pageNo, event);
       }}
     >
-      <div className="relative bg-white shadow-sm w-[96px] min-h-[132px] flex items-center justify-center">
+      <div className="relative bg-white shadow-sm rounded-sm w-[112px] min-h-[150px] flex items-center justify-center">
         <canvas ref={canvasRef} className={`block transition-opacity ${ready ? "opacity-100" : "opacity-0"}`} />
         {!ready ? <div className="absolute inset-0 bg-zinc-100" /> : null}
       </div>
@@ -1024,6 +1072,19 @@ export function PDFViewer({
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setRenderError(`PNG export failed: ${message}`);
+    }
+  };
+  const exportSvg = async () => {
+    if (!fileId) return;
+    try {
+      const svg = await api.exportPageSVG(fileId, page);
+      const baseName = cleanBaseName(title || "document");
+      const defaultName = `${baseName}-page-${page}.svg`;
+      await api.saveSVGToFile(svg, onResolveDefaultPath?.(defaultName) || defaultName);
+      showActionHint(t.svgExported);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setRenderError(`SVG export failed: ${message}`);
     }
   };
 
@@ -1412,21 +1473,21 @@ export function PDFViewer({
         </div>
       ) : null}
 
-      <div className={`${isLeftSidebarOpen ? "w-[132px]" : "w-0"} transition-[width] duration-200 ease-out bg-white dark:bg-zinc-900 border-r border-zinc-200 dark:border-zinc-800 hidden md:flex md:flex-col shrink-0 overflow-hidden`}>
-        <div className="w-[132px] flex border-b border-zinc-200 dark:border-zinc-800 items-center">
-          <button onClick={() => setSidebarTab("outline")} className={`flex-1 py-3 text-xs font-semibold flex items-center justify-center gap-2 transition-colors ${sidebarTab === "outline" ? "text-zinc-900 dark:text-zinc-100 border-b-2 border-zinc-900 dark:border-zinc-100" : "text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300"}`}>
-            <List size={14} /> {t.outline}
+      <div className={`${isLeftSidebarOpen ? "w-[196px]" : "w-0"} transition-[width] duration-150 ease-out bg-white dark:bg-zinc-900 border-r border-zinc-200 dark:border-zinc-800 hidden md:flex md:flex-col shrink-0 overflow-hidden`}>
+        <div className="w-[196px] flex border-b border-zinc-200 dark:border-zinc-800 items-center px-2 py-1.5">
+          <button onClick={() => setSidebarTab("outline")} className={`flex-1 rounded-md px-2 py-2 text-sm font-semibold leading-none flex items-center justify-center gap-1.5 transition-colors ${sidebarTab === "outline" ? "text-zinc-900 dark:text-zinc-100 bg-zinc-100 dark:bg-zinc-800/70" : "text-zinc-500 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-zinc-100/70 dark:hover:bg-zinc-800/40"}`}>
+            <List size={15} /> {t.outline}
           </button>
-          <button onClick={() => setSidebarTab("thumbs")} className={`flex-1 py-3 text-xs font-semibold flex items-center justify-center gap-2 transition-colors ${sidebarTab === "thumbs" ? "text-zinc-900 dark:text-zinc-100 border-b-2 border-zinc-900 dark:border-zinc-100" : "text-zinc-400 dark:text-zinc-500 hover:text-zinc-600 dark:hover:text-zinc-300"}`}>
-            <ImageIcon size={14} /> {t.thumbs}
+          <button onClick={() => setSidebarTab("thumbs")} className={`flex-1 rounded-md px-2 py-2 text-sm font-semibold leading-none flex items-center justify-center gap-1.5 transition-colors ${sidebarTab === "thumbs" ? "text-zinc-900 dark:text-zinc-100 bg-zinc-100 dark:bg-zinc-800/70" : "text-zinc-500 dark:text-zinc-500 hover:text-zinc-700 dark:hover:text-zinc-300 hover:bg-zinc-100/70 dark:hover:bg-zinc-800/40"}`}>
+            <ImageIcon size={15} /> {t.thumbs}
           </button>
         </div>
 
-        <div ref={thumbListRef} className="flex-1 overflow-y-auto p-2.5 space-y-2 text-sm text-zinc-600 dark:text-zinc-400">
+        <div ref={thumbListRef} className="flex-1 overflow-y-auto p-3 space-y-2 text-sm text-zinc-600 dark:text-zinc-400 bg-zinc-50/60 dark:bg-zinc-950/60">
           {sidebarTab === "outline" ? (
             outlineTitles.length > 0 ? (
               outlineTitles.map((item, index) => (
-                <button key={`${item}-${index}`} className="w-full text-left hover:bg-zinc-50 dark:hover:bg-zinc-800/50 p-1.5 rounded cursor-pointer" onClick={() => goToPage(index + 1)}>
+                <button key={`${item}-${index}`} className="w-full text-left rounded-md px-2.5 py-2 leading-5 hover:bg-zinc-50 dark:hover:bg-zinc-800/50 cursor-pointer" onClick={() => goToPage(index + 1)}>
                   {item}
                 </button>
               ))
@@ -1519,6 +1580,12 @@ export function PDFViewer({
               }} disabled={!hasDoc}>
               <ImageIcon size={14} />
               {t.exportLabel} PNG
+            </button>
+            <button className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-md shadow-sm border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-200" onClick={() => {
+                void exportSvg();
+              }} disabled={!hasDoc}>
+              <ImageIcon size={14} />
+              {t.exportLabel} SVG
             </button>
             <button
               className="p-1.5 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors disabled:opacity-50"
@@ -1672,8 +1739,8 @@ export function PDFViewer({
         </div>
       </div>
 
-      <div className={`${isNotesOpen ? "w-[22rem]" : "w-0"} transition-[width] duration-300 ease-in-out bg-white dark:bg-zinc-900 border-l border-zinc-200 dark:border-zinc-800 flex flex-col hidden lg:flex shrink-0 overflow-hidden`}>
-        <div className="w-[22rem] flex flex-col h-full">
+      <div className={`${isNotesOpen ? "w-[20rem]" : "w-0"} transition-[width] duration-300 ease-in-out bg-white dark:bg-zinc-900 border-l border-zinc-200 dark:border-zinc-800 flex flex-col hidden lg:flex shrink-0 overflow-hidden`}>
+        <div className="w-[20rem] flex flex-col h-full">
           <div className="h-14 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between px-4 shrink-0 bg-zinc-50 dark:bg-zinc-950">
             <div className="flex items-center gap-2 font-semibold text-zinc-900 dark:text-zinc-100 text-sm">
               <MessageSquare size={16} /> {t.notesAnnotations}
@@ -1814,11 +1881,15 @@ export function PDFViewer({
           onExportPng: () => {
             void exportPng();
           },
+          onExportSvg: () => {
+            void exportSvg();
+          },
           onClose: () => setContextMenu((state) => ({ ...state, isOpen: false })),
           labels: {
             copyPageReference: t.copyPageReference,
             addNoteHere: t.addNoteHere,
             exportCurrentPng: t.exportCurrentPng,
+            exportCurrentSvg: t.exportCurrentSvg,
             cancel: t.cancel,
           },
         })}

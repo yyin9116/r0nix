@@ -1,5 +1,5 @@
 import React, { useEffect } from "react";
-import { Download, FileImage, X, MessageSquarePlus, Copy } from "lucide-react";
+import { Download, FileCode2, FileImage, X, MessageSquarePlus, Copy } from "lucide-react";
 
 export interface ContextMenuAction {
   id: string;
@@ -78,15 +78,17 @@ export function buildViewerContextActions(options: {
   onCopyPageLabel: () => void;
   onAddNote: () => void;
   onExportPng: () => void;
+  onExportSvg?: () => void;
   onClose: () => void;
   labels?: {
     copyPageReference: string;
     addNoteHere: string;
     exportCurrentPng: string;
+    exportCurrentSvg?: string;
     cancel: string;
   };
 }): ContextMenuAction[] {
-  return [
+  const actions: ContextMenuAction[] = [
     {
       id: "copy-page",
       label: options.labels?.copyPageReference || "Copy page reference",
@@ -105,11 +107,20 @@ export function buildViewerContextActions(options: {
       icon: <FileImage size={14} />,
       onSelect: options.onExportPng,
     },
-    {
+  ];
+  if (options.onExportSvg) {
+    actions.push({
+      id: "export-svg",
+      label: options.labels?.exportCurrentSvg || "Export current page SVG",
+      icon: <FileCode2 size={14} />,
+      onSelect: options.onExportSvg,
+    });
+  }
+  actions.push({
       id: "close",
       label: options.labels?.cancel || "Cancel",
       icon: <X size={14} />,
       onSelect: options.onClose,
-    },
-  ];
+    });
+  return actions;
 }

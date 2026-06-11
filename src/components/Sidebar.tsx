@@ -1,4 +1,4 @@
-import React from "react";
+﻿import React from "react";
 import {
   Library,
   Star,
@@ -12,6 +12,7 @@ import {
   FolderOpen,
   Link2,
   Trash2,
+  ChevronDown,
 } from "lucide-react";
 import type { LibraryFilter, ReaderCollection } from "../types";
 import type { AppLanguage, QuickLinkItem } from "../services/userSettings";
@@ -105,6 +106,7 @@ export function Sidebar({
   onManageQuickLinks,
 }: SidebarProps) {
   const text = UI_TEXT[language];
+  const [quickLinksOpen, setQuickLinksOpen] = React.useState(true);
 
   return (
     <div
@@ -219,19 +221,41 @@ export function Sidebar({
           </div>
 
           <div className="px-3 mb-2 mt-6">
-            <div className="flex items-center justify-between text-xs font-serif font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-widest mb-2 px-2">
-              <span>{text.quickLinks}</span>
-              <button className="hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors normal-case text-[11px] tracking-normal" title={text.manageQuickLinks} onClick={onManageQuickLinks}>
+            <div className="mb-2 flex items-center justify-between gap-2 px-2 text-xs font-serif font-semibold uppercase tracking-widest text-zinc-500 dark:text-zinc-400">
+              <button
+                className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md py-1 text-left transition-colors hover:text-zinc-700 dark:hover:text-zinc-300"
+                type="button"
+                aria-expanded={quickLinksOpen}
+                onClick={() => setQuickLinksOpen((value) => !value)}
+              >
+                <ChevronDown
+                  size={13}
+                  className={`shrink-0 transition-transform duration-150 ${quickLinksOpen ? "rotate-0" : "-rotate-90"}`}
+                />
+                <span className="truncate">{text.quickLinks}</span>
+              </button>
+              <button
+                className="shrink-0 rounded-md px-1 py-1 normal-case tracking-normal text-[11px] transition-colors hover:text-zinc-700 dark:hover:text-zinc-300"
+                title={text.manageQuickLinks}
+                onClick={onManageQuickLinks}
+                type="button"
+              >
                 {text.manage}
               </button>
             </div>
-            {quickLinks.length > 0 ? (
-              quickLinks.map((item) => (
-                <NavItem key={item.id} icon={<Link2 size={16} />} label={item.title} onClick={() => onOpenQuickLink(item.url)} />
-              ))
-            ) : (
-              <div className="px-2 py-1.5 text-[12px] text-zinc-400 dark:text-zinc-500 italic">{text.quickLinksHint}</div>
-            )}
+            <div
+              className={`overflow-hidden transition-[max-height,opacity,transform] duration-200 ease-out ${
+                quickLinksOpen ? "max-h-52 translate-y-0 opacity-100" : "max-h-0 -translate-y-1 opacity-0"
+              }`}
+            >
+              {quickLinks.length > 0 ? (
+                quickLinks.slice(0, 4).map((item) => (
+                  <NavItem key={item.id} icon={<Link2 size={16} />} label={item.title} onClick={() => onOpenQuickLink(item.url)} />
+                ))
+              ) : (
+                <div className="px-2 py-1.5 text-[12px] text-zinc-400 dark:text-zinc-500 italic">{text.quickLinksHint}</div>
+              )}
+            </div>
           </div>
 
           <div className="px-3 mb-2 mt-6">
@@ -289,3 +313,4 @@ function NavItem({
     </button>
   );
 }
+

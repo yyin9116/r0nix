@@ -50,6 +50,18 @@ function SelectRow<T extends string>({
   );
 }
 
+function StaticValueRow({ label }: { label: string }) {
+  return (
+    <div
+      className="inline-flex h-11 w-full items-center justify-between gap-3 rounded-lg border border-zinc-200 bg-white px-3.5 text-sm font-medium text-zinc-800 shadow-sm md:w-56 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-100"
+      aria-readonly="true"
+    >
+      <span className="truncate">{label}</span>
+      <span className="h-2 w-2 rounded-full bg-emerald-500 shadow-[0_0_0_3px_rgba(16,185,129,0.14)]" />
+    </div>
+  );
+}
+
 const I18N = {
   "zh-CN": {
     settings: "\u8bbe\u7f6e",
@@ -63,7 +75,7 @@ const I18N = {
     accentHint: "\u9ed8\u8ba4\u4f7f\u7528 Zinc Gray\uff0c\u4ee5\u4fdd\u6301\u6807\u7b7e\u3001\u56fe\u6807\u548c\u8fdb\u5ea6\u98ce\u683c\u4e00\u81f4\u3002",
     readerAndWeb: "\u9605\u8bfb\u5668\u4e0e\u7f51\u9875",
     webPanelMode: "\u7f51\u9875\u9762\u677f\u6a21\u5f0f",
-    webPanelModeDesc: "\u539f\u751f WebView \u5728\u53d7\u4fdd\u62a4\u7ad9\u70b9\u4e0a\u66f4\u7a33\u5b9a\u3002",
+    webPanelModeDesc: "桌面端固定使用嵌入式原生 WebView，避免网站拒绝 iframe。",
     nativeWebview: "\u539f\u751f WebView",
     iframe: "Iframe",
     pdfOpenMode: "PDF \u6253\u5f00\u65b9\u5f0f",
@@ -117,7 +129,7 @@ const I18N = {
     accentHint: "The default redesign uses Zinc Gray so tabs, icons and progress accents stay in the same restrained palette.",
     readerAndWeb: "Reader & Web",
     webPanelMode: "Web panel mode",
-    webPanelModeDesc: "Native webview avoids iframe restriction issues on protected sites.",
+    webPanelModeDesc: "Desktop uses the embedded native WebView to avoid iframe blocking.",
     nativeWebview: "Native webview",
     iframe: "Iframe",
     pdfOpenMode: "PDF open behavior",
@@ -311,14 +323,7 @@ export function Settings({ settings, onThemeChange, onSettingsChange, focusSecti
 
           <div className="bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl divide-y divide-zinc-200 dark:divide-zinc-800">
             <SettingsRow icon={<Globe size={15} />} title={t.webPanelMode} description={t.webPanelModeDesc}>
-              <SelectRow
-                value={settings.webPanelMode}
-                options={[
-                  { value: "native_webview", label: t.nativeWebview },
-                  { value: "iframe", label: t.iframe },
-                ]}
-                onChange={(value) => updateSettings({ webPanelMode: value })}
-              />
+              <StaticValueRow label={t.nativeWebview} />
             </SettingsRow>
 
             <SettingsRow icon={<FileText size={15} />} title={t.pdfOpenMode} description={t.pdfOpenModeDesc}>
@@ -395,6 +400,7 @@ export function Settings({ settings, onThemeChange, onSettingsChange, focusSecti
                 options={[
                   { value: "png", label: "PNG" },
                   { value: "jpg", label: "JPG" },
+                  { value: "svg", label: "SVG" },
                 ]}
                 onChange={(value) => updateSettings({ defaultExportFormat: value })}
               />

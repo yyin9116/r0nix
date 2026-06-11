@@ -3,6 +3,7 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { tempDir } from "@tauri-apps/api/path";
 import { readDir, writeFile } from "@tauri-apps/plugin-fs";
+import { AnimatePresence, motion } from "motion/react";
 import { Sidebar } from "./components/Sidebar";
 import { Tabs } from "./components/Tabs";
 import { Library, LIBRARY_SEARCH_FOCUS_EVENT } from "./components/Library";
@@ -341,35 +342,106 @@ function shortHostSafe(url: string) {
 interface FsDirEntry {
   path?: string;
   name?: string;
+  isDirectory?: boolean;
+  isFile?: boolean;
+  children?: FsDirEntry[];
+}
+
+function isImportablePath(path: string) {
+  const lowered = path.trim().toLowerCase();
+  return lowered.endsWith(".pdf") || lowered.endsWith(".md") || lowered.endsWith(".markdown");
 }
 
 async function collectPdfPaths(root: string): Promise<string[]> {
   const results = new Set<string>();
+  const normalizedRoot = root.trim();
+  const isWindowsRootLike = /^[a-zA-Z]:[\\/]*$/.test(normalizedRoot);
+  const prefersBackslash = normalizedRoot.includes("\\") || isWindowsRootLike;
 
-  const walk = async (target: string) => {
-    let entries: FsDirEntry[] = [];
-    try {
-      entries = (await readDir(target)) as unknown as FsDirEntry[];
-    } catch {
-      return;
+  const resolveEntryPath = (parent: string, entry: FsDirEntry) => {
+    if (typeof entry.path === "string" && entry.path.trim()) {
+      return entry.path;
     }
+    if (typeof entry.name !== "string" || !entry.name.trim()) {
+      return "";
+    }
+    return joinPath(parent, entry.name.trim());
+  };
 
-    for (const entry of entries) {
-      const nextPath = typeof entry.path === "string" ? entry.path : "";
-      if (!nextPath) continue;
-      const lowered = nextPath.toLowerCase();
-      if (lowered.endsWith(".pdf") || lowered.endsWith(".md") || lowered.endsWith(".markdown")) {
-        results.add(nextPath);
-        continue;
+  const toQueuePath = (raw: string) => {
+    if (!raw) return "";
+    return prefersBackslash ? raw.replace(/\//g, "\\") : raw.replace(/\\/g, "/");
+  };
+
+  const collectFromTree = (entries: FsDirEntry[], parent: string) => {
+    const stack: Array<{ entry: FsDirEntry; parent: string }> = entries.map((entry) => ({ entry, parent }));
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (!current) continue;
+      const { entry, parent: currentParent } = current;
+      const entryPath = resolveEntryPath(currentParent, entry);
+      if (entryPath && isImportablePath(entryPath)) {
+        results.add(toQueuePath(entryPath));
       }
-      await walk(nextPath);
+      if (Array.isArray(entry.children) && entry.children.length > 0) {
+        for (const child of entry.children) {
+          stack.push({ entry: child, parent: entryPath || currentParent });
+        }
+      }
     }
   };
 
-  await walk(root);
+  try {
+    const recursiveEntries = (await readDir(root)) as unknown as FsDirEntry[];
+    collectFromTree(recursiveEntries, normalizedRoot);
+    if (results.size > 0) {
+      return Array.from(results);
+    }
+  } catch {
+    // Fall through to conservative manual traversal.
+  }
+
+  const queue: string[] = [normalizedRoot];
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) continue;
+
+    let entries: FsDirEntry[] = [];
+    try {
+      entries = (await readDir(current)) as unknown as FsDirEntry[];
+    } catch {
+      // Tolerate inaccessible node and continue scanning others.
+      continue;
+    }
+
+    for (const entry of entries) {
+      const entryPath = resolveEntryPath(current, entry);
+      if (!entryPath) continue;
+
+      if (isImportablePath(entryPath)) {
+        results.add(toQueuePath(entryPath));
+        continue;
+      }
+
+      if (entry.isDirectory) {
+        queue.push(toQueuePath(entryPath));
+      } else if (Array.isArray(entry.children) && entry.children.length > 0) {
+        collectFromTree(entry.children, entryPath);
+      } else if (!entry.isFile) {
+        try {
+          const nested = (await readDir(entryPath)) as unknown as FsDirEntry[];
+          if (nested.length > 0) {
+            queue.push(toQueuePath(entryPath));
+          }
+        } catch {
+          // not a directory or inaccessible node
+        }
+      }
+    }
+  }
+
   return Array.from(results);
 }
-
 export default function App() {
   const [settings, setSettings] = useState<UserSettings>(() => loadUserSettings());
   const [theme, setTheme] = useState<"light" | "dark">(() => resolveTheme(loadUserSettings().themeMode));
@@ -622,8 +694,17 @@ export default function App() {
         url: normalized,
         pinned: false,
       };
-      setTabs((prev) => [...prev, nextTab]);
-      setActiveTabId(nextTab.id);
+      setTabs((prev) => {
+        const existing = prev.find(
+          (tab) => tab.type === "web" && normalizeUrl(tab.url || START_PAGE_URL) === normalized
+        );
+        if (existing) {
+          setActiveTabId(existing.id);
+          return prev;
+        }
+        setActiveTabId(nextTab.id);
+        return [...prev, nextTab];
+      });
     },
     [settings.language, uiText.webNewTab]
   );
@@ -1355,14 +1436,21 @@ export default function App() {
         />
 
         <div className="flex-1 overflow-hidden relative bg-zinc-50 dark:bg-zinc-950">
-          {busyMessage ? (
-            <div
-              className="absolute bottom-4 right-4 z-50 px-3 py-1.5 rounded-md text-xs shadow-lg pointer-events-none"
-              style={{ backgroundColor: "var(--reader-accent)", color: "var(--reader-accent-contrast)" }}
-            >
-              {busyMessage}
-            </div>
-          ) : null}
+          <AnimatePresence>
+            {busyMessage ? (
+              <motion.div
+                key="busy-message"
+                className="absolute bottom-4 right-4 z-50 px-3 py-1.5 rounded-md text-xs shadow-lg pointer-events-none"
+                style={{ backgroundColor: "var(--reader-accent)", color: "var(--reader-accent-contrast)" }}
+                initial={{ opacity: 0, y: 10, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 8, scale: 0.96 }}
+                transition={{ type: "tween", duration: 0.18, ease: "easeOut" }}
+              >
+                {busyMessage}
+              </motion.div>
+            ) : null}
+          </AnimatePresence>
 
           {tabContextMenu ? (
             (() => {
@@ -1393,7 +1481,7 @@ export default function App() {
             })()
           ) : null}
 
-          <div key={activePanelKey} className="absolute inset-0 motion-safe:animate-[tabFade_180ms_ease-out]">
+          <div key={activePanelKey} className="absolute inset-0">
             {activeTab?.type === "library" ? (
               activeTab.filter === "whiteboards" ? (
                 <Whiteboards
@@ -1570,6 +1658,8 @@ export default function App() {
     </div>
   );
 }
+
+
 
 
 

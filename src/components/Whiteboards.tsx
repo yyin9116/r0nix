@@ -685,7 +685,8 @@ export function Whiteboards({ documents, onOpenPdf, language }: WhiteboardsProps
                 className="relative rounded-3xl border border-zinc-200 dark:border-zinc-800 shadow-sm overflow-hidden"
                 style={{ width: BOARD_WIDTH, minHeight: BOARD_HEIGHT, transform: `scale(${board.zoom})`, transformOrigin: "top left", backgroundColor: "rgba(244, 244, 245, 0.82)", backgroundImage: "radial-gradient(circle at 1px 1px, rgba(113,113,122,0.16) 1px, transparent 0)", backgroundSize: "24px 24px" }}
                 onPointerDown={(event) => {
-                  if (!isPanMode) return;
+                  const isRightButton = event.button === 2 || (event.buttons & 2) === 2;
+                  if (!isPanMode && !isRightButton) return;
                   const wrap = scrollWrapRef.current;
                   if (!wrap) return;
                   panRef.current = {
@@ -760,8 +761,8 @@ export function Whiteboards({ documents, onOpenPdf, language }: WhiteboardsProps
                   const palette = getPalette(card.color);
                   const linking = pendingConnectionFromId === card.id;
                   return (
-                    <div key={card.id} className={`absolute rounded-2xl border shadow-lg overflow-hidden ${selected ? "ring-2 ring-zinc-900/20 dark:ring-zinc-100/15" : "ring-0"}`} style={{ left: card.x, top: card.y, width: card.width, minHeight: card.height, backgroundColor: palette.fill, borderColor: selected ? palette.border : "rgba(228, 228, 231, 0.96)" }} onMouseDown={(event) => { event.stopPropagation(); if (isPanMode) return; setSelectedCardId(card.id); setSelectedConnectionId(null); }}>
-                      <div className="flex items-center justify-between px-3 py-2 border-b cursor-grab active:cursor-grabbing" style={{ backgroundColor: palette.chip, borderColor: "rgba(228, 228, 231, 0.88)" }} onPointerDown={(event) => { event.stopPropagation(); if (isPanMode) return; const point = clientToBoard(event.clientX, event.clientY); interactionRef.current = { type: "drag", cardId: card.id, pointerBoardX: point.x, pointerBoardY: point.y, startX: card.x, startY: card.y, width: card.width, height: card.height }; setSelectedCardId(card.id); setSelectedConnectionId(null); }}>
+                    <div key={card.id} className={`absolute rounded-2xl border shadow-lg overflow-hidden ${selected ? "ring-2 ring-zinc-900/20 dark:ring-zinc-100/15" : "ring-0"}`} style={{ left: card.x, top: card.y, width: card.width, minHeight: card.height, backgroundColor: palette.fill, borderColor: selected ? palette.border : "rgba(228, 228, 231, 0.96)" }} onMouseDown={(event) => { event.stopPropagation(); if (isPanMode || event.button === 2) return; setSelectedCardId(card.id); setSelectedConnectionId(null); }}>
+                      <div className="flex items-center justify-between px-3 py-2 border-b cursor-grab active:cursor-grabbing" style={{ backgroundColor: palette.chip, borderColor: "rgba(228, 228, 231, 0.88)" }} onPointerDown={(event) => { event.stopPropagation(); if (isPanMode || event.button !== 0) return; const point = clientToBoard(event.clientX, event.clientY); interactionRef.current = { type: "drag", cardId: card.id, pointerBoardX: point.x, pointerBoardY: point.y, startX: card.x, startY: card.y, width: card.width, height: card.height }; setSelectedCardId(card.id); setSelectedConnectionId(null); }}>
                         <div className="flex items-center gap-2 text-[11px] font-semibold text-zinc-600 dark:text-zinc-300 uppercase tracking-[0.16em]">
                           {card.type === "note" ? <StickyNote size={13} /> : <FileText size={13} />}
                           {card.type === "note" ? t.note : t.paper}
@@ -793,7 +794,7 @@ export function Whiteboards({ documents, onOpenPdf, language }: WhiteboardsProps
                         )}
                       </div>
 
-                      <button className="absolute right-2 bottom-2 h-5 w-5 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white/90 dark:bg-zinc-900/90 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 cursor-se-resize" title={t.resizeCard} onPointerDown={(event) => { event.stopPropagation(); if (isPanMode) return; const point = clientToBoard(event.clientX, event.clientY); interactionRef.current = { type: "resize", cardId: card.id, pointerBoardX: point.x, pointerBoardY: point.y, startWidth: card.width, startHeight: card.height, x: card.x, y: card.y }; setSelectedCardId(card.id); setSelectedConnectionId(null); }}>
+                      <button className="absolute right-2 bottom-2 h-5 w-5 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white/90 dark:bg-zinc-900/90 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 cursor-se-resize" title={t.resizeCard} onPointerDown={(event) => { event.stopPropagation(); if (isPanMode || event.button !== 0) return; const point = clientToBoard(event.clientX, event.clientY); interactionRef.current = { type: "resize", cardId: card.id, pointerBoardX: point.x, pointerBoardY: point.y, startWidth: card.width, startHeight: card.height, x: card.x, y: card.y }; setSelectedCardId(card.id); setSelectedConnectionId(null); }}>
                         <span className="block h-full w-full bg-[linear-gradient(135deg,transparent_35%,currentColor_35%,currentColor_45%,transparent_45%,transparent_60%,currentColor_60%,currentColor_70%,transparent_70%)] opacity-60" />
                       </button>
                     </div>

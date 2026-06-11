@@ -173,7 +173,7 @@ export function StartPage({
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="space-y-3">
               <div className="inline-flex items-center gap-2 rounded-full border border-gray-100 bg-gray-50 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.16em] text-gray-500 dark:border-gray-800 dark:bg-gray-800 dark:text-gray-400">
-                <span className="h-2 w-2 rounded-full bg-teal-500 animate-pulse" />
+                <span className="h-2 w-2 animate-pulse rounded-full" style={{ backgroundColor: "var(--reader-accent)" }} />
                 {t.startBadge}
               </div>
               <div>
@@ -240,9 +240,10 @@ export function StartPage({
                             }}
                             className={`w-full rounded-xl px-3 py-2.5 text-left text-sm transition-colors ${
                               active
-                                ? "bg-teal-500/10 text-gray-900 dark:text-gray-100"
+                                ? "text-gray-900 dark:text-gray-100"
                                 : "text-gray-600 hover:bg-gray-50 dark:text-gray-300 dark:hover:bg-gray-800/60"
                             }`}
+                           style={active ? { backgroundColor: "var(--reader-accent-soft)" } : undefined}
                           >
                             {item.name}
                           </button>
@@ -259,12 +260,13 @@ export function StartPage({
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder={t.searchPlaceholder(currentEngine.name)}
-                className="flex-1 rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm text-gray-900 transition-all placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-teal-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:placeholder:text-gray-500"
+                className="flex-1 rounded-xl border border-gray-200 bg-gray-50 px-4 py-2.5 text-sm text-gray-900 transition-all placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-[var(--reader-accent)] dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:placeholder:text-gray-500"
               />
 
               <button
                 type="submit"
-                className="inline-flex items-center justify-center gap-2 rounded-xl bg-teal-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-teal-700 focus:outline-none focus:ring-2 focus:ring-teal-500 focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-gray-950"
+                className="inline-flex items-center justify-center gap-2 rounded-xl px-4 py-2.5 text-sm font-medium transition-opacity hover:opacity-90 focus:outline-none focus:ring-2 focus:ring-[var(--reader-accent)] focus:ring-offset-2 focus:ring-offset-white dark:focus:ring-offset-gray-950"
+                style={{ backgroundColor: "var(--reader-accent)", color: "var(--reader-accent-contrast)" }}
               >
                 <Search className="h-4 w-4" />
                 {t.submitLabel}
@@ -304,7 +306,7 @@ export function StartPage({
                     transition={{ type: "spring", stiffness: 360, damping: 24 }}
                     className="group flex items-center gap-2 rounded-xl border border-gray-200 bg-gray-50 px-3 py-2.5 text-left transition-colors hover:bg-gray-100 dark:border-gray-700 dark:bg-gray-800 dark:hover:bg-gray-800/70"
                   >
-                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-teal-500/20 bg-teal-500/10 text-teal-700 dark:text-teal-300">
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border" style={{ borderColor: "var(--reader-accent-soft)", backgroundColor: "var(--reader-accent-soft)", color: "var(--reader-accent)" }}>
                       <Icon className="h-4 w-4" strokeWidth={1.7} />
                     </span>
                     <span className="min-w-0">

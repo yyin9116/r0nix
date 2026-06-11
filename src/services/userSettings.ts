@@ -1,6 +1,6 @@
 import { START_PAGE_URL } from "../constants/startPage";
 
-export type DefaultExportFormat = "png" | "jpg";
+export type DefaultExportFormat = "png" | "jpg" | "svg";
 export type ThemeMode = "system" | "light" | "dark";
 export type ThemePalette = "default" | "graphite" | "slate" | "indigo";
 export type ThemeAccent = "zinc" | "blue" | "green" | "orange" | "rose" | "violet";
@@ -64,7 +64,7 @@ export function sanitizeUserSettings(raw: unknown): UserSettings {
   const parsed = raw && typeof raw === "object" ? (raw as Partial<UserSettings>) : {};
   const fmt = parsed.defaultExportFormat;
   const defaultExportFormat: DefaultExportFormat =
-    fmt === "png" || fmt === "jpg" ? fmt : DEFAULT_SETTINGS.defaultExportFormat;
+    fmt === "png" || fmt === "jpg" || fmt === "svg" ? fmt : DEFAULT_SETTINGS.defaultExportFormat;
   const defaultSaveDir = typeof parsed.defaultSaveDir === "string" ? parsed.defaultSaveDir : "";
   const aiModelPath = typeof parsed.aiModelPath === "string" ? parsed.aiModelPath : "";
   const openLinksInsideApp =
@@ -104,7 +104,7 @@ export function sanitizeUserSettings(raw: unknown): UserSettings {
       ? parsed.webPdfOpenMode
       : DEFAULT_SETTINGS.webPdfOpenMode;
   const webPanelMode: WebPanelMode =
-    parsed.webPanelMode === "iframe" || parsed.webPanelMode === "native_webview"
+    parsed.webPanelMode === "native_webview" || parsed.webPanelMode === "iframe"
       ? parsed.webPanelMode
       : DEFAULT_SETTINGS.webPanelMode;
   const newTabDefaultUrl =
@@ -144,7 +144,13 @@ export function loadUserSettings(): UserSettings {
   try {
     const raw = window.localStorage.getItem(USER_SETTINGS_KEY);
     if (!raw) return DEFAULT_SETTINGS;
-    return sanitizeUserSettings(JSON.parse(raw));
+    const parsed = JSON.parse(raw) as Partial<UserSettings>;
+    const settings = sanitizeUserSettings(parsed);
+    if (parsed.webPanelMode === "iframe") {
+      settings.webPanelMode = "native_webview";
+      saveUserSettings(settings);
+    }
+    return settings;
   } catch {
     return DEFAULT_SETTINGS;
   }
