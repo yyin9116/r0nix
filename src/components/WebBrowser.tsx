@@ -10,7 +10,6 @@ import {
   MoreVertical,
   Download,
   ExternalLink,
-  Link2,
   Copy,
   Focus,
   Loader2,
@@ -47,6 +46,7 @@ type BrowserBookmark = {
 };
 
 const BOOKMARKS_KEY = "r0nix_reader_web_bookmarks_v1";
+const NATIVE_WEBVIEW_TOP_ADJUST_PX = 32;
 
 const I18N = {
   "zh-CN": {
@@ -56,8 +56,6 @@ const I18N = {
     home: "起始页",
     bookmarkAdd: "添加书签",
     bookmarkRemove: "移除书签",
-    statusNative: "原生 WebView",
-    statusIframe: "网页框架",
     openPdfInApp: "在应用中打开 PDF",
     openPdfInAppHintDetected: "检测到 PDF 资源，尝试直接在应用中打开",
     openPdfInAppHintFallback: "尝试将当前地址作为 PDF 在应用中打开",
@@ -70,8 +68,7 @@ const I18N = {
     menuOpenExternal: "系统浏览器打开",
     menuOpenPdf: "在应用中打开 PDF",
     menuFocusNative: "聚焦原生 WebView",
-    quickLinksLabel: "快捷站点",
-    iframeNotice: "部分学术站点会拒绝 iframe 嵌入。可在设置中切换到原生 WebView 获得更完整兼容性。",
+    iframeNotice: "Iframe 仅适合作为备用模式；多数网站会拒绝嵌入，建议使用原生 WebView。",
     loadingPage: "正在加载",
     nativeActiveTitle: "原生 WebView 已启用",
     nativeActiveDesc: "当前页面由 Tauri 原生 WebView 承载，可绕过部分 iframe 限制并支持 PDF 链接拦截。",
@@ -84,10 +81,6 @@ const I18N = {
     nothingToDownload: "当前没有可下载资源",
     noPdfDetected: "未检测到可识别的 PDF 链接",
     nativeFocused: "已聚焦原生 WebView",
-    debugLoading: "加载中",
-    debugIdle: "空闲",
-    debugNative: "原生",
-    debugIframe: "框架",
     addressPlaceholder: "输入网址或搜索地址",
   },
   "en-US": {
@@ -97,8 +90,6 @@ const I18N = {
     home: "Home",
     bookmarkAdd: "Add bookmark",
     bookmarkRemove: "Remove bookmark",
-    statusNative: "Native WebView",
-    statusIframe: "Iframe",
     openPdfInApp: "Open PDF in App",
     openPdfInAppHintDetected: "Detected a PDF resource and open it in app",
     openPdfInAppHintFallback: "Try opening current URL as PDF in app",
@@ -111,7 +102,7 @@ const I18N = {
     menuOpenExternal: "Open externally",
     menuOpenPdf: "Open PDF in app",
     menuFocusNative: "Focus native webview",
-    iframeNotice: "Some academic sites may block iframe embedding. Switch Web panel mode to native webview in Settings for full compatibility.",
+    iframeNotice: "Iframe is a fallback mode only. Most sites reject embedding, so native WebView is recommended.",
     loadingPage: "Loading",
     nativeActiveTitle: "Native WebView Active",
     nativeActiveDesc: "This area is powered by a Tauri native webview, allowing protected sites and in-app PDF interception.",
@@ -124,10 +115,6 @@ const I18N = {
     nothingToDownload: "Nothing to download",
     noPdfDetected: "No PDF-like resource detected",
     nativeFocused: "Native webview focused",
-    debugLoading: "loading",
-    debugIdle: "idle",
-    debugNative: "native",
-    debugIframe: "iframe",
     addressPlaceholder: "Enter URL",
   },
 } as const;
@@ -213,8 +200,8 @@ export function WebBrowser({
 }: WebBrowserProps) {
   const t = I18N[language];
   const supportsNative = canUseNativeWebview();
-  const nativeMode = mode === "native_webview" && supportsNative;
-  const showIframeCompatibilityNotice = mode === "iframe" && supportsNative;
+  const nativeMode = supportsNative || mode === "native_webview";
+  const showIframeCompatibilityNotice = mode === "iframe" && !supportsNative;
   const [url, setUrl] = useState(initialUrl === START_PAGE_URL ? START_PAGE_URL : normalizeUrl(initialUrl));
   const [inputUrl, setInputUrl] = useState(initialUrl === START_PAGE_URL ? "" : normalizeUrl(initialUrl));
   const [reloadToken, setReloadToken] = useState(0);
@@ -223,7 +210,6 @@ export function WebBrowser({
   const [bookmarks, setBookmarks] = useState<BrowserBookmark[]>(loadStoredBookmarks);
   const [menuOpen, setMenuOpen] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
-  const [debugHint, setDebugHint] = useState("idle");
 
   const anchorRef = useRef<HTMLDivElement | null>(null);
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
@@ -248,10 +234,6 @@ export function WebBrowser({
     return normalizedInput || url;
   }, [inputUrl, url]);
 
-  const setDebug = useCallback((hint: string) => {
-    setDebugHint(hint);
-  }, []);
-
   useEffect(() => {
     if (initialUrl === START_PAGE_URL) {
       setInputUrl("");
@@ -268,7 +250,6 @@ export function WebBrowser({
     setInputUrl(normalized);
     setUrl((prev) => {
       if (prev === normalized) return prev;
-      syncOnlyRef.current = true;
       return normalized;
     });
   }, [initialUrl]);
@@ -290,45 +271,58 @@ export function WebBrowser({
   }, []);
 
   const beginLoading = useCallback(
-    (watchdogMs = 7000, reason = "loading") => {
+    (watchdogMs = 7000) => {
       clearLoadingTimers();
       setLoading(true);
-      setDebug(`loading: ${reason} (watchdog ${watchdogMs}ms)`);
       loadingWatchdogRef.current = window.setTimeout(() => {
         loadingWatchdogRef.current = null;
         setLoading(false);
-        setDebug("watchdog timeout: loading dismissed");
       }, watchdogMs);
     },
-    [clearLoadingTimers, setDebug]
+    [clearLoadingTimers]
   );
 
-  const finishLoadingSoon = useCallback(
-    (delay = 320, reason = "done") => {
-      if (loadingTimerRef.current !== null) {
-        window.clearTimeout(loadingTimerRef.current);
-        loadingTimerRef.current = null;
+  const endLoadingNow = useCallback(() => {
+    clearLoadingTimers();
+    setLoading(false);
+  }, [clearLoadingTimers]);
+
+  const syncNativeBounds = useCallback(
+    async (force = false) => {
+      if (!nativeMode || !tabId) return;
+      const anchor = anchorRef.current;
+      if (!anchor) return;
+      const rect = anchor.getBoundingClientRect();
+      const width = Math.round(rect.width);
+      const height = Math.round(rect.height) - NATIVE_WEBVIEW_TOP_ADJUST_PX;
+      if (width < 10 || height < 10) return;
+
+      let chromeLeft = 0;
+      let chromeTop = 0;
+      try {
+        const { getCurrentWindow } = await import("@tauri-apps/api/window");
+        const currentWindow = getCurrentWindow();
+        const [innerPosition, outerPosition, scaleFactor] = await Promise.all([
+          currentWindow.innerPosition(),
+          currentWindow.outerPosition(),
+          currentWindow.scaleFactor(),
+        ]);
+        const safeScale = Number.isFinite(scaleFactor) && scaleFactor > 0 ? scaleFactor : 1;
+        chromeLeft = Math.max(0, Math.round((innerPosition.x - outerPosition.x) / safeScale));
+        chromeTop = Math.max(0, Math.round((innerPosition.y - outerPosition.y) / safeScale));
+      } catch {
+        chromeLeft = 0;
+        chromeTop = 0;
       }
-      loadingTimerRef.current = window.setTimeout(() => {
-        loadingTimerRef.current = null;
-        if (loadingWatchdogRef.current !== null) {
-          window.clearTimeout(loadingWatchdogRef.current);
-          loadingWatchdogRef.current = null;
-        }
-        setLoading(false);
-        setDebug(`loading finished: ${reason}`);
-      }, delay);
-    },
-    [setDebug]
-  );
 
-  const endLoadingNow = useCallback(
-    (reason = "loaded") => {
-      clearLoadingTimers();
-      setLoading(false);
-      setDebug(`loading end: ${reason}`);
+      const x = Math.round(rect.left + chromeLeft);
+      const y = Math.round(rect.top + chromeTop + NATIVE_WEBVIEW_TOP_ADJUST_PX);
+      const signature = `${x}|${y}|${width}|${height}`;
+      if (!force && nativeBoundsSigRef.current === signature) return;
+      await syncNativeWebviewTabBounds(tabId, x, y, width, height);
+      nativeBoundsSigRef.current = signature;
     },
-    [clearLoadingTimers, setDebug]
+    [nativeMode, tabId]
   );
 
   useEffect(() => {
@@ -359,17 +353,14 @@ export function WebBrowser({
     if (lastNavRef.current === navKey) return;
     lastNavRef.current = navKey;
 
-    beginLoading(9000, "native navigate");
+    beginLoading(9000);
     void createOrShowNativeWebviewTab(tabId, url, shortHost(url), true)
-      .catch((error) => {
-        const message = error instanceof Error ? error.message : String(error);
-        setDebug(`native create failed, fallback navigate: ${message}`);
-        return navigateNativeWebviewTab(tabId, url);
-      })
+      .catch(() => navigateNativeWebviewTab(tabId, url))
+      .then(() => syncNativeBounds(true))
       .finally(() => {
-        finishLoadingSoon(260, "native bridge ack");
+        window.setTimeout(() => endLoadingNow(), 260);
       });
-  }, [beginLoading, finishLoadingSoon, isStartPage, nativeMode, nativeReloadToken, tabId, url]);
+  }, [beginLoading, endLoadingNow, isStartPage, nativeMode, nativeReloadToken, syncNativeBounds, tabId, url]);
 
   useEffect(() => {
     if (!nativeMode || !tabId) return;
@@ -381,32 +372,11 @@ export function WebBrowser({
     let scrollHandler: ((event: Event) => void) | null = null;
     let rafHandle: number | null = null;
 
-    const syncBounds = async () => {
-      if (disposed) return;
-      const anchor = anchorRef.current;
-      if (!anchor) return;
-      const rect = anchor.getBoundingClientRect();
-      const width = Math.round(rect.width);
-      const height = Math.round(rect.height);
-      if (width < 10 || height < 10) return;
-
-      const { getCurrentWindow } = await import("@tauri-apps/api/window");
-      const currentWindow = getCurrentWindow();
-      const [position, scaleFactor] = await Promise.all([currentWindow.innerPosition(), currentWindow.scaleFactor()]);
-      const safeScale = Number.isFinite(scaleFactor) && scaleFactor > 0 ? scaleFactor : 1;
-      const x = Math.round(position.x / safeScale + rect.left);
-      const y = Math.round(position.y / safeScale + rect.top);
-      const signature = `${x}|${y}|${width}|${height}`;
-      if (nativeBoundsSigRef.current === signature) return;
-      nativeBoundsSigRef.current = signature;
-      await syncNativeWebviewTabBounds(tabId, x, y, width, height);
-    };
-
     const scheduleSync = () => {
       if (disposed || rafHandle !== null) return;
       rafHandle = window.requestAnimationFrame(() => {
         rafHandle = null;
-        void syncBounds();
+        void syncNativeBounds();
       });
     };
 
@@ -447,7 +417,7 @@ export function WebBrowser({
       if (scrollHandler) window.removeEventListener("scroll", scrollHandler, true);
       nativeBoundsSigRef.current = "";
     };
-  }, [nativeMode, tabId]);
+  }, [nativeMode, syncNativeBounds, tabId]);
 
   useEffect(() => {
     if (!nativeMode || !tabId) return;
@@ -505,7 +475,7 @@ export function WebBrowser({
     if (raw === START_PAGE_URL) {
       setUrl(START_PAGE_URL);
       setInputUrl("");
-      endLoadingNow("start page");
+      endLoadingNow();
       onUrlChange?.(START_PAGE_URL);
       if (nativeMode) {
         void hideNativeWebviewTab(tabId);
@@ -517,7 +487,7 @@ export function WebBrowser({
     if (!normalized) return;
     setUrl(normalized);
     setInputUrl(normalized);
-    beginLoading(9000, "navigateTo");
+    beginLoading(9000);
     onUrlChange?.(normalized);
     if (nativeMode) {
       setNativeReloadToken((value) => value + 1);
@@ -599,15 +569,15 @@ export function WebBrowser({
   };
 
   const navButtonClass =
-    "inline-flex h-8 w-8 items-center justify-center rounded-lg text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:opacity-40 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-100";
+    "inline-flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100";
 
   return (
     <div
-      className="flex h-full flex-col bg-gray-50 text-gray-900 dark:bg-gray-950 dark:text-gray-100"
+      className="flex h-full flex-col bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100"
       onMouseDownCapture={keepNativeVisible}
       onPointerDownCapture={keepNativeVisible}
     >
-      <div className="z-10 shrink-0 border-b border-gray-100 bg-white/95 px-3 py-2 shadow-sm backdrop-blur dark:border-gray-800 dark:bg-gray-900/95">
+      <div className="z-10 shrink-0 border-b border-zinc-200 bg-white/95 px-3 py-2 shadow-sm backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/95">
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1">
             <button className={navButtonClass} title={t.navBack} onClick={navigateBack} disabled={nativeMode}>
@@ -620,16 +590,16 @@ export function WebBrowser({
               className={navButtonClass}
               onClick={() => {
                 if (isStartPage) {
-                  endLoadingNow("start page");
+                  endLoadingNow();
                   return;
                 }
                 if (nativeMode) {
-                  beginLoading(6000, "refresh-native");
+                  beginLoading(6000);
                   lastNavRef.current = "";
                   setNativeReloadToken((value) => value + 1);
                   return;
                 }
-                beginLoading(9000, "refresh-iframe");
+                beginLoading(9000);
                 setReloadToken((value) => value + 1);
               }}
               title={t.refresh}
@@ -648,7 +618,7 @@ export function WebBrowser({
             }}
             className="relative mx-auto flex-1"
           >
-            <div className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 dark:text-gray-500">
+            <div className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 dark:text-zinc-500">
               <Lock size={14} />
             </div>
             <input
@@ -656,11 +626,11 @@ export function WebBrowser({
               value={inputUrl}
               onChange={(event) => setInputUrl(event.target.value)}
               placeholder={t.addressPlaceholder}
-              className="w-full rounded-xl border border-gray-200 bg-gray-50 py-2 pl-9 pr-10 text-sm text-gray-900 transition-all placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-teal-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100 dark:placeholder:text-gray-500"
+              className="w-full rounded-xl border border-zinc-200 bg-zinc-50 py-2 pl-9 pr-10 text-sm text-zinc-900 transition-all placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-[var(--reader-accent)] dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-500"
             />
             <button
               type="button"
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 transition-colors dark:text-gray-500"
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 transition-colors dark:text-zinc-500"
               title={bookmarked ? t.bookmarkRemove : t.bookmarkAdd}
               onClick={toggleBookmark}
               style={{ color: bookmarked ? "var(--reader-accent)" : undefined }}
@@ -670,12 +640,8 @@ export function WebBrowser({
           </form>
 
           <div className="ml-auto flex items-center gap-1.5">
-            <span className="hidden items-center rounded-full border border-gray-200 bg-gray-50 px-2 py-1 text-[11px] font-medium text-gray-600 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 lg:inline-flex">
-              {nativeMode ? t.statusNative : t.statusIframe}
-            </span>
-
             <button
-              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-200 dark:hover:bg-gray-800"
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-900"
               onClick={handleOpenPdfInApp}
               title={looksLikePdfUrl(pdfLink) ? t.openPdfInAppHintDetected : t.openPdfInAppHintFallback}
             >
@@ -703,7 +669,7 @@ export function WebBrowser({
                 <MoreVertical size={16} />
               </button>
               {menuOpen ? (
-                <div className="absolute right-0 top-10 z-30 w-64 rounded-2xl border border-gray-100 bg-white p-2 shadow-sm dark:border-gray-800 dark:bg-gray-900">
+                <div className="absolute right-0 top-10 z-30 w-64 rounded-2xl border border-zinc-200 bg-white p-2 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
                   <MenuButton
                     icon={<Star size={14} />}
                     label={bookmarked ? t.bookmarkRemove : t.bookmarkAdd}
@@ -742,36 +708,17 @@ export function WebBrowser({
             </div>
           </div>
         </div>
-
-        <div className="mt-2 flex items-center gap-2 overflow-x-auto pb-0.5 no-scrollbar">
-          <span className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-[11px] font-mono text-gray-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400">
-            {nativeMode ? t.debugNative : t.debugIframe} | {loading ? t.debugLoading : t.debugIdle}
-          </span>
-          <span className="inline-flex max-w-[38rem] truncate rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-[11px] font-mono text-gray-500 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400" title={debugHint}>
-            {debugHint}
-          </span>
-          {quickLinks.map((item) => (
-            <button
-              key={item.id}
-              onClick={() => navigateTo(item.url)}
-              className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs text-gray-700 transition-colors hover:bg-gray-50 dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300 dark:hover:bg-gray-800"
-            >
-              <Link2 size={12} />
-              {item.title}
-            </button>
-          ))}
-        </div>
       </div>
 
       {showIframeCompatibilityNotice ? (
-        <div className="mx-4 mt-3 rounded-2xl border border-gray-100 bg-white px-4 py-3 text-xs text-gray-600 shadow-sm dark:border-gray-800 dark:bg-gray-900 dark:text-gray-300">
+        <div className="mx-4 mt-3 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-xs text-zinc-600 shadow-sm dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300">
           {t.iframeNotice}
         </div>
       ) : null}
 
       <div
         ref={anchorRef}
-        className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-white dark:bg-gray-950"
+        className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-white dark:bg-zinc-950"
         onMouseEnter={() => {
           if (!nativeMode || isStartPage) return;
           void showNativeWebviewTab(tabId, false);
@@ -782,8 +729,8 @@ export function WebBrowser({
         }}
       >
         {loading ? (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/80 text-sm text-gray-500 dark:bg-gray-950/70 dark:text-gray-300">
-            <div className="inline-flex items-center gap-2 rounded-xl border border-gray-100 bg-white px-3 py-2 shadow-sm dark:border-gray-800 dark:bg-gray-900">
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/80 text-sm text-zinc-500 dark:bg-zinc-950/70 dark:text-zinc-300">
+            <div className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 py-2 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
               <Loader2 className="h-4 w-4 animate-spin" />
               {t.loadingPage} {url || "page"}...
             </div>
@@ -793,11 +740,11 @@ export function WebBrowser({
         {isStartPage ? (
           <StartPage quickLinks={quickLinks} onNavigate={navigateTo} language={language} />
         ) : nativeMode ? (
-          <div className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center text-gray-400 dark:text-gray-600">
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-6 text-center text-zinc-400 dark:text-zinc-600">
             <GlobeIcon className="mb-4 h-16 w-16 opacity-20" />
-            <p className="text-xl font-semibold tracking-tight text-gray-700 dark:text-gray-300">{t.nativeActiveTitle}</p>
-            <p className="mt-2 max-w-lg text-sm text-gray-500 dark:text-gray-400">{t.nativeActiveDesc}</p>
-            <p className="mt-3 text-xs font-mono text-gray-400 dark:text-gray-500">{url}</p>
+            <p className="text-xl font-semibold tracking-tight text-zinc-700 dark:text-zinc-300">{t.nativeActiveTitle}</p>
+            <p className="mt-2 max-w-lg text-sm text-zinc-500 dark:text-zinc-400">{t.nativeActiveDesc}</p>
+            <p className="mt-3 text-xs font-mono text-zinc-400 dark:text-zinc-500">{url}</p>
           </div>
         ) : url ? (
           <iframe
@@ -806,13 +753,13 @@ export function WebBrowser({
             src={url}
             className="absolute inset-0 h-full w-full border-0"
             title={url}
-            onLoad={() => endLoadingNow("iframe onLoad")}
-            onError={() => endLoadingNow("iframe onError")}
+            onLoad={() => endLoadingNow()}
+            onError={() => endLoadingNow()}
           />
         ) : (
-          <div className="absolute inset-0 flex flex-col items-center justify-center text-gray-400 dark:text-gray-600">
+          <div className="absolute inset-0 flex flex-col items-center justify-center text-zinc-400 dark:text-zinc-600">
             <GlobeIcon className="mb-4 h-16 w-16 opacity-20" />
-            <p className="text-xl font-semibold tracking-tight text-gray-700 dark:text-gray-300">{t.emptyTitle}</p>
+            <p className="text-xl font-semibold tracking-tight text-zinc-700 dark:text-zinc-300">{t.emptyTitle}</p>
           </div>
         )}
       </div>
@@ -823,7 +770,7 @@ export function WebBrowser({
 function MenuButton({ icon, label, onClick, disabled = false }: { icon: ReactNode; label: string; onClick: () => void; disabled?: boolean }) {
   return (
     <button
-      className="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50 disabled:opacity-50 dark:text-gray-300 dark:hover:bg-gray-800"
+      className="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-900"
       onClick={onClick}
       disabled={disabled}
     >

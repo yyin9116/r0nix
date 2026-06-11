@@ -11,8 +11,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::{
-    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size, Url, WebviewUrl,
-    WebviewWindowBuilder,
+    webview::WebviewBuilder, AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position,
+    Size, Url, WebviewUrl,
 };
 use tokio::sync::Mutex;
 
@@ -22,6 +22,61 @@ static CANCELED_REQUESTS: once_cell::sync::Lazy<Mutex<HashSet<String>>> =
 static WEBVIEW_TABS: once_cell::sync::Lazy<Mutex<HashMap<String, String>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 const DEFAULT_NATIVE_WEBVIEW_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 Edg/132.0.0.0";
+const NATIVE_WEBVIEW_NAV_PATCH_SCRIPT: &str = r#"(function () {
+  if ((window).__r0nixNavPatchInstalled) return;
+  (window).__r0nixNavPatchInstalled = true;
+
+  const toAbsolute = (raw) => {
+    if (typeof raw !== "string") return "";
+    const value = raw.trim();
+    if (!value) return "";
+    try {
+      return new URL(value, window.location.href).toString();
+    } catch {
+      return "";
+    }
+  };
+
+  const navigateCurrent = (raw) => {
+    const next = toAbsolute(raw);
+    if (!next) return false;
+    window.location.assign(next);
+    return true;
+  };
+
+  const originalOpen = window.open ? window.open.bind(window) : null;
+  window.open = function (url, target, features) {
+    if (navigateCurrent(String(url || ""))) {
+      return window;
+    }
+    if (originalOpen) {
+      try {
+        return originalOpen(url, target, features);
+      } catch {
+        return window;
+      }
+    }
+    return window;
+  };
+
+  document.addEventListener(
+    "click",
+    function (event) {
+      const node = event.target;
+      if (!(node instanceof Element)) return;
+      const anchor = node.closest("a[href]");
+      if (!anchor) return;
+      const target = (anchor.getAttribute("target") || "").toLowerCase();
+      if (target !== "_blank") return;
+      const href = anchor.getAttribute("href") || "";
+      if (!href) return;
+      if (!navigateCurrent(href)) return;
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    true
+  );
+})();"#;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,24 +121,25 @@ fn parse_webview_url(url: &str) -> Result<Url, String> {
     Url::parse(url).map_err(|err| format!("invalid webview url: {err}"))
 }
 
-fn is_pdf_url(url: &str) -> bool {
+pub(crate) fn is_pdf_url(url: &str) -> bool {
     let lowered_raw = url.to_ascii_lowercase();
     if lowered_raw.contains(".pdf")
         || lowered_raw.contains("%2epdf")
         || lowered_raw.contains("%2fpdf")
+        || lowered_raw.contains("application/pdf")
     {
         return true;
     }
 
     if let Ok(parsed) = Url::parse(url) {
         let path = parsed.path().to_ascii_lowercase();
-        if path.ends_with(".pdf") {
-            return true;
-        }
-        if path.contains("/pdf/") || path.contains("/pdfs/") || path.ends_with("/pdf") {
-            return true;
-        }
-        if path.contains("/download") && path.contains("pdf") {
+        if path.ends_with(".pdf")
+            || path.contains("/pdf/")
+            || path.contains("/pdfs/")
+            || path.ends_with("/pdf")
+            || path.ends_with("/pdfs")
+            || (path.contains("/download") && path.contains("pdf"))
+        {
             return true;
         }
         for segment in path.split('/') {
@@ -109,24 +165,9 @@ fn is_pdf_url(url: &str) -> bool {
             }
         }
         if parsed
-            .query()
-            .map(|value| {
-                let query = value.to_ascii_lowercase();
-                query.contains(".pdf")
-                    || query.contains("application/pdf")
-                    || query.contains("format=pdf")
-                    || query.contains("type=pdf")
-                    || query.contains("mime=pdf")
-                    || query.contains("output=pdf")
-            })
-            .unwrap_or(false)
-        {
-            return true;
-        }
-        if parsed
             .fragment()
-            .map(|value| {
-                let fragment = value.to_ascii_lowercase();
+            .map(|fragment| {
+                let fragment = fragment.to_ascii_lowercase();
                 fragment.contains(".pdf")
                     || fragment.contains("application/pdf")
                     || fragment.contains("format=pdf")
@@ -138,10 +179,8 @@ fn is_pdf_url(url: &str) -> bool {
         }
         return false;
     }
-    lowered_raw.contains(".pdf")
-        || lowered_raw.contains("%2epdf")
-        || lowered_raw.contains("/pdf/")
-        || lowered_raw.contains("/pdfs/")
+
+    lowered_raw.contains("/pdf/") || lowered_raw.contains("/pdfs/")
 }
 
 #[tauri::command]
@@ -269,7 +308,8 @@ pub async fn open_pdf(file_id: String, path: String) -> Result<PdfInfo, String> 
     drop(manager);
 
     let page_count_task_path = path.clone();
-    let page_count_task = tokio::task::spawn_blocking(move || get_pdf_page_count(&page_count_task_path));
+    let page_count_task =
+        tokio::task::spawn_blocking(move || get_pdf_page_count(&page_count_task_path));
 
     match tokio::time::timeout(Duration::from_secs(8), page_count_task).await {
         Ok(Ok(Ok(page_count))) => {
@@ -488,8 +528,8 @@ pub async fn download_pdf_via_proxy(
     if let Some(proxy) = proxy_url {
         let trimmed = proxy.trim().to_string();
         if !trimmed.is_empty() {
-            let req_proxy = reqwest::Proxy::all(&trimmed)
-                .map_err(|err| format!("invalid proxy url: {err}"))?;
+            let req_proxy =
+                reqwest::Proxy::all(&trimmed).map_err(|err| format!("invalid proxy url: {err}"))?;
             client_builder = client_builder.proxy(req_proxy);
         }
     }
@@ -539,39 +579,31 @@ pub async fn create_or_show_webview_tab(
     }
     let parsed_url = parse_webview_url(&url)?;
     let label = native_webview_label(&tab_id);
+    let _ = title;
     {
         let mut tabs = WEBVIEW_TABS.lock().await;
         tabs.insert(tab_id.clone(), label.clone());
     }
 
-    if let Some(window) = app.get_webview_window(&label) {
-        window
+    if let Some(webview) = app.get_webview(&label) {
+        webview
             .navigate(parsed_url)
             .map_err(|err| format!("navigate existing webview failed: {err}"))?;
-        window
+        webview
             .show()
             .map_err(|err| format!("show existing webview failed: {err}"))?;
         if focus.unwrap_or(false) {
-            window
+            webview
                 .set_focus()
                 .map_err(|err| format!("focus existing webview failed: {err}"))?;
-        }
-        if let Some(window_title) = title {
-            let _ = window.set_title(&window_title);
         }
         return Ok(label);
     }
 
-    let mut builder = WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(parsed_url))
-        .visible(true)
-        .focused(focus.unwrap_or(false))
-        .resizable(true)
-        .decorations(false)
-        .shadow(false)
-        .always_on_top(false)
-        .skip_taskbar(true)
+    let mut builder = WebviewBuilder::new(&label, WebviewUrl::External(parsed_url))
         .user_agent(DEFAULT_NATIVE_WEBVIEW_UA)
-        .title(title.as_deref().unwrap_or("Web Tab"));
+        .focused(focus.unwrap_or(false))
+        .initialization_script(NATIVE_WEBVIEW_NAV_PATCH_SCRIPT);
     let nav_app = app.clone();
     let nav_tab_id = tab_id.clone();
     builder = builder.on_navigation(move |url| {
@@ -591,17 +623,15 @@ pub async fn create_or_show_webview_tab(
         let _ = nav_app.emit("r0nix://webview-navigated", payload);
         true
     });
-    if let Some(main) = app.get_webview_window("main") {
-        if let Ok(size) = main.inner_size() {
-            let width = (size.width as f64 * 0.82).max(920.0);
-            let height = (size.height as f64 * 0.84).max(680.0);
-            builder = builder.inner_size(width, height);
-        }
-    }
-
-    builder
-        .build()
-        .map_err(|err| format!("build native webview failed: {err}"))?;
+    let main = app
+        .get_window("main")
+        .ok_or_else(|| "main window is unavailable".to_string())?;
+    main.add_child(
+        builder,
+        Position::Logical(LogicalPosition::new(0.0, 0.0)),
+        Size::Logical(LogicalSize::new(1.0, 1.0)),
+    )
+    .map_err(|err| format!("build embedded native webview failed: {err}"))?;
     Ok(label)
 }
 
@@ -619,8 +649,8 @@ pub async fn navigate_webview_tab(
             .unwrap_or_else(|| native_webview_label(&tab_id))
     };
 
-    if let Some(window) = app.get_webview_window(&label) {
-        window
+    if let Some(webview) = app.get_webview(&label) {
+        webview
             .navigate(parsed_url)
             .map_err(|err| format!("navigate native webview failed: {err}"))?;
     }
@@ -639,12 +669,12 @@ pub async fn show_webview_tab(
             .cloned()
             .unwrap_or_else(|| native_webview_label(&tab_id))
     };
-    if let Some(window) = app.get_webview_window(&label) {
-        window
+    if let Some(webview) = app.get_webview(&label) {
+        webview
             .show()
             .map_err(|err| format!("show native webview failed: {err}"))?;
         if focus.unwrap_or(false) {
-            window
+            webview
                 .set_focus()
                 .map_err(|err| format!("focus native webview failed: {err}"))?;
         }
@@ -660,8 +690,8 @@ pub async fn hide_webview_tab(app: AppHandle, tab_id: String) -> Result<(), Stri
             .cloned()
             .unwrap_or_else(|| native_webview_label(&tab_id))
     };
-    if let Some(window) = app.get_webview_window(&label) {
-        window
+    if let Some(webview) = app.get_webview(&label) {
+        webview
             .hide()
             .map_err(|err| format!("hide native webview failed: {err}"))?;
     }
@@ -683,16 +713,17 @@ pub async fn sync_webview_tab_bounds(
             .cloned()
             .unwrap_or_else(|| native_webview_label(&tab_id))
     };
-    if let Some(window) = app.get_webview_window(&label) {
-        let safe_width = width.max(360.0);
-        let safe_height = height.max(240.0);
-        window
-            .set_size(Size::Logical(LogicalSize::new(safe_width, safe_height)))
-            .map_err(|err| format!("sync native webview size failed: {err}"))?;
-        window
-            .set_position(Position::Logical(LogicalPosition::new(x, y)))
-            .map_err(|err| format!("sync native webview position failed: {err}"))?;
-    }
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| format!("native webview does not exist: {label}"))?;
+    let safe_width = width.max(1.0);
+    let safe_height = height.max(1.0);
+    webview
+        .set_size(Size::Logical(LogicalSize::new(safe_width, safe_height)))
+        .map_err(|err| format!("sync native webview size failed: {err}"))?;
+    webview
+        .set_position(Position::Logical(LogicalPosition::new(x, y)))
+        .map_err(|err| format!("sync native webview position failed: {err}"))?;
     Ok(())
 }
 
@@ -703,10 +734,46 @@ pub async fn close_webview_tab(app: AppHandle, tab_id: String) -> Result<(), Str
         tabs.remove(&tab_id)
             .unwrap_or_else(|| native_webview_label(&tab_id))
     };
-    if let Some(window) = app.get_webview_window(&label) {
-        window
+    if let Some(webview) = app.get_webview(&label) {
+        webview
             .close()
             .map_err(|err| format!("close native webview failed: {err}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_pdf_url;
+
+    #[test]
+    fn detects_common_pdf_navigation_urls() {
+        let pdf_urls = [
+            "https://example.com/paper.pdf",
+            "https://example.com/article/pdf/10.1000/demo",
+            "https://example.com/pdfs/abc",
+            "https://example.com/download?file=paper.pdf",
+            "https://example.com/export?format=pdf",
+            "https://example.com/view#type=pdf",
+            "https://example.com/view?mime=application/pdf",
+            "https://example.com/download%2Fpaper%2Epdf",
+        ];
+
+        for url in pdf_urls {
+            assert!(is_pdf_url(url), "expected PDF URL: {url}");
+        }
+    }
+
+    #[test]
+    fn ignores_non_pdf_navigation_urls() {
+        let non_pdf_urls = [
+            "https://example.com/article/html/10.1000/demo",
+            "https://example.com/download?file=paper.txt",
+            "https://example.com/profile",
+        ];
+
+        for url in non_pdf_urls {
+            assert!(!is_pdf_url(url), "expected non-PDF URL: {url}");
+        }
+    }
 }
