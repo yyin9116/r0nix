@@ -52,7 +52,17 @@ fn copy_python_runtime() -> io::Result<()> {
     for entry in fs::read_dir(&runtime_src)? {
         let entry = entry?;
         let src = entry.path();
-        if src.is_file() && src.extension().map(|ext| ext == "dll").unwrap_or(false) {
+        let is_python_runtime_lib = src
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| {
+                name == "python3.dll"
+                    || (name.starts_with("python") && name.ends_with(".dll"))
+                    || (name.starts_with("libpython") && name.ends_with(".dylib"))
+                    || (name.starts_with("libpython") && name.ends_with(".so"))
+            })
+            .unwrap_or(false);
+        if src.is_file() && is_python_runtime_lib {
             let dst = profile_dir.join(entry.file_name());
             if let Err(err) = fs::copy(src, dst) {
                 if err.kind() != io::ErrorKind::PermissionDenied {

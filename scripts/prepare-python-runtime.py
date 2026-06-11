@@ -58,7 +58,7 @@ def prepare_runtime(runtime_dir: Path) -> None:
     zip_name = f"python{py_ver}.zip"
     zip_path = runtime_dir / zip_name
 
-    for dll_name in ("python311.dll", "python3.dll"):
+    for dll_name in (f"python{py_ver}.dll", "python3.dll"):
         copy_file(python_home / dll_name, runtime_dir / dll_name)
 
     extra_win_dlls = [

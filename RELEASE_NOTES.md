@@ -1,4 +1,4 @@
-# Release Notes
+﻿# Release Notes
 
 ## v0.0.2
 
@@ -10,6 +10,3 @@
 - PDF 图片检测接入 Tauri + PyMuPDF 后端，支持更准确的图片框与类型显示。
 - 阅读器交互与侧栏逻辑优化（缩略图、注释面板、右键菜单、链接可点击等）。
 - 白板能力增强并支持本地持久化存储，重启后自动恢复。
-
-### 说明
-- 本次发布不包含原型目录（`lucid-start-page/`、`r0nix---scientific-reader (2)/`）。

@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::env;
+use std::ffi::CStr;
 use std::path::PathBuf;
 use std::sync::Once;
 
@@ -27,23 +28,66 @@ fn runtime_candidates() -> Vec<PathBuf> {
 
 fn pick_runtime_home() -> Option<PathBuf> {
     runtime_candidates().into_iter().find(|candidate| {
-        candidate.join("python311.zip").exists()
-            || candidate.join("Lib").join("encodings").exists()
-            || candidate.join("site-packages").join("fitz").exists()
+        candidate_has_matching_stdlib(candidate) || candidate.join("Lib").join("encodings").exists()
     })
+}
+
+fn linked_python_tag() -> Option<String> {
+    unsafe {
+        let raw = pyo3::ffi::Py_GetVersion();
+        if raw.is_null() {
+            return None;
+        }
+        let version = CStr::from_ptr(raw).to_string_lossy();
+        let mut parts = version.split_whitespace().next()?.split('.');
+        let major = parts.next()?;
+        let minor = parts.next()?;
+        Some(format!("python{major}{minor}"))
+    }
+}
+
+fn candidate_has_matching_stdlib(candidate: &std::path::Path) -> bool {
+    let Some(tag) = linked_python_tag() else {
+        return false;
+    };
+    candidate.join(format!("{tag}.zip")).exists()
+        || candidate
+            .join("lib")
+            .join(format!("python{}.{}", &tag[6..7], &tag[7..]))
+            .join("encodings")
+            .exists()
 }
 
 fn ensure_python_runtime() {
     PYTHON_RUNTIME_ONCE.call_once(|| {
         if let Some(runtime_home) = pick_runtime_home() {
             let runtime_str = runtime_home.to_string_lossy().into_owned();
-            let stdlib_zip = runtime_home.join("python311.zip");
             let site_packages = runtime_home.join("site-packages");
             let lib_site_packages = runtime_home.join("Lib").join("site-packages");
+            let linked_tag = linked_python_tag();
 
             let mut python_paths = Vec::new();
-            if stdlib_zip.exists() {
-                python_paths.push(stdlib_zip.to_string_lossy().into_owned());
+            if let Ok(entries) = std::fs::read_dir(&runtime_home) {
+                let mut stdlib_zips = entries
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|path| {
+                        path.file_name()
+                            .and_then(|name| name.to_str())
+                            .map(|name| {
+                                name.ends_with(".zip")
+                                    && linked_tag
+                                        .as_deref()
+                                        .map(|tag| name == format!("{tag}.zip"))
+                                        .unwrap_or(false)
+                            })
+                            .unwrap_or(false)
+                    })
+                    .collect::<Vec<_>>();
+                stdlib_zips.sort();
+                for stdlib_zip in stdlib_zips {
+                    python_paths.push(stdlib_zip.to_string_lossy().into_owned());
+                }
             }
             python_paths.push(runtime_str.clone());
             if site_packages.exists() {
@@ -53,8 +97,11 @@ fn ensure_python_runtime() {
                 python_paths.push(lib_site_packages.to_string_lossy().into_owned());
             }
 
-            env::set_var("PYTHONHOME", &runtime_str);
-            env::set_var("PYTHONPATH", python_paths.join(";"));
+            if candidate_has_matching_stdlib(&runtime_home) {
+                env::set_var("PYTHONHOME", &runtime_str);
+            }
+            let separator = if cfg!(windows) { ";" } else { ":" };
+            env::set_var("PYTHONPATH", python_paths.join(separator));
         }
 
         pyo3::prepare_freethreaded_python();
@@ -124,7 +171,6 @@ pub fn render_page_svg(path: &str, page_no: usize) -> Result<String, String> {
     })
     .map_err(|err| format!("pymupdf svg export failed: {err}"))
 }
-
 
 pub fn get_page_images_json(path: &str, page_no: usize) -> Result<String, String> {
     ensure_python_runtime();
@@ -197,9 +243,9 @@ finally:
             Some(&locals),
         )?;
 
-        let result_obj = locals
-            .get_item("result")?
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("missing result from python"))?;
+        let result_obj = locals.get_item("result")?.ok_or_else(|| {
+            pyo3::exceptions::PyRuntimeError::new_err("missing result from python")
+        })?;
         result_obj.extract()
     })
     .map_err(|err| format!("pymupdf list images failed: {err}"))
