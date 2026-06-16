@@ -89,9 +89,8 @@ jobs:
           [[ -n "$APPLE_TEAM_ID_SECRET" ]] || missing+=("APPLE_TEAM_ID")
 
           if (( ${#missing[@]} > 0 )); then
-            printf 'macOS release packaging requires Developer ID signing and notarization secrets. Missing: %s\n' "${missing[*]}" >&2
-            printf 'Unsigned DMG/app artifacts are blocked because Gatekeeper can report them as damaged after download.\n' >&2
-            printf 'macOS artifacts will be skipped for this release; configure the missing secrets and push a new tag to publish signed macOS builds.\n' >&2
+            printf 'macOS Developer ID signing and notarization secrets are missing: %s\n' "${missing[*]}" >&2
+            printf 'Building an ad-hoc signed macOS package instead. This package is usable, but users may need to approve it manually in macOS Security settings.\n' >&2
             echo "has_secrets=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -99,6 +98,13 @@ jobs:
 
       - name: Build Tauri Bundles
         if: matrix.platform.name != 'macos'
+        run: npx tauri build --bundles "${{ matrix.platform.bundles }}"
+
+      - name: Build Ad-Hoc macOS Bundles
+        if: matrix.platform.name == 'macos' && steps.macos_signing.outputs.has_secrets != 'true'
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
         run: npx tauri build --bundles "${{ matrix.platform.bundles }}"
 
       - name: Build Signed and Notarized macOS Bundles
@@ -114,7 +120,6 @@ jobs:
         run: npx tauri build --bundles "${{ matrix.platform.bundles }}"
 
       - name: Upload Build Artifacts
-        if: matrix.platform.name != 'macos' || steps.macos_signing.outputs.has_secrets == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform.artifact_name }}

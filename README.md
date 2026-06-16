@@ -42,7 +42,7 @@ r0nix 是一个面向科研阅读的本地桌面应用：打开 PDF，顺手查�
 - Windows：`.exe` 或 `.msi`
 - macOS：`.dmg`
 
-安装后启动 `r0nix`。当前版本为 `0.0.3`。macOS 正式下载包会经过 Developer ID 签名和 Apple 公证，避免系统把下载后的应用误报为“已损坏”。
+安装后启动 `r0nix`。当前版本为 `0.0.6`。macOS 在配置 Developer ID 签名和 Apple 公证凭据时会发布正式签名包；缺少这些凭据时，Release 会生成 ad-hoc 签名的可用 DMG，首次打开可能需要在 macOS“隐私与安全性”里手动允许。
 
 ## 🔐 阅读辅助和隐私
 
@@ -101,4 +101,4 @@ npm run check:release
 - `APPLE_PASSWORD`
 - `APPLE_TEAM_ID`
 
-缺少这些签名和公证凭据时，release workflow 会阻止上传 macOS DMG。这样可以避免未签名安装包进入 GitHub Releases 后，在用户机器上被 Gatekeeper 显示为“应用已损坏”。
+缺少这些签名和公证凭据时，release workflow 会改用 ad-hoc signing 打出 macOS DMG。这个包可以用于测试和临时分发，但不等同于 Developer ID 公证包；面向普通用户稳定分发前，应补齐上述 Secrets 后重新发布。

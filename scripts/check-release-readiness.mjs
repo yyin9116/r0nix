@@ -44,7 +44,8 @@ assert(!permissions.includes("updater:default"), "Default capability must not ex
 assert(permissions.includes("shell:allow-open"), "Shell open permission is required for explicit external HTTP(S) links.");
 assert(releaseWorkflow.includes("APPLE_CERTIFICATE"), "macOS release workflow must require Apple signing secrets.");
 assert(releaseWorkflow.includes("APPLE_TEAM_ID"), "macOS release workflow must require Apple notarization team ID.");
-assert(releaseWorkflow.includes("Unsigned DMG/app artifacts are blocked"), "macOS unsigned release artifacts must be blocked.");
+assert(releaseWorkflow.includes('APPLE_SIGNING_IDENTITY: "-"'), "macOS release workflow must provide an ad-hoc signing fallback for unsigned builds.");
+assert(releaseWorkflow.includes("Build Ad-Hoc macOS Bundles"), "macOS release workflow must name the ad-hoc packaging path explicitly.");
 
 for (const iconPath of bundle.icon || []) {
   assert(existsSync(path.join(root, "src-tauri", iconPath)), `Missing bundle icon: ${iconPath}`);
