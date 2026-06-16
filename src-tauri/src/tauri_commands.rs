@@ -8,6 +8,7 @@ use image::{imageops, ColorType, ImageEncoder, RgbaImage};
 use pdf_core::{plan_visible_tiles, PdfInfo, TileReadyPayload, TileRequestAck, TileViewport};
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::{
@@ -121,6 +122,51 @@ fn parse_webview_url(url: &str) -> Result<Url, String> {
     Url::parse(url).map_err(|err| format!("invalid webview url: {err}"))
 }
 
+fn ensure_non_empty_path(path: &str) -> Result<PathBuf, String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("path is empty".to_string());
+    }
+    Ok(PathBuf::from(trimmed))
+}
+
+fn ensure_importable_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(|ext| {
+            let ext = ext.to_ascii_lowercase();
+            ext == "pdf" || ext == "md" || ext == "markdown"
+        })
+        .unwrap_or(false)
+}
+
+fn ensure_markdown_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .map(|ext| {
+            let ext = ext.to_ascii_lowercase();
+            ext == "md" || ext == "markdown"
+        })
+        .unwrap_or(false)
+}
+
+fn sanitize_file_name(file_name: &str) -> Result<String, String> {
+    let name = file_name.trim();
+    if name.is_empty() {
+        return Err("file name is empty".to_string());
+    }
+    if name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        return Err("file name must not contain path separators".to_string());
+    }
+    Ok(name.to_string())
+}
+
+fn decode_base64_bytes(data_base64: &str) -> Result<Vec<u8>, String> {
+    BASE64
+        .decode(data_base64)
+        .map_err(|err| format!("invalid base64 payload: {err}"))
+}
+
 pub(crate) fn is_pdf_url(url: &str) -> bool {
     let lowered_raw = url.to_ascii_lowercase();
     if lowered_raw.contains(".pdf")
@@ -199,6 +245,137 @@ pub async fn frontend_log(
         }
     }
     Ok(())
+}
+
+fn ensure_allowed_text_write_path(path: &Path) -> Result<(), String> {
+    let allowed = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|ext| {
+            let ext = ext.to_ascii_lowercase();
+            matches!(
+                ext.as_str(),
+                "md" | "markdown" | "csv" | "json" | "svg" | "txt"
+            )
+        })
+        .unwrap_or(false);
+    if allowed {
+        Ok(())
+    } else {
+        Err("text write only supports md, markdown, csv, json, svg, or txt files".to_string())
+    }
+}
+
+fn ensure_allowed_binary_write_path(path: &Path) -> Result<(), String> {
+    let allowed = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|ext| {
+            let ext = ext.to_ascii_lowercase();
+            matches!(ext.as_str(), "pdf" | "png" | "jpg" | "jpeg")
+        })
+        .unwrap_or(false);
+    if allowed {
+        Ok(())
+    } else {
+        Err("binary write only supports pdf, png, jpg, or jpeg files".to_string())
+    }
+}
+
+#[tauri::command]
+pub async fn read_text_file(path: String) -> Result<String, String> {
+    let path = ensure_non_empty_path(&path)?;
+    if !ensure_markdown_extension(&path) {
+        return Err("only markdown files can be read as text".to_string());
+    }
+    tokio::task::spawn_blocking(move || {
+        std::fs::read_to_string(&path)
+            .map_err(|err| format!("failed to read text file {}: {err}", path.display()))
+    })
+    .await
+    .map_err(|err| format!("read text task failed: {err}"))?
+}
+
+#[tauri::command]
+pub async fn write_text_file(path: String, content: String) -> Result<(), String> {
+    let path = ensure_non_empty_path(&path)?;
+    ensure_allowed_text_write_path(&path)?;
+    tokio::task::spawn_blocking(move || {
+        std::fs::write(&path, content)
+            .map_err(|err| format!("failed to write text file {}: {err}", path.display()))
+    })
+    .await
+    .map_err(|err| format!("write text task failed: {err}"))?
+}
+
+#[tauri::command]
+pub async fn write_binary_file(path: String, data_base64: String) -> Result<(), String> {
+    let path = ensure_non_empty_path(&path)?;
+    ensure_allowed_binary_write_path(&path)?;
+    let bytes = decode_base64_bytes(&data_base64)?;
+    tokio::task::spawn_blocking(move || {
+        std::fs::write(&path, bytes)
+            .map_err(|err| format!("failed to write binary file {}: {err}", path.display()))
+    })
+    .await
+    .map_err(|err| format!("write binary task failed: {err}"))?
+}
+
+#[tauri::command]
+pub async fn write_temp_file(
+    app: AppHandle,
+    file_name: String,
+    data_base64: String,
+) -> Result<String, String> {
+    let file_name = sanitize_file_name(&file_name)?;
+    let mut path = app
+        .path()
+        .temp_dir()
+        .map_err(|err| format!("temp directory unavailable: {err}"))?;
+    path.push(file_name);
+    if !ensure_importable_extension(&path) {
+        return Err("temporary files only support pdf, md, or markdown files".to_string());
+    }
+    let bytes = decode_base64_bytes(&data_base64)?;
+    let output_path = path.clone();
+    tokio::task::spawn_blocking(move || {
+        std::fs::write(&path, bytes)
+            .map_err(|err| format!("failed to write temp file {}: {err}", path.display()))
+    })
+    .await
+    .map_err(|err| format!("write temp task failed: {err}"))??;
+    Ok(output_path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+pub async fn collect_importable_paths(root: String) -> Result<Vec<String>, String> {
+    let root = ensure_non_empty_path(&root)?;
+    tokio::task::spawn_blocking(move || {
+        let mut results = Vec::new();
+        let mut stack = vec![root];
+        while let Some(current) = stack.pop() {
+            let entries = match std::fs::read_dir(&current) {
+                Ok(entries) => entries,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                if ensure_importable_extension(&path) {
+                    results.push(path.to_string_lossy().to_string());
+                }
+                if results.len() >= 5000 {
+                    return Ok(results);
+                }
+            }
+        }
+        Ok(results)
+    })
+    .await
+    .map_err(|err| format!("collect importable paths task failed: {err}"))?
 }
 
 fn encode_tile_png_base64(tile: &RgbaImage) -> Result<String, String> {
@@ -658,6 +835,36 @@ pub async fn navigate_webview_tab(
 }
 
 #[tauri::command]
+pub async fn navigate_webview_tab_history(
+    app: AppHandle,
+    tab_id: String,
+    direction: String,
+) -> Result<(), String> {
+    let label = {
+        let tabs = WEBVIEW_TABS.lock().await;
+        tabs.get(&tab_id)
+            .cloned()
+            .unwrap_or_else(|| native_webview_label(&tab_id))
+    };
+    let script = match direction.as_str() {
+        "back" => "history.back();",
+        "forward" => "history.forward();",
+        other => {
+            return Err(format!(
+                "unsupported native webview history direction: {other}"
+            ))
+        }
+    };
+    let webview = app
+        .get_webview(&label)
+        .ok_or_else(|| format!("native webview does not exist: {label}"))?;
+    webview
+        .eval(script)
+        .map_err(|err| format!("navigate native webview history failed: {err}"))?;
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn show_webview_tab(
     app: AppHandle,
     tab_id: String,
@@ -744,7 +951,11 @@ pub async fn close_webview_tab(app: AppHandle, tab_id: String) -> Result<(), Str
 
 #[cfg(test)]
 mod tests {
-    use super::is_pdf_url;
+    use super::{
+        ensure_allowed_binary_write_path, ensure_allowed_text_write_path,
+        ensure_importable_extension, ensure_markdown_extension, is_pdf_url, sanitize_file_name,
+    };
+    use std::path::Path;
 
     #[test]
     fn detects_common_pdf_navigation_urls() {
@@ -775,5 +986,33 @@ mod tests {
         for url in non_pdf_urls {
             assert!(!is_pdf_url(url), "expected non-PDF URL: {url}");
         }
+    }
+
+    #[test]
+    fn restricts_native_file_command_extensions() {
+        assert!(ensure_markdown_extension(Path::new("note.md")));
+        assert!(ensure_markdown_extension(Path::new("note.markdown")));
+        assert!(!ensure_markdown_extension(Path::new("note.txt")));
+
+        assert!(ensure_importable_extension(Path::new("paper.pdf")));
+        assert!(ensure_importable_extension(Path::new("note.md")));
+        assert!(!ensure_importable_extension(Path::new("secret.env")));
+
+        assert!(ensure_allowed_text_write_path(Path::new("export.csv")).is_ok());
+        assert!(ensure_allowed_text_write_path(Path::new("diagram.svg")).is_ok());
+        assert!(ensure_allowed_text_write_path(Path::new("script.sh")).is_err());
+
+        assert!(ensure_allowed_binary_write_path(Path::new("page.png")).is_ok());
+        assert!(ensure_allowed_binary_write_path(Path::new("paper.pdf")).is_ok());
+        assert!(ensure_allowed_binary_write_path(Path::new("notes.md")).is_err());
+    }
+
+    #[test]
+    fn rejects_temp_file_names_with_path_separators() {
+        assert!(sanitize_file_name("paper.pdf").is_ok());
+        assert!(sanitize_file_name("note.md").is_ok());
+        assert!(sanitize_file_name("../paper.pdf").is_err());
+        assert!(sanitize_file_name("nested/paper.pdf").is_err());
+        assert!(sanitize_file_name("nested\\paper.pdf").is_err());
     }
 }

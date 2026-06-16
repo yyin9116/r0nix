@@ -20,6 +20,16 @@ export interface Tab {
   content?: string;
   filter?: LibraryFilter;
   pinned?: boolean;
+  pdfViewState?: PdfViewState;
+}
+
+export interface PdfViewState {
+  page: number;
+  totalPages: number;
+  zoom: number;
+  scrollTop: number;
+  scrollLeft: number;
+  updatedAt: string;
 }
 
 export type ReaderDocumentKind = "pdf" | "markdown";
@@ -74,4 +84,23 @@ export interface ReaderAnnotation {
   rect: ReaderAnnotationRect;
   content?: string;
   createdAt: string;
+}
+
+export type PdfReadingBlockKind =
+  | "text"
+  | "title"
+  | "list"
+  | "table"
+  | "image"
+  | "equation"
+  | "code"
+  | "auxiliary";
+
+export interface PdfReadingBlock {
+  id: string;
+  page: number;
+  kind: PdfReadingBlockKind;
+  text: string;
+  rect?: ReaderAnnotationRect;
+  source: "mineru" | "pdfjs-dom";
 }

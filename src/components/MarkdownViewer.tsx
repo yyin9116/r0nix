@@ -1,4 +1,4 @@
-﻿import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+﻿import { useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type ReactNode } from "react";
 import {
   Check,
   ChevronLeft,
@@ -9,6 +9,7 @@ import {
   SplitSquareHorizontal,
 } from "lucide-react";
 import type { AppLanguage } from "../services/userSettings";
+import { ReadingAssistMenu, type ReadingAssistSelection } from "./ReadingAssistMenu";
 
 type HeadingItem = {
   id: string;
@@ -26,6 +27,7 @@ interface MarkdownViewerProps {
   onOpenExternal?: (url: string) => void;
   onContentChange?: (next: string) => void;
   onSave?: (next: string) => Promise<void> | void;
+  aiModelEndpoint?: string;
 }
 
 const I18N = {
@@ -60,6 +62,12 @@ const I18N = {
     file: "File",
   },
 } as const;
+
+type AssistBlockKind = "heading" | "paragraph" | "list" | "code";
+
+function normalizeAssistText(text: string) {
+  return text.replace(/\s+/g, " ").trim();
+}
 
 function slugify(value: string, index: number) {
   const base = value
@@ -110,7 +118,10 @@ function renderInline(text: string, keyPrefix: string, onOpenExternal?: (url: st
             type="button"
             className="underline underline-offset-2 transition-colors hover:opacity-85"
             style={{ color: "var(--reader-accent)" }}
-            onClick={() => onOpenExternal(url)}
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenExternal(url);
+            }}
             title={url}
           >
             {label}
@@ -151,6 +162,7 @@ export function MarkdownViewer({
   onOpenExternal,
   onContentChange,
   onSave,
+  aiModelEndpoint = "",
 }: MarkdownViewerProps) {
   const [isOutlineOpen, setIsOutlineOpen] = useState(true);
   const [mode, setMode] = useState<ViewMode>("split");
@@ -158,6 +170,7 @@ export function MarkdownViewer({
   const [savedContent, setSavedContent] = useState(content);
   const [isSaving, setIsSaving] = useState(false);
   const [statusHint, setStatusHint] = useState("");
+  const [assistSelection, setAssistSelection] = useState<ReadingAssistSelection | null>(null);
   const headingRefMap = useRef<Map<string, HTMLHeadingElement>>(new Map());
   const currentPathRef = useRef<string | undefined>(filePath);
   const t = I18N[language];
@@ -193,6 +206,31 @@ export function MarkdownViewer({
 
   const isDirty = draft !== savedContent;
 
+  const openAssistSelection = (
+    kind: AssistBlockKind,
+    index: number,
+    text: string,
+    event: ReactMouseEvent<HTMLElement>
+  ) => {
+    const clean = normalizeAssistText(text);
+    if (!clean) return;
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    setAssistSelection({
+      id: `md-${kind}-${index}-${clean.slice(0, 24)}`,
+      text: clean,
+      reference: `${kind} ${index + 1}`,
+      sourceTitle: title,
+      x: Math.min(event.clientX, rect.right + 10),
+      y: Math.max(12, rect.top - 8),
+    });
+  };
+
+  const assistProps = (kind: AssistBlockKind, index: number, text: string) => ({
+    onClick: (event: ReactMouseEvent<HTMLElement>) => openAssistSelection(kind, index, text, event),
+    title: language === "zh-CN" ? "点击打开阅读辅助" : "Click for reading assist",
+  });
+
   const blocks = useMemo(() => {
     const lines = draft.split(/\r?\n/);
     const rendered: ReactNode[] = [];
@@ -202,12 +240,14 @@ export function MarkdownViewer({
 
     const flushCode = (key: string) => {
       if (codeLines.length === 0) return;
+      const codeText = codeLines.join("\n");
       rendered.push(
         <pre
           key={key}
-          className="rounded-2xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 p-4 overflow-x-auto text-sm leading-6 font-mono text-gray-700 dark:text-gray-200"
+          {...assistProps("code", rendered.length, codeText)}
+          className="reading-assist-block rounded-2xl border border-gray-200 dark:border-gray-800 bg-gray-50 dark:bg-gray-900 p-4 overflow-x-auto text-sm leading-6 font-mono text-gray-700 dark:text-gray-200"
         >
-          <code>{codeLines.join("\n")}</code>
+          <code>{codeText}</code>
         </pre>
       );
       codeLines = [];
@@ -249,7 +289,8 @@ export function MarkdownViewer({
               if (node) headingRefMap.current.set(id, node);
               else headingRefMap.current.delete(id);
             }}
-            className={`text-gray-900 dark:text-gray-100 ${className}`}
+            {...assistProps("heading", index, text)}
+            className={`reading-assist-block text-gray-900 dark:text-gray-100 ${className}`}
           >
             {renderInline(text, `h-${index}`, onOpenExternal)}
           </h2>
@@ -261,7 +302,7 @@ export function MarkdownViewer({
       if (list) {
         rendered.push(
           <li key={`li-${index}`} className="ml-5 list-disc text-gray-700 dark:text-gray-300 leading-7">
-            {renderInline(list[1], `li-${index}`, onOpenExternal)}
+            <span {...assistProps("list", index, list[1])}>{renderInline(list[1], `li-${index}`, onOpenExternal)}</span>
           </li>
         );
         return;
@@ -273,7 +314,11 @@ export function MarkdownViewer({
       }
 
       rendered.push(
-        <p key={`p-${index}`} className="text-gray-700 dark:text-gray-300 leading-7">
+        <p
+          key={`p-${index}`}
+          {...assistProps("paragraph", index, line)}
+          className="reading-assist-block text-gray-700 dark:text-gray-300 leading-7"
+        >
           {renderInline(line, `p-${index}`, onOpenExternal)}
         </p>
       );
@@ -284,7 +329,7 @@ export function MarkdownViewer({
     }
 
     return rendered;
-  }, [draft, onOpenExternal]);
+  }, [draft, language, onOpenExternal, title]);
 
   const handleSave = async () => {
     if (!onSave || isSaving || !isDirty) return;
@@ -299,7 +344,7 @@ export function MarkdownViewer({
   };
 
   const renderPreviewPane = () => (
-    <div className="h-full overflow-auto bg-zinc-50 dark:bg-zinc-950">
+    <div className="h-full overflow-auto bg-zinc-50 dark:bg-[var(--chrome-surface-1)]">
       <article className="mx-auto w-full max-w-4xl px-6 py-8 space-y-1">
         {draft.trim().length === 0 ? (
           <div className="rounded-2xl border border-dashed border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-8 text-center text-sm text-gray-500 dark:text-gray-400">
@@ -313,7 +358,7 @@ export function MarkdownViewer({
   );
 
   const renderEditorPane = () => (
-    <div className="h-full p-4 bg-zinc-50 dark:bg-zinc-950">
+    <div className="h-full p-4 bg-zinc-50 dark:bg-[var(--chrome-surface-1)]">
       <textarea
         value={draft}
         onChange={(event) => {
@@ -321,18 +366,25 @@ export function MarkdownViewer({
           setDraft(next);
           onContentChange?.(next);
         }}
-        className="h-full w-full rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-4 text-sm leading-6 font-mono text-gray-800 dark:text-gray-100 resize-none focus:outline-none focus:ring-2 focus:ring-[var(--reader-accent)]"
+        className="h-full w-full rounded-2xl border border-gray-200 dark:border-[var(--chrome-border)] bg-white dark:bg-[var(--chrome-surface-2)] p-4 text-sm leading-6 font-mono text-gray-800 dark:text-gray-100 resize-none focus:outline-none focus:ring-2 focus:ring-[var(--reader-accent)]"
         spellCheck={false}
       />
     </div>
   );
 
   return (
-    <div className="flex h-full bg-zinc-50 dark:bg-zinc-950 text-gray-900 dark:text-gray-100 overflow-hidden">
+    <div className="flex h-full bg-zinc-50 dark:bg-[var(--chrome-surface-1)] text-gray-900 dark:text-gray-100 overflow-hidden">
+      <ReadingAssistMenu
+        selection={assistSelection}
+        language={language}
+        modelEndpoint={aiModelEndpoint}
+        onClose={() => setAssistSelection(null)}
+        onHint={setStatusHint}
+      />
       <div
-        className={`${isOutlineOpen ? "w-64" : "w-0"} transition-[width] duration-200 ease-out bg-white dark:bg-gray-900 border-r border-gray-100 dark:border-gray-800 hidden md:flex md:flex-col shrink-0 overflow-hidden`}
+        className={`${isOutlineOpen ? "w-64" : "w-0"} transition-[width] duration-200 ease-out bg-white dark:bg-[var(--chrome-surface-1)] border-r border-gray-100 dark:border-[var(--chrome-border)] hidden md:flex md:flex-col shrink-0 overflow-hidden`}
       >
-        <div className="h-12 flex items-center px-4 border-b border-gray-100 dark:border-gray-800 text-sm font-semibold tracking-tight">
+        <div className="h-12 flex items-center px-4 border-b border-gray-100 dark:border-[var(--chrome-border)] text-sm font-semibold tracking-tight">
           <List className="w-4 h-4 mr-2" />
           {t.outline}
         </div>
@@ -359,7 +411,7 @@ export function MarkdownViewer({
       </div>
 
       <div className="flex-1 flex flex-col min-w-0">
-        <div className="h-14 bg-white dark:bg-gray-900 border-b border-gray-100 dark:border-gray-800 flex items-center justify-between px-4 shrink-0 shadow-sm">
+        <div className="h-14 bg-white dark:bg-[var(--chrome-surface-1)] border-b border-gray-100 dark:border-[var(--chrome-border)] flex items-center justify-between px-4 shrink-0 shadow-sm">
           <div className="flex items-center gap-2 min-w-0">
             <button
               type="button"
@@ -453,7 +505,7 @@ export function MarkdownViewer({
           {mode === "edit" ? renderEditorPane() : null}
           {mode === "split" ? (
             <div className="h-full grid grid-cols-1 lg:grid-cols-2">
-              <div className="border-b lg:border-b-0 lg:border-r border-gray-200 dark:border-gray-800">{renderEditorPane()}</div>
+              <div className="border-b lg:border-b-0 lg:border-r border-gray-200 dark:border-[var(--chrome-border)]">{renderEditorPane()}</div>
               {renderPreviewPane()}
             </div>
           ) : null}

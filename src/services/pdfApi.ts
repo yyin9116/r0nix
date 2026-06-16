@@ -8,17 +8,24 @@
 
 import * as rustPdf from './rustPdf';
 import { loadPdfDocument, getCachedDocument, closePdfDocument } from './pdfJsService';
-import { debugError, debugLog } from './debugLogger';
+import { debugError, debugLog, debugWarn } from './debugLogger';
+import { readNativeTextFile, writeNativeTempFile } from './nativeFiles';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 
 const isTauri =
   typeof window !== 'undefined' &&
   ('__TAURI__' in window || '__TAURI_INTERNALS__' in window);
 
-console.log(`[API Adapter] Running in ${isTauri ? 'Tauri' : 'Browser'} mode`);
+debugLog('api.adapter', 'initialized', { runtime: isTauri ? 'tauri' : 'browser' });
 
 const BROWSER_API_BASE = 'http://localhost:8000';
 const browserLocalFiles = new Map<string, FileInfo>();
+const browserLocalMarkdown = new Map<string, string>();
+
+function cacheBrowserMarkdown(fileId: string, path: string, content: string) {
+  browserLocalMarkdown.set(fileId, content);
+  browserLocalMarkdown.set(path, content);
+}
 
 function isNetworkError(error: unknown): boolean {
   return error instanceof TypeError;
@@ -72,6 +79,7 @@ async function uploadFileInBrowserLocal(file: File): Promise<FileInfo> {
       },
     };
     browserLocalFiles.set(fileId, info);
+    cacheBrowserMarkdown(fileId, info.path, text);
     return info;
   }
 
@@ -164,8 +172,7 @@ export async function openFile(path: string): Promise<FileInfo> {
       pages = doc.numPages;
       debugLog('api.openFile', 'pdfjs loaded', { pages });
     } catch (error) {
-      console.warn('[API Adapter] PDF.js load failed, keep rust page count:', error);
-      debugError('api.openFile', 'pdfjs load failed', error);
+      debugWarn('api.openFile', 'pdfjs load failed; using Rust page count', error);
     }
 
     return {
@@ -206,8 +213,7 @@ export async function openMarkdownFile(path: string): Promise<FileInfo> {
   }
 
   if (isTauri) {
-    const { readTextFile } = await import('@tauri-apps/plugin-fs');
-    const content = await readTextFile(path);
+    const content = await readNativeTextFile(path);
     const words = content.trim() ? content.trim().split(/\s+/).length : 0;
     return {
       id: `md-${Date.now()}`,
@@ -235,8 +241,12 @@ export async function openMarkdownFile(path: string): Promise<FileInfo> {
 
 export async function readMarkdownText(path: string): Promise<string> {
   if (isTauri) {
-    const { readTextFile } = await import('@tauri-apps/plugin-fs');
-    return readTextFile(path);
+    return readNativeTextFile(path);
+  }
+
+  const localContent = browserLocalMarkdown.get(path);
+  if (typeof localContent === 'string') {
+    return localContent;
   }
 
   const response = await fetch(`${BROWSER_API_BASE}/api/markdown/by-path`, {
@@ -253,18 +263,15 @@ export async function readMarkdownText(path: string): Promise<string> {
 
 export async function uploadFile(file: File): Promise<FileInfo> {
   if (isTauri) {
-    const { writeFile, writeTextFile } = await import('@tauri-apps/plugin-fs');
-
-    const tempPath = `${await getTempDir()}/${file.name}`;
     const ext = file.name.split('.').pop()?.toLowerCase();
     if (ext === 'md' || ext === 'markdown') {
       const content = await file.text();
-      await writeTextFile(tempPath, content);
+      const tempPath = await writeNativeTempFile(file.name, new TextEncoder().encode(content));
       return openMarkdownFile(tempPath);
     }
 
     const arrayBuffer = await file.arrayBuffer();
-    await writeFile(tempPath, new Uint8Array(arrayBuffer));
+    const tempPath = await writeNativeTempFile(file.name, new Uint8Array(arrayBuffer));
 
     return openFile(tempPath);
   } else {
@@ -283,15 +290,10 @@ export async function uploadFile(file: File): Promise<FileInfo> {
       if (!isNetworkError(error)) {
         throw error;
       }
-      console.warn('[API Adapter] backend unavailable, switch to browser local mode');
+      debugWarn('api.uploadFile', 'backend unavailable; using browser-local mode');
       return uploadFileInBrowserLocal(file);
     }
   }
-}
-
-async function getTempDir(): Promise<string> {
-  const { tempDir } = await import('@tauri-apps/api/path');
-  return await tempDir();
 }
 
 export async function listFiles(): Promise<{ files: FileInfo[] }> {
@@ -314,7 +316,7 @@ export async function listFiles(): Promise<{ files: FileInfo[] }> {
           },
         });
       } catch (error) {
-        console.error(`Failed to get info for ${fileId}:`, error);
+        debugError('api.listFiles', 'failed to get file info', { fileId, error });
       }
     }
 
@@ -340,6 +342,11 @@ export async function closeFile(fileId: string): Promise<{ success: boolean }> {
     return { success: true };
   } else {
     if (browserLocalFiles.has(fileId)) {
+      const local = browserLocalFiles.get(fileId);
+      if (local) {
+        browserLocalMarkdown.delete(local.path);
+      }
+      browserLocalMarkdown.delete(fileId);
       browserLocalFiles.delete(fileId);
       await closePdfDocument(fileId);
       return { success: true };

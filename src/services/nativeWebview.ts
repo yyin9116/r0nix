@@ -31,6 +31,11 @@ export async function navigateNativeWebviewTab(tabId: string, url: string): Prom
   await invokeNative<string>("navigate_webview_tab", { tabId, url });
 }
 
+export async function navigateNativeWebviewTabHistory(tabId: string, direction: "back" | "forward"): Promise<void> {
+  if (!isTauriRuntime || !tabId) return;
+  await invokeNative<string>("navigate_webview_tab_history", { tabId, direction });
+}
+
 export async function showNativeWebviewTab(tabId: string, focus = false): Promise<void> {
   if (!isTauriRuntime || !tabId) return;
   await invokeNative<string>("show_webview_tab", { tabId, focus });

@@ -11,8 +11,6 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let text_show = if cfg!(target_os = "windows") {
                 "打开 r0nix"
@@ -106,6 +104,11 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             r0nix::tauri_commands::open_pdf,
             r0nix::tauri_commands::frontend_log,
+            r0nix::tauri_commands::read_text_file,
+            r0nix::tauri_commands::write_text_file,
+            r0nix::tauri_commands::write_binary_file,
+            r0nix::tauri_commands::write_temp_file,
+            r0nix::tauri_commands::collect_importable_paths,
             r0nix::tauri_commands::close_pdf,
             r0nix::tauri_commands::get_pdf_info,
             r0nix::tauri_commands::get_page_count,
@@ -119,6 +122,7 @@ fn main() {
             r0nix::tauri_commands::download_pdf_via_proxy,
             r0nix::tauri_commands::create_or_show_webview_tab,
             r0nix::tauri_commands::navigate_webview_tab,
+            r0nix::tauri_commands::navigate_webview_tab_history,
             r0nix::tauri_commands::show_webview_tab,
             r0nix::tauri_commands::hide_webview_tab,
             r0nix::tauri_commands::sync_webview_tab_bounds,

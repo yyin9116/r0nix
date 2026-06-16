@@ -5,7 +5,6 @@ import {
   Link2,
   Move,
   Plus,
-  Sparkles,
   StickyNote,
   Trash2,
   ZoomIn,
@@ -15,6 +14,7 @@ import {
 } from "lucide-react";
 import type { ReaderDocument } from "../types";
 import type { AppLanguage } from "../services/userSettings";
+import { readVersionedLocalState, writeVersionedLocalState } from "../services/localStore";
 
 interface WhiteboardsProps {
   documents: ReaderDocument[];
@@ -96,7 +96,7 @@ const I18N = {
     boardTitle: "白板",
     boardStats: (cards: number, groups: number, connections: number) => `${cards} 张卡片，${groups} 个分组，${connections} 条连接`,
     addNote: "添加笔记",
-    seedBoard: "生成研究白板",
+    seedBoard: "套用研究模板",
     zoomOut: "缩小",
     resetZoom: "重置缩放",
     zoomIn: "放大",
@@ -104,7 +104,7 @@ const I18N = {
     emptyTitle: "搭建可执行的研究白板",
     emptyDesc: "创建论文分组、调整卡片大小、编辑笔记颜色，并通过真实连线组织思路，所有内容会本地持久化。",
     addFirstNote: "添加第一条笔记",
-    seedFromPapers: "从论文生成",
+    seedFromPapers: "从论文套用模板",
     cluster: "分组",
     cardsNoun: "张卡片",
     linkedToPaper: "关联论文",
@@ -143,7 +143,7 @@ const I18N = {
     recentPapers: "最近论文",
     recentDesc: "可创建单论文卡片，或基于单篇论文快速搭建研究分组。",
     paperCard: "论文卡片",
-    researchCluster: "研究分组",
+    researchCluster: "模板分组",
     open: "打开",
     importHint: "请先导入一些 PDF，然后可在此基于它们生成分组。",
     boardSnapshot: "白板概览",
@@ -181,7 +181,7 @@ const I18N = {
     boardTitle: "Whiteboards",
     boardStats: (cards: number, groups: number, connections: number) => `${cards} cards, ${groups} clusters, ${connections} links`,
     addNote: "Add Note",
-    seedBoard: "Seed Research Board",
+    seedBoard: "Apply Research Template",
     zoomOut: "Zoom out",
     resetZoom: "Reset zoom",
     zoomIn: "Zoom in",
@@ -189,7 +189,7 @@ const I18N = {
     emptyTitle: "Build a working research board",
     emptyDesc: "Create paper clusters, resize cards, edit note colors, and connect ideas with real links that stay persisted locally.",
     addFirstNote: "Add First Note",
-    seedFromPapers: "Seed From Papers",
+    seedFromPapers: "Apply Paper Template",
     cluster: "Cluster",
     cardsNoun: "cards",
     linkedToPaper: "linked to paper",
@@ -228,7 +228,7 @@ const I18N = {
     recentPapers: "Recent Papers",
     recentDesc: "Create a paper-only card or scaffold a clustered research board from one paper.",
     paperCard: "Paper Card",
-    researchCluster: "Research Cluster",
+    researchCluster: "Template Cluster",
     open: "Open",
     importHint: "Import a few PDFs first, then you can scaffold clusters from them here.",
     boardSnapshot: "Board Snapshot",
@@ -265,6 +265,7 @@ const I18N = {
 } as const;
 
 const STORAGE_KEY = "r0nix_reader_whiteboard_v1";
+const STORAGE_VERSION = 2;
 const BOARD_WIDTH = 1920;
 const BOARD_HEIGHT = 1280;
 const MIN_CARD_WIDTH = 220;
@@ -344,11 +345,7 @@ function sanitizeGroup(item: Partial<WhiteboardGroup>, index: number): Whiteboar
 
 function loadBoardState(): WhiteboardState {
   const empty: WhiteboardState = { version: 2, zoom: 1, cards: [], connections: [], groups: [] };
-  if (typeof window === "undefined") return empty;
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) return empty;
-    const parsed = JSON.parse(raw) as unknown;
+  return readVersionedLocalState(STORAGE_KEY, STORAGE_VERSION, empty, (parsed) => {
     if (Array.isArray(parsed)) {
       return {
         version: 2,
@@ -378,9 +375,7 @@ function loadBoardState(): WhiteboardState {
           .filter((item) => cardIds.has(item.fromCardId) && cardIds.has(item.toCardId))
       : [];
     return { version: 2, zoom: normalizeZoom(candidate.zoom ?? 1), cards, groups, connections };
-  } catch {
-    return empty;
-  }
+  });
 }
 
 function createNoteCard(seed?: Partial<WhiteboardCard>): WhiteboardCard {
@@ -460,8 +455,7 @@ export function Whiteboards({ documents, onOpenPdf, language }: WhiteboardsProps
   }), [board.cards, board.groups, board.connections]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(board));
+    writeVersionedLocalState(STORAGE_KEY, STORAGE_VERSION, board);
   }, [board]);
 
   const clientToBoard = (clientX: number, clientY: number) => {
@@ -666,7 +660,7 @@ export function Whiteboards({ documents, onOpenPdf, language }: WhiteboardsProps
               <span className="rounded-md bg-white/70 dark:bg-zinc-900/70 px-1.5 py-0.5 text-[11px] font-mono">{isPanMode ? t.dragCanvasOn : t.dragCanvasOff}</span>
             </button>
             <button onClick={addNote} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-zinc-800 dark:hover:bg-white transition-colors"><StickyNote size={15} />{t.addNote}</button>
-            <button onClick={seedBoard} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"><Sparkles size={15} />{t.seedBoard}</button>
+            <button onClick={seedBoard} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"><LayoutTemplate size={15} />{t.seedBoard}</button>
             <div className="inline-flex items-center gap-1 rounded-xl border border-zinc-200 dark:border-zinc-700 px-2 py-1 bg-white dark:bg-zinc-900">
               <button onClick={() => adjustZoom(-0.1)} className="p-1.5 rounded-lg text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors" title={t.zoomOut}><ZoomOut size={15} /></button>
               <button onClick={() => setZoom(1)} className="px-2 py-1 text-xs font-medium rounded-lg text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors" title={t.resetZoom}>{Math.round(board.zoom * 100)}%</button>
@@ -875,7 +869,7 @@ export function Whiteboards({ documents, onOpenPdf, language }: WhiteboardsProps
                 </div>
                 <div className="flex items-center gap-2 flex-wrap">
                   <button onClick={() => addPaper(doc)} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-zinc-800 dark:hover:bg-white transition-colors"><Plus size={12} />{t.paperCard}</button>
-                  <button onClick={() => addPaperCluster(doc)} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"><Sparkles size={12} />{t.researchCluster}</button>
+                  <button onClick={() => addPaperCluster(doc)} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"><LayoutTemplate size={12} />{t.researchCluster}</button>
                   <button onClick={() => onOpenPdf(doc)} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"><FileText size={12} />{t.open}</button>
                 </div>
               </div>

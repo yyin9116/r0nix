@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
+﻿import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -6,6 +6,7 @@ import {
   Hand,
   Highlighter,
   Image as ImageIcon,
+  Languages,
   List,
   Maximize,
   MessageSquare,
@@ -22,9 +23,12 @@ import {
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import * as api from "../services/pdfApi";
 import type { AppLanguage } from "../services/userSettings";
-import type { ReaderAnnotation, ReaderAnnotationKind, ReaderNote } from "../types";
+import type { PdfReadingBlock, PdfViewState, ReaderAnnotation, ReaderAnnotationKind, ReaderNote } from "../types";
 import type { PDFImageInfo } from "../services/pdfApi";
 import { ContextMenu, buildViewerContextActions } from "./ContextMenu";
+import { ReadingAssistMenu, type ReadingAssistSelection } from "./ReadingAssistMenu";
+import { translateReadingSelection } from "../services/readingAssistant";
+import { buildDomPdfReadingBlocks } from "../services/pdfBlocks";
 import "./PDFViewer.css";
 
 interface PDFViewerProps {
@@ -40,7 +44,10 @@ interface PDFViewerProps {
   onRemoveAnnotation?: (annotationId: string) => void;
   onResolveDefaultPath?: (fileName: string) => string;
   onProgress?: (page: number, totalPages: number) => void;
+  initialViewState?: PdfViewState;
+  onViewStateChange?: (state: PdfViewState) => void;
   onOpenExternal?: (url: string) => void;
+  aiModelEndpoint?: string;
 }
 
 type SidebarTab = "outline" | "thumbs";
@@ -65,8 +72,10 @@ const PAGE_OVERSCAN = 900;
 const ACTIVE_NEIGHBOR = 2;
 const TEXT_NOTE_DEFAULT_WIDTH = 0.22;
 const TEXT_NOTE_DEFAULT_HEIGHT = 0.08;
+const MIN_IMAGE_OVERLAY_AREA = 0.0025;
 type CanvasRenderTask = { cancel: () => void; promise: Promise<void> };
 const activeCanvasRenders = new WeakMap<HTMLCanvasElement, CanvasRenderTask>();
+const PAGE_RENDER_OVERSCAN_WHILE_ZOOMING = 5;
 
 async function cancelAndAwaitCanvasRender(canvas: HTMLCanvasElement) {
   const existing = activeCanvasRenders.get(canvas);
@@ -115,6 +124,8 @@ const I18N = {
     exportLabel: "导出",
     searching: "搜索中",
     search: "搜索",
+    fullTranslation: "全文翻译",
+    exitFullTranslation: "返回阅读",
     toggleNotes: "切换右侧栏",
     hideLeftSidebar: "收起侧边栏",
     showLeftSidebar: "展开侧边栏",
@@ -123,6 +134,8 @@ const I18N = {
     openPdf: "打开 PDF",
     loadingPdf: "正在加载 PDF...",
     notesAnnotations: "笔记与批注",
+    sidePanelNotes: "笔记",
+    sidePanelTranslation: "翻译",
     page: "第",
     notesIntro: "先选批注工具，再在页面拖拽标注；也可在下方直接记录当前页笔记。",
     annotationTool: "批注工具",
@@ -164,12 +177,17 @@ const I18N = {
     exportCurrentSvg: "导出当前页 SVG",
     cancel: "取消",
     pdfImages: "PDF 图片",
+    translationPreview: "翻译预览",
+    translationEmpty: "点击 PDF 段落后的“翻译”按钮，在这里预览译文。",
+    translating: "正在翻译...",
+    translateFailed: "翻译失败",
     noPdfImages: "当前页未检测到可导出图片。",
     imageType: "类型",
     pngExported: "PNG 已导出",
     svgExported: "SVG 已导出",
     rendering: "渲染中...",
     pdfNotLoaded: "PDF 文档尚未加载，请从资料库重新打开。",
+    clickForAssist: "点击打开阅读辅助",
   },
   "en-US": {
     outline: "Outline",
@@ -189,6 +207,8 @@ const I18N = {
     exportLabel: "Export",
     searching: "Searching",
     search: "Search",
+    fullTranslation: "Full translation",
+    exitFullTranslation: "Back to reader",
     toggleNotes: "Toggle side panel",
     hideLeftSidebar: "Hide sidebar",
     showLeftSidebar: "Show sidebar",
@@ -197,6 +217,8 @@ const I18N = {
     openPdf: "Open PDF",
     loadingPdf: "Loading PDF...",
     notesAnnotations: "Notes & Annotations",
+    sidePanelNotes: "Notes",
+    sidePanelTranslation: "Translation",
     page: "Page",
     notesIntro: "Pick an annotation tool, then drag on the page to mark content. You can also write a page note below.",
     annotationTool: "Annotation tool",
@@ -238,12 +260,17 @@ const I18N = {
     exportCurrentSvg: "Export current page SVG",
     cancel: "Cancel",
     pdfImages: "PDF Images",
+    translationPreview: "Translation",
+    translationEmpty: "Click Translate from the reading assist menu to preview text here.",
+    translating: "Translating...",
+    translateFailed: "Translation failed",
     noPdfImages: "No exportable images detected on this page.",
     imageType: "Type",
     pngExported: "PNG exported",
     svgExported: "SVG exported",
     rendering: "Rendering...",
     pdfNotLoaded: "PDF document is not loaded. Re-open the file from Library.",
+    clickForAssist: "Click for reading assist",
   },
 } as const;
 
@@ -264,6 +291,27 @@ function toOutlineTitles(outline: Awaited<ReturnType<PDFDocumentProxy["getOutlin
 
 function clampPage(page: number, totalPages: number) {
   return Math.max(1, Math.min(Math.max(1, totalPages), Math.round(page)));
+}
+
+function clampZoomValue(value: number) {
+  if (!Number.isFinite(value)) return 100;
+  return Math.max(50, Math.min(400, Math.round(value)));
+}
+
+function normalizeImageBbox(bbox: number[], pageSize: PageSize) {
+  const values = bbox.map((value) => Number(value));
+  if (values.some((value) => !Number.isFinite(value))) return null;
+  const maxValue = Math.max(...values.map((value) => Math.abs(value)));
+  const scaleX = maxValue <= 1.01 ? pageSize.width : 1;
+  const scaleY = maxValue <= 1.01 ? pageSize.height : 1;
+  const left = Math.max(0, Math.min(pageSize.width, Math.min(values[0] * scaleX, values[2] * scaleX)));
+  const top = Math.max(0, Math.min(pageSize.height, Math.min(values[1] * scaleY, values[3] * scaleY)));
+  const right = Math.max(0, Math.min(pageSize.width, Math.max(values[0] * scaleX, values[2] * scaleX)));
+  const bottom = Math.max(0, Math.min(pageSize.height, Math.max(values[1] * scaleY, values[3] * scaleY)));
+  const width = right - left;
+  const height = bottom - top;
+  if (width <= 0 || height <= 0) return null;
+  return { left, top, width, height };
 }
 
 function equalSet(left: Set<number>, right: Set<number>) {
@@ -367,23 +415,135 @@ function getDraftOverlayStyle(kind: ReaderAnnotationKind, rect: { x: number; y: 
   };
 }
 
+type PdfTextSpan = {
+  node: HTMLElement;
+  text: string;
+  rect: DOMRect;
+  centerY: number;
+};
+
+function getPdfTextSpans(layer: HTMLElement): PdfTextSpan[] {
+  return Array.from(layer.querySelectorAll("span"))
+    .filter((node): node is HTMLElement => node instanceof HTMLElement)
+    .map((node) => {
+      const text = node.textContent?.replace(/\s+/g, " ").trim() || "";
+      const rect = node.getBoundingClientRect();
+      return { node, text, rect, centerY: rect.top + rect.height / 2 };
+    })
+    .filter((item) => item.text.length > 0 && item.rect.width > 0 && item.rect.height > 0);
+}
+
+function collectPdfParagraphSpans(target: HTMLElement): HTMLElement[] {
+  const layer = target.closest(".textLayer");
+  if (!(layer instanceof HTMLElement)) return [];
+  const spans = getPdfTextSpans(layer);
+  if (spans.length === 0) return [];
+
+  const targetItem = spans.find((item) => item.node === target || item.node.contains(target));
+  if (!targetItem) return [];
+
+  const sorted = [...spans].sort((a, b) =>
+    Math.abs(a.centerY - b.centerY) > 3 ? a.centerY - b.centerY : a.rect.left - b.rect.left
+  );
+  const lineHeight = Math.max(8, targetItem.rect.height);
+  const paragraphTop = targetItem.rect.top - lineHeight * 2.2;
+  const paragraphBottom = targetItem.rect.bottom + lineHeight * 2.8;
+  const targetLeft = targetItem.rect.left;
+
+  return sorted
+    .filter((item) => {
+      if (item.rect.bottom < paragraphTop || item.rect.top > paragraphBottom) return false;
+      const verticalDistance = Math.abs(item.centerY - targetItem.centerY);
+      if (verticalDistance <= lineHeight * 0.85) return true;
+      return Math.abs(item.rect.left - targetLeft) < 110 || item.rect.left >= targetLeft - 12;
+    })
+    .map((item) => item.node);
+}
+
+function textFromPdfSpans(spans: HTMLElement[]) {
+  return spans
+    .map((span) => span.textContent?.replace(/\s+/g, " ").trim() || "")
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+([,.;:!?，。；：！？])/g, "$1")
+    .trim();
+}
+
+function getBlockHit(target: HTMLElement, blocks: PdfReadingBlock[], layer: HTMLElement) {
+  const layerRect = layer.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  const x = (targetRect.left + targetRect.width / 2 - layerRect.left) / Math.max(1, layerRect.width);
+  const y = (targetRect.top + targetRect.height / 2 - layerRect.top) / Math.max(1, layerRect.height);
+  return blocks.find((block) => {
+    const rect = block.rect;
+    if (!rect) return false;
+    return x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height;
+  });
+}
+
+function drawBlockHighlightElement(block: PdfReadingBlock, layer: HTMLElement, existing: HTMLDivElement | null) {
+  if (!block.rect) return null;
+  const host = layer.closest(".page-text-overlay");
+  if (!(host instanceof HTMLElement)) return null;
+  const hostRect = host.getBoundingClientRect();
+  const layerRect = layer.getBoundingClientRect();
+  const left = layerRect.left - hostRect.left + block.rect.x * layerRect.width;
+  const top = layerRect.top - hostRect.top + block.rect.y * layerRect.height;
+  const element = existing || document.createElement("div");
+  element.className = "pdf-assist-block-highlight";
+  element.style.left = `${left}px`;
+  element.style.top = `${top}px`;
+  element.style.width = `${block.rect.width * layerRect.width}px`;
+  element.style.height = `${block.rect.height * layerRect.height}px`;
+  if (!existing || element.parentElement !== host) host.appendChild(element);
+  return element;
+}
+
+function getAssistAnchorFromHighlight(highlight: HTMLDivElement | null, fallbackX: number, fallbackY: number) {
+  if (!highlight) return { x: fallbackX, y: fallbackY };
+  const rect = highlight.getBoundingClientRect();
+  return {
+    x: rect.left + rect.width / 2,
+    y: rect.bottom + 8,
+  };
+}
+
 interface PageCanvasProps {
   doc: PDFDocumentProxy | null;
   pageNo: number;
   zoomScale: number;
   active: boolean;
   enableTextLayer: boolean;
+  linksEnabled: boolean;
   onSize: (pageNo: number, width: number, height: number) => void;
   onError: (message: string) => void;
   renderingLabel: string;
   onOpenExternal?: (url: string) => void;
+  onAssistSelection?: (selection: Omit<ReadingAssistSelection, "id" | "sourceTitle">) => void;
+  assistTitle?: string;
 }
 
-function PageCanvas({ doc, pageNo, zoomScale, active, enableTextLayer, onSize, onError, renderingLabel, onOpenExternal }: PageCanvasProps) {
+function PageCanvas({
+  doc,
+  pageNo,
+  zoomScale,
+  active,
+  enableTextLayer,
+  linksEnabled,
+  onSize,
+  onError,
+  renderingLabel,
+  onOpenExternal,
+  onAssistSelection,
+  assistTitle,
+}: PageCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const textHostRef = useRef<HTMLDivElement | null>(null);
   const linkHostRef = useRef<HTMLDivElement | null>(null);
+  const assistHighlightRef = useRef<HTMLDivElement | null>(null);
   const linkTokenRef = useRef(0);
+  const activeAssistSpansRef = useRef<HTMLElement[]>([]);
+  const readingBlocksRef = useRef<PdfReadingBlock[]>([]);
   const textLayerRef = useRef<{
     pageNo: number;
     div: HTMLDivElement;
@@ -394,6 +554,97 @@ function PageCanvas({ doc, pageNo, zoomScale, active, enableTextLayer, onSize, o
   } | null>(null);
   const tokenRef = useRef(0);
   const [status, setStatus] = useState<"idle" | "rendering" | "ready">("idle");
+
+  useEffect(() => {
+    const host = textHostRef.current;
+    if (!host || !enableTextLayer || !onAssistSelection) return;
+
+    const clearActive = () => {
+      for (const node of activeAssistSpansRef.current) {
+        node.classList.remove("pdf-assist-text-active");
+      }
+      activeAssistSpansRef.current = [];
+      assistHighlightRef.current?.remove();
+      assistHighlightRef.current = null;
+    };
+
+    const drawBlockHighlight = (group: HTMLElement[]) => {
+      const layer = group[0]?.closest(".textLayer");
+      if (!(layer instanceof HTMLElement)) return;
+      const layerRect = layer.getBoundingClientRect();
+      const rects = group.map((node) => node.getBoundingClientRect());
+      const left = Math.min(...rects.map((rect) => rect.left));
+      const top = Math.min(...rects.map((rect) => rect.top));
+      const right = Math.max(...rects.map((rect) => rect.right));
+      const bottom = Math.max(...rects.map((rect) => rect.bottom));
+      let block = assistHighlightRef.current;
+      if (!block) {
+        block = document.createElement("div");
+        block.className = "pdf-assist-block-highlight";
+        assistHighlightRef.current = block;
+        layer.appendChild(block);
+      }
+      block.style.left = `${Math.max(0, left - layerRect.left - 5)}px`;
+      block.style.top = `${Math.max(0, top - layerRect.top - 4)}px`;
+      block.style.width = `${Math.max(1, right - left + 10)}px`;
+      block.style.height = `${Math.max(1, bottom - top + 8)}px`;
+    };
+
+    const setActiveFromTarget = (target: EventTarget | null): { text: string; block: PdfReadingBlock | null } => {
+      if (!(target instanceof HTMLElement)) return { text: "", block: null };
+      const span = target.closest(".textLayer span");
+      if (!(span instanceof HTMLElement)) return { text: "", block: null };
+      const layer = span.closest(".textLayer");
+      if (layer instanceof HTMLElement) {
+        const block = getBlockHit(span, readingBlocksRef.current, layer);
+        if (block?.rect) {
+          clearActive();
+          assistHighlightRef.current = drawBlockHighlightElement(block, layer, assistHighlightRef.current);
+          return {
+            text: block.text,
+            block,
+          };
+        }
+      }
+      const group = collectPdfParagraphSpans(span);
+      if (group.length === 0) return { text: "", block: null };
+      clearActive();
+      for (const node of group) node.classList.add("pdf-assist-text-active");
+      activeAssistSpansRef.current = group;
+      drawBlockHighlight(group);
+      return { text: textFromPdfSpans(group), block: null };
+    };
+
+    const onPointerMove = (event: PointerEvent) => {
+      const hit = setActiveFromTarget(event.target);
+      if (hit.text && event.target instanceof HTMLElement) {
+        event.target.title = assistTitle || "";
+      }
+    };
+    const onPointerLeave = () => clearActive();
+    const onClick = (event: MouseEvent) => {
+      const hit = setActiveFromTarget(event.target);
+      const text = hit.text;
+      if (!text) return;
+      event.preventDefault();
+      event.stopPropagation();
+      onAssistSelection({
+        text,
+        reference: `page ${pageNo}`,
+        ...getAssistAnchorFromHighlight(assistHighlightRef.current, event.clientX + 10, event.clientY - 10),
+      });
+    };
+
+    host.addEventListener("pointermove", onPointerMove);
+    host.addEventListener("pointerleave", onPointerLeave);
+    host.addEventListener("click", onClick, true);
+    return () => {
+      host.removeEventListener("pointermove", onPointerMove);
+      host.removeEventListener("pointerleave", onPointerLeave);
+      host.removeEventListener("click", onClick, true);
+      clearActive();
+    };
+  }, [assistTitle, enableTextLayer, onAssistSelection, pageNo]);
 
   useEffect(() => {
     if (!doc) {
@@ -428,7 +679,7 @@ function PageCanvas({ doc, pageNo, zoomScale, active, enableTextLayer, onSize, o
         linkHost.innerHTML = "";
       }
 
-      if (active && linkHost && onOpenExternal) {
+      if (active && linksEnabled && linkHost && onOpenExternal) {
         const tokenLinks = ++linkTokenRef.current;
         try {
           const annotations = await page.getAnnotations();
@@ -486,25 +737,33 @@ function PageCanvas({ doc, pageNo, zoomScale, active, enableTextLayer, onSize, o
       const canvas = canvasRef.current;
 
       if (!canvas) return;
-      const context = canvas.getContext("2d", { alpha: false });
-      if (!context) return;
       await cancelAndAwaitCanvasRender(canvas);
       if (cancelled || token !== tokenRef.current) return;
 
       setStatus("rendering");
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      canvas.width = Math.ceil(viewport.width * dpr);
-      canvas.height = Math.ceil(viewport.height * dpr);
-      canvas.style.width = `${Math.ceil(viewport.width)}px`;
-      canvas.style.height = `${Math.ceil(viewport.height)}px`;
+      const renderCanvas = document.createElement("canvas");
+      const renderContext = renderCanvas.getContext("2d", { alpha: false });
+      if (!renderContext) return;
+      renderCanvas.width = Math.ceil(viewport.width * dpr);
+      renderCanvas.height = Math.ceil(viewport.height * dpr);
+      renderContext.setTransform(dpr, 0, 0, dpr, 0, 0);
+      renderContext.fillStyle = "#ffffff";
+      renderContext.fillRect(0, 0, viewport.width, viewport.height);
 
-      context.setTransform(dpr, 0, 0, dpr, 0, 0);
-      context.clearRect(0, 0, viewport.width, viewport.height);
-
-      renderTask = page.render({ canvasContext: context, canvas, viewport }) as unknown as CanvasRenderTask;
+      renderTask = page.render({ canvasContext: renderContext, canvas: renderCanvas, viewport }) as unknown as CanvasRenderTask;
       trackCanvasRender(canvas, renderTask);
       await renderTask.promise;
       if (cancelled || token !== tokenRef.current) return;
+
+      const context = canvas.getContext("2d", { alpha: false });
+      if (!context) return;
+      canvas.width = renderCanvas.width;
+      canvas.height = renderCanvas.height;
+      canvas.style.width = `${Math.ceil(viewport.width)}px`;
+      canvas.style.height = `${Math.ceil(viewport.height)}px`;
+      context.setTransform(1, 0, 0, 1, 0, 0);
+      context.drawImage(renderCanvas, 0, 0);
 
       // Keep canvas visible regardless of text-layer availability.
       setStatus("ready");
@@ -541,13 +800,16 @@ function PageCanvas({ doc, pageNo, zoomScale, active, enableTextLayer, onSize, o
 
           await builder.render({ viewport });
           builder.show();
+          readingBlocksRef.current = buildDomPdfReadingBlocks(builder.div, pageNo);
         } catch {
           textLayerRef.current?.cancel();
           textLayerRef.current = null;
+          readingBlocksRef.current = [];
           textHost.innerHTML = "";
         }
       } else if (textHost) {
         textLayerRef.current?.hide();
+        readingBlocksRef.current = [];
         textHost.innerHTML = "";
       }
     };
@@ -570,7 +832,7 @@ function PageCanvas({ doc, pageNo, zoomScale, active, enableTextLayer, onSize, o
       }
       textLayerRef.current?.cancel();
     };
-  }, [active, doc, enableTextLayer, onError, onSize, pageNo, zoomScale]);
+  }, [active, doc, enableTextLayer, linksEnabled, onError, onSize, pageNo, zoomScale]);
 
   useEffect(() => {
     return () => {
@@ -586,7 +848,7 @@ function PageCanvas({ doc, pageNo, zoomScale, active, enableTextLayer, onSize, o
         ref={textHostRef}
         className={`page-text-overlay transition-opacity duration-150 ${enableTextLayer && status === "ready" ? "opacity-100" : "opacity-0"}`}
       />
-      <div ref={linkHostRef} className="absolute inset-0" style={{ pointerEvents: "auto" }} />
+      <div ref={linkHostRef} className={`absolute inset-0 ${linksEnabled ? "" : "pointer-events-none"}`} />
       {active && status === "rendering" ? (
         <div className="absolute inset-0 flex items-center justify-center bg-white/65 text-zinc-500 text-xs">
           {renderingLabel}
@@ -776,11 +1038,14 @@ export function PDFViewer({
   onAddAnnotation,
   onRemoveAnnotation,
   onResolveDefaultPath,
+  initialViewState,
+  onViewStateChange,
   onProgress,
   onOpenExternal,
+  aiModelEndpoint = "",
 }: PDFViewerProps) {
-  const [zoom, setZoom] = useState(100);
-  const [page, setPage] = useState(1);
+  const [zoom, setZoom] = useState(() => clampZoomValue(initialViewState?.zoom ?? 100));
+  const [page, setPage] = useState(() => Math.max(1, Math.round(initialViewState?.page ?? 1)));
   const [totalPages, setTotalPages] = useState(1);
   const [pdfDoc, setPdfDoc] = useState<PDFDocumentProxy | null>(null);
   const [loading, setLoading] = useState(false);
@@ -789,6 +1054,7 @@ export function PDFViewer({
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>("thumbs");
   const [isLeftSidebarOpen, setIsLeftSidebarOpen] = useState(true);
   const [activeTool, setActiveTool] = useState<ToolType>("select");
+  const [readerMode, setReaderMode] = useState<"reader" | "translation">("reader");
   const [outlineTitles, setOutlineTitles] = useState<string[]>([]);
   const [pageSizes, setPageSizes] = useState<Record<number, PageSize>>({});
   const [activePages, setActivePages] = useState<Set<number>>(new Set([1, 2, 3]));
@@ -799,7 +1065,16 @@ export function PDFViewer({
   const [draftAnnotation, setDraftAnnotation] = useState<DraftAnnotation | null>(null);
   const [selectedAnnotationId, setSelectedAnnotationId] = useState<string | null>(null);
   const [isGestureRightDown, setIsGestureRightDown] = useState(false);
+  const [lockedZoomPage, setLockedZoomPage] = useState<number | null>(null);
   const [pdfImagesByPage, setPdfImagesByPage] = useState<Record<number, PDFImageInfo[]>>({});
+  const [assistSelection, setAssistSelection] = useState<ReadingAssistSelection | null>(null);
+  const [translationPanel, setTranslationPanel] = useState<{
+    selection: ReadingAssistSelection;
+    answer: string;
+    status: string;
+    isLoading: boolean;
+  } | null>(null);
+  const [sidePanelView, setSidePanelView] = useState<"notes" | "translation">("notes");
   const t = I18N[language];
   const annotationLabels = useMemo<Record<ReaderAnnotationKind, string>>(() => ({
     highlight: t.highlight,
@@ -822,9 +1097,16 @@ export function PDFViewer({
   const thumbListRef = useRef<HTMLDivElement | null>(null);
   const thumbItemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
   const rafRef = useRef<number | null>(null);
+  const viewStateRef = useRef<PdfViewState | undefined>(initialViewState);
+  const viewStateTimerRef = useRef<number | null>(null);
+  const isRestoringViewRef = useRef(false);
+  const suppressSyncUntilRef = useRef(0);
+  const zoomAnchorRef = useRef<{ pageNo: number; relX: number; relY: number } | null>(null);
+  const lockedZoomPageRef = useRef<number | null>(null);
 
   const hasDoc = Boolean(fileId && pdfDoc);
   const zoomScale = useMemo(() => Math.max(0.5, zoom / 100), [zoom]);
+  const visiblePage = lockedZoomPage ?? page;
   const pageNotes = useMemo(() => notes.filter((note) => note.page === page), [notes, page]);
   const pageAnnotations = useMemo(
     () =>
@@ -837,6 +1119,10 @@ export function PDFViewer({
     () => annotations.find((annotation) => annotation.id === selectedAnnotationId) || null,
     [annotations, selectedAnnotationId]
   );
+
+  useEffect(() => {
+    viewStateRef.current = initialViewState;
+  }, [initialViewState]);
 
   useEffect(() => {
     const onContextMenu = (event: MouseEvent) => {
@@ -874,12 +1160,18 @@ export function PDFViewer({
   }, [onProgress]);
 
   useEffect(() => {
-    setPage(1);
+    const restoredPage = Math.max(1, Math.round(initialViewState?.page ?? 1));
+    viewStateRef.current = initialViewState;
+    isRestoringViewRef.current = Boolean(fileId && initialViewState);
+    setPage(restoredPage);
+    setZoom(clampZoomValue(initialViewState?.zoom ?? 100));
     setRenderError("");
     setPageSizes({});
-    setActivePages(new Set([1, 2, 3]));
-    setDraftAnnotation(null);
-    setSelectedAnnotationId(null);
+    setActivePages(new Set([clampPage(restoredPage - 1, Number.MAX_SAFE_INTEGER), restoredPage, restoredPage + 1]));
+      setDraftAnnotation(null);
+      setSelectedAnnotationId(null);
+      lockedZoomPageRef.current = null;
+      setLockedZoomPage(null);
     setSidebarTab("thumbs");
     setIsNotesOpen(false);
     setPdfImagesByPage({});
@@ -953,6 +1245,68 @@ export function PDFViewer({
     });
   }, []);
 
+  const emitViewState = useCallback(
+    (next: Partial<PdfViewState>) => {
+      if (!fileId || !onViewStateChange) return;
+      const root = scrollRef.current;
+      const merged: PdfViewState = {
+        page,
+        totalPages,
+        zoom,
+        scrollTop: root?.scrollTop ?? viewStateRef.current?.scrollTop ?? 0,
+        scrollLeft: root?.scrollLeft ?? viewStateRef.current?.scrollLeft ?? 0,
+        updatedAt: new Date().toISOString(),
+        ...next,
+      };
+      viewStateRef.current = merged;
+      if (viewStateTimerRef.current !== null) {
+        window.clearTimeout(viewStateTimerRef.current);
+      }
+      viewStateTimerRef.current = window.setTimeout(() => {
+        viewStateTimerRef.current = null;
+        onViewStateChange(merged);
+      }, 120);
+    },
+    [fileId, onViewStateChange, page, totalPages, zoom]
+  );
+  const isTranslationReader = readerMode === "translation";
+
+  const scrollPageToAnchor = useCallback(
+    (targetPage: number, options?: { vertical?: "top" | "center"; emit?: boolean }) => {
+      const root = scrollRef.current;
+      const node = pageRefs.current.get(clampPage(targetPage, totalPages));
+      if (!root || !node) return false;
+      const rootRect = root.getBoundingClientRect();
+      const nodeRect = node.getBoundingClientRect();
+      const verticalOffset =
+        options?.vertical === "top"
+          ? 12
+          : Math.max(12, (root.clientHeight - node.clientHeight) / 2);
+      const nextTop = Math.max(0, root.scrollTop + (nodeRect.top - rootRect.top) - verticalOffset);
+      const nextLeft = Math.max(0, root.scrollLeft + (nodeRect.left - rootRect.left) - Math.max(0, (root.clientWidth - node.clientWidth) / 2));
+      root.scrollTo({ top: nextTop, left: nextLeft, behavior: "auto" });
+      if (options?.emit !== false) {
+        emitViewState({
+          page: clampPage(targetPage, totalPages),
+          totalPages,
+          zoom,
+          scrollTop: nextTop,
+          scrollLeft: nextLeft,
+        });
+      }
+      return true;
+    },
+    [emitViewState, totalPages, zoom]
+  );
+
+  useEffect(() => {
+    return () => {
+      if (viewStateTimerRef.current !== null) {
+        window.clearTimeout(viewStateTimerRef.current);
+      }
+    };
+  }, []);
+
   const scheduleSync = useCallback(() => {
     if (rafRef.current !== null) {
       window.cancelAnimationFrame(rafRef.current);
@@ -961,6 +1315,19 @@ export function PDFViewer({
       rafRef.current = null;
       const root = scrollRef.current;
       if (!root || !fileId) return;
+      if (isRestoringViewRef.current) return;
+      if (Date.now() < suppressSyncUntilRef.current) return;
+      const currentLockedPage = lockedZoomPageRef.current ?? lockedZoomPage;
+      if (currentLockedPage !== null) {
+        emitViewState({
+          page: currentLockedPage,
+          totalPages,
+          zoom,
+          scrollTop: root.scrollTop,
+          scrollLeft: root.scrollLeft,
+        });
+        return;
+      }
 
       const rootRect = root.getBoundingClientRect();
       const top = root.scrollTop;
@@ -997,8 +1364,15 @@ export function PDFViewer({
 
       setActivePages((prev) => (equalSet(prev, nextActive) ? prev : nextActive));
       setPage((prev) => (prev === nearest ? prev : nearest));
+      emitViewState({
+        page: nearest,
+        totalPages,
+        zoom,
+        scrollTop: root.scrollTop,
+        scrollLeft: root.scrollLeft,
+      });
     });
-  }, [fileId, page, totalPages]);
+  }, [emitViewState, fileId, lockedZoomPage, page, totalPages, zoom]);
 
   useEffect(() => {
     const root = scrollRef.current;
@@ -1024,6 +1398,74 @@ export function PDFViewer({
     scheduleSync();
   }, [isGestureRightDown, scheduleSync, totalPages, zoom, pageSizes]);
 
+  useLayoutEffect(() => {
+    const anchor = zoomAnchorRef.current;
+    if (!anchor) return;
+    zoomAnchorRef.current = null;
+    const root = scrollRef.current;
+    if (!root) return;
+    const node = pageRefs.current.get(anchor.pageNo);
+    if (!node) return;
+    const rootRect = root.getBoundingClientRect();
+    const nodeRect = node.getBoundingClientRect();
+    const pageX = anchor.relX * node.clientWidth;
+    const pageY = anchor.relY * node.clientHeight;
+    const viewportX = nodeRect.left - rootRect.left + pageX;
+    const viewportY = nodeRect.top - rootRect.top + pageY;
+    const nextLeft = root.scrollLeft + viewportX - root.clientWidth / 2;
+    const nextTop = root.scrollTop + viewportY - root.clientHeight / 2;
+    root.scrollTo({
+      left: Math.max(0, nextLeft),
+      top: Math.max(0, nextTop),
+      behavior: "auto",
+    });
+    emitViewState({
+      zoom,
+      scrollTop: Math.max(0, nextTop),
+      scrollLeft: Math.max(0, nextLeft),
+    });
+  }, [emitViewState, zoom]);
+
+  useLayoutEffect(() => {
+    if (!fileId || !initialViewState) return;
+    if (!isRestoringViewRef.current) return;
+    const root = scrollRef.current;
+    if (!root) return;
+    const targetPage = clampPage(initialViewState?.page ?? page, totalPages);
+    const targetZoom = clampZoomValue(initialViewState?.zoom ?? zoom);
+    setPage(targetPage);
+    setZoom(targetZoom);
+    window.requestAnimationFrame(() => {
+      const nextRoot = scrollRef.current;
+      if (!nextRoot) return;
+      const top = Math.max(0, initialViewState?.scrollTop ?? 0);
+      const left = Math.max(0, initialViewState?.scrollLeft ?? 0);
+      if (top > 0 || left > 0) {
+        nextRoot.scrollTo({ top, left, behavior: "auto" });
+        window.setTimeout(() => {
+          isRestoringViewRef.current = false;
+          scheduleSync();
+        }, 80);
+        return;
+      }
+      const node = pageRefs.current.get(targetPage);
+      if (!node) {
+        window.setTimeout(() => {
+          isRestoringViewRef.current = false;
+          scheduleSync();
+        }, 80);
+        return;
+      }
+      const rootRect = nextRoot.getBoundingClientRect();
+      const nodeRect = node.getBoundingClientRect();
+      nextRoot.scrollTo({ top: Math.max(0, nextRoot.scrollTop + (nodeRect.top - rootRect.top) - 12), behavior: "auto" });
+      window.setTimeout(() => {
+        isRestoringViewRef.current = false;
+        scheduleSync();
+      }, 80);
+    });
+  }, [fileId, initialViewState, page, scheduleSync, totalPages, zoom]);
+
   useEffect(() => {
     if (!fileId) return;
     onProgressRef.current?.(page, totalPages);
@@ -1031,13 +1473,14 @@ export function PDFViewer({
 
   useEffect(() => {
     if (sidebarTab !== "thumbs") return;
+    if (lockedZoomPage !== null) return;
     const list = thumbListRef.current;
     const node = thumbItemRefs.current.get(page);
     if (!list || !node) return;
     const targetTop = node.offsetTop - list.clientHeight / 2 + node.clientHeight / 2;
     const boundedTop = Math.max(0, Math.min(targetTop, list.scrollHeight - list.clientHeight));
     list.scrollTo({ top: boundedTop, behavior: "smooth" });
-  }, [page, sidebarTab]);
+  }, [lockedZoomPage, page, sidebarTab]);
 
   const goToPage = useCallback(
     (pageNo: number, behavior: ScrollBehavior = "smooth") => {
@@ -1228,7 +1671,7 @@ export function PDFViewer({
   };
 
 
-  const clampZoom = (value: number) => Math.max(50, Math.min(400, Math.round(value)));
+  const clampZoom = clampZoomValue;
 
   const detachRightWindowHandlers = useCallback(() => {
     const handlers = rightWindowHandlersRef.current;
@@ -1248,12 +1691,22 @@ export function PDFViewer({
       gestureStartRef.current = null;
       detachRightWindowHandlers();
       setIsGestureRightDown(false);
+      const lockedPage = lockedZoomPageRef.current;
+      if (lockedPage !== null) {
+        suppressSyncUntilRef.current = Date.now() + 280;
+        setPage(lockedPage);
+        scrollPageToAnchor(lockedPage, { vertical: "center" });
+      }
+      window.setTimeout(() => {
+        lockedZoomPageRef.current = null;
+        setLockedZoomPage(null);
+      }, 140);
       suppressNextContextMenuRef.current = true;
       window.setTimeout(() => {
         suppressNextContextMenuRef.current = false;
       }, 120);
     },
-    [detachRightWindowHandlers]
+    [detachRightWindowHandlers, scrollPageToAnchor]
   );
 
 
@@ -1295,6 +1748,16 @@ export function PDFViewer({
       gestureStartRef.current = null;
       detachRightWindowHandlers();
       setIsGestureRightDown(false);
+      const lockedPage = lockedZoomPageRef.current ?? right.pageNo;
+      if (lockedPage !== null) {
+        suppressSyncUntilRef.current = Date.now() + 280;
+        setPage(lockedPage);
+        scrollPageToAnchor(lockedPage, { vertical: "center" });
+      }
+      window.setTimeout(() => {
+        lockedZoomPageRef.current = null;
+        setLockedZoomPage(null);
+      }, 140);
 
       // suppress the native/contextmenu event that usually fires after right click release
       suppressNextContextMenuRef.current = true;
@@ -1309,7 +1772,7 @@ export function PDFViewer({
 
       return true;
     },
-    [detachRightWindowHandlers, totalPages]
+    [detachRightWindowHandlers, scrollPageToAnchor, totalPages]
   );
 
 
@@ -1338,9 +1801,18 @@ export function PDFViewer({
   const handleViewerPointerDown = (pageNo: number, event: React.PointerEvent<HTMLDivElement>) => {
     const isRight = event.button === 2 || (event.buttons & 2) === 2;
     if (isRight) {
-      rightDragRef.current = { active: true, moved: false, pointerId: event.pointerId, pageNo };
+      const lockedPage = clampPage(pageNo, totalPages);
+      rightDragRef.current = { active: true, moved: false, pointerId: event.pointerId, pageNo: lockedPage };
+      lockedZoomPageRef.current = lockedPage;
       gestureStartRef.current = { x: event.clientX, y: event.clientY };
       setIsGestureRightDown(true);
+      setLockedZoomPage(lockedPage);
+      setPage(lockedPage);
+      const nextActive = new Set<number>();
+      for (let delta = -PAGE_RENDER_OVERSCAN_WHILE_ZOOMING; delta <= PAGE_RENDER_OVERSCAN_WHILE_ZOOMING; delta += 1) {
+        nextActive.add(clampPage(lockedPage + delta, totalPages));
+      }
+      setActivePages(nextActive);
       attachRightWindowHandlers();
       try {
         event.currentTarget.setPointerCapture(event.pointerId);
@@ -1417,6 +1889,42 @@ export function PDFViewer({
     [fileId]
   );
 
+  const openTranslationPreview = useCallback(
+    (selection: ReadingAssistSelection) => {
+      setIsNotesOpen(true);
+      setSidePanelView("translation");
+      setTranslationPanel({
+        selection,
+        answer: "",
+        status: t.translating,
+        isLoading: true,
+      });
+      void translateReadingSelection({
+        endpoint: aiModelEndpoint,
+        excerpt: selection.text,
+        reference: `${selection.sourceTitle} / ${selection.reference}`,
+      })
+        .then((result) => {
+          setTranslationPanel({
+            selection,
+            answer: result.answer,
+            status: "",
+            isLoading: false,
+          });
+        })
+        .catch((error) => {
+          const message = error instanceof Error ? error.message : String(error);
+          setTranslationPanel({
+            selection,
+            answer: "",
+            status: `${t.translateFailed}: ${message}`,
+            isLoading: false,
+          });
+        });
+    },
+    [aiModelEndpoint, t.translateFailed, t.translating]
+  );
+
   useEffect(() => {
     if (!fileId || !pdfDoc) return;
     if (pdfImagesByPage[page] !== undefined) return;
@@ -1472,6 +1980,15 @@ export function PDFViewer({
           {actionHint}
         </div>
       ) : null}
+      <ReadingAssistMenu
+        selection={assistSelection}
+        language={language}
+        modelEndpoint={aiModelEndpoint}
+        onClose={() => setAssistSelection(null)}
+        onHint={showActionHint}
+        onTranslate={openTranslationPreview}
+        variant={isTranslationReader ? "inline-toolbar" : "panel"}
+      />
 
       <div className={`${isLeftSidebarOpen ? "w-[196px]" : "w-0"} transition-[width] duration-150 ease-out bg-white dark:bg-zinc-900 border-r border-zinc-200 dark:border-zinc-800 hidden md:flex md:flex-col shrink-0 overflow-hidden`}>
         <div className="w-[196px] flex border-b border-zinc-200 dark:border-zinc-800 items-center px-2 py-1.5">
@@ -1503,7 +2020,7 @@ export function PDFViewer({
                   doc={pdfDoc}
                   fileId={fileId}
                   pageNo={pageNo}
-                  active={page === pageNo}
+                  active={visiblePage === pageNo}
                   scrollRootRef={thumbListRef}
                   onClick={(targetPage) => goToPage(targetPage, "auto")}
                   onItemRef={(targetPage, node) => {
@@ -1558,18 +2075,18 @@ export function PDFViewer({
           </div>
 
           <div className="flex items-center gap-3 shrink-0">
-            <button className="p-1.5 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors" onClick={() => goToPage(page - 1)} title={t.prevPage}>
+            <button className="p-1.5 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors" onClick={() => goToPage(visiblePage - 1)} title={t.prevPage}>
               <ChevronLeft size={18} />
             </button>
             <div className="text-sm font-mono text-zinc-600 dark:text-zinc-400 flex items-center gap-1">
-              <input type="number" min={1} max={Math.max(1, totalPages)} value={page} onChange={(event) => {
+              <input type="number" min={1} max={Math.max(1, totalPages)} value={visiblePage} onChange={(event) => {
                 const next = Number(event.target.value);
                 if (!Number.isFinite(next)) return;
                 goToPage(next, "auto");
               }} className="w-14 text-center bg-zinc-100 dark:bg-zinc-800 border border-zinc-200 dark:border-zinc-700 rounded py-0.5 focus:outline-none focus:ring-1 focus:ring-zinc-900 dark:focus:ring-zinc-100 text-zinc-900 dark:text-zinc-100" />
               <span className="text-zinc-400 dark:text-zinc-500">/ {totalPages}</span>
             </div>
-            <button className="p-1.5 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors" onClick={() => goToPage(page + 1)} title={t.nextPage}>
+            <button className="p-1.5 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors" onClick={() => goToPage(visiblePage + 1)} title={t.nextPage}>
               <ChevronRight size={18} />
             </button>
           </div>
@@ -1597,6 +2114,22 @@ export function PDFViewer({
             >
               <Search size={18} />
             </button>
+            <button
+              type="button"
+              className={`inline-flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-md border transition-colors ${
+                isTranslationReader
+                  ? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900"
+                  : "border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              }`}
+              onClick={() => {
+                setReaderMode((mode) => (mode === "translation" ? "reader" : "translation"));
+                setActiveTool("select");
+              }}
+              title={isTranslationReader ? t.exitFullTranslation : t.fullTranslation}
+            >
+              <Languages size={14} />
+              {isTranslationReader ? t.exitFullTranslation : t.fullTranslation}
+            </button>
             <button className={`p-1.5 rounded-md transition-colors ${isNotesOpen ? "text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-800" : "text-zinc-400 dark:text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-800"}`} onClick={() => setIsNotesOpen((value) => !value)} title={t.toggleNotes}>
               {isNotesOpen ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
             </button>
@@ -1610,8 +2143,19 @@ export function PDFViewer({
             event.preventDefault();
             event.stopPropagation();
             const delta = event.deltaY;
-            const step = delta < 0 ? 10 : -10;
-            setZoom((prev) => clampZoom(prev + step));
+            const step = delta < 0 ? 5 : -5;
+            const root = scrollRef.current;
+            const lockedPage = lockedZoomPageRef.current ?? lockedZoomPage ?? visiblePage;
+            const node = pageRefs.current.get(lockedPage);
+            if (root && node) {
+              const nodeRect = node.getBoundingClientRect();
+              zoomAnchorRef.current = {
+                pageNo: lockedPage,
+                relX: Math.max(0, Math.min(1, (event.clientX - nodeRect.left) / Math.max(1, nodeRect.width))),
+                relY: Math.max(0, Math.min(1, (event.clientY - nodeRect.top) / Math.max(1, nodeRect.height))),
+              };
+            }
+            setZoom((currentZoom) => clampZoom(currentZoom + step));
           }}
         >
           {!fileId ? (
@@ -1633,7 +2177,9 @@ export function PDFViewer({
                   const size = pageSizes[pageNo] || DEFAULT_PAGE_SIZE;
                   const width = Math.max(1, Math.round(size.width * zoomScale));
                   const height = Math.max(1, Math.round(size.height * zoomScale));
-                  const active = activePages.has(pageNo);
+                  const active = lockedZoomPage === null
+                    ? activePages.has(pageNo)
+                    : Math.abs(pageNo - lockedZoomPage) <= PAGE_RENDER_OVERSCAN_WHILE_ZOOMING;
                   const pageAnnotationItems = annotations.filter((annotation) => annotation.page === pageNo);
                   const pageDraftRect = draftAnnotation?.page === pageNo ? draftRect : null;
 
@@ -1644,7 +2190,7 @@ export function PDFViewer({
                         if (node) pageRefs.current.set(pageNo, node);
                         else pageRefs.current.delete(pageNo);
                       }}
-                      className={`relative bg-white shadow-xl border transition-all origin-top ${isGestureRightDown ? "cursor-ns-resize" : activeTool === "hand" ? "cursor-grab active:cursor-grabbing" : activeTool === "select" ? "cursor-text" : "cursor-crosshair"} dark:invert dark:hue-rotate-180 ${page === pageNo ? "border-zinc-900/60" : "border-zinc-200"}`}
+                      className={`relative overflow-hidden bg-white shadow-xl border origin-top ${isGestureRightDown ? "cursor-ns-resize" : activeTool === "hand" ? "cursor-grab active:cursor-grabbing" : activeTool === "select" ? "cursor-text" : "cursor-crosshair"} dark:invert dark:hue-rotate-180 ${visiblePage === pageNo ? "border-zinc-900/60" : "border-zinc-200"}`}
                       style={{ width, minHeight: height }}
                       onPointerDown={(event) => handleViewerPointerDown(pageNo, event)}
                       onPointerMove={handleViewerPointerMove}
@@ -1666,10 +2212,23 @@ export function PDFViewer({
                         zoomScale={zoomScale}
                         active={active}
                         enableTextLayer={activeTool === "select"}
+                        linksEnabled={!isTranslationReader}
                         onSize={updatePageSize}
                         onError={setRenderError}
                         renderingLabel={t.rendering}
                         onOpenExternal={onOpenExternal}
+                        assistTitle={t.clickForAssist}
+                        onAssistSelection={
+                          isTranslationReader
+                            ? (selection) => {
+                                setAssistSelection({
+                                  ...selection,
+                                  id: `pdf-${pageNo}-${selection.text.slice(0, 24)}`,
+                                  sourceTitle: title,
+                                });
+                              }
+                            : undefined
+                        }
                       />
                       <div
                         className="absolute inset-0"
@@ -1702,31 +2261,29 @@ export function PDFViewer({
                         const bbox = Array.isArray(img.bbox) && img.bbox.length === 4 ? img.bbox : null;
                         if (!bbox) return null;
 
-                        const left = Math.max(0, Math.min(1, Number(bbox[0]) || 0));
-                        const top = Math.max(0, Math.min(1, Number(bbox[1]) || 0));
-                        const right = Math.max(0, Math.min(1, Number(bbox[2]) || 0));
-                        const bottom = Math.max(0, Math.min(1, Number(bbox[3]) || 0));
-                        const width = Math.max(0.002, right - left);
-                        const height = Math.max(0.002, bottom - top);
+                        const pageSize = pageSizes[pageNo] || DEFAULT_PAGE_SIZE;
+                        const rect = normalizeImageBbox(bbox, pageSize);
+                        if (!rect) return null;
+                        if (rect.width * rect.height < pageSize.width * pageSize.height * MIN_IMAGE_OVERLAY_AREA) return null;
 
                         return (
                           <div
                             key={`img-box-${pageNo}-${idx}`}
-                            className="pointer-events-none absolute border border-teal-500/80 bg-teal-500/10"
+                            className="pointer-events-none absolute border border-teal-500/80 bg-teal-500/10 overflow-visible"
                             style={{
-                              left: `${left * 100}%`,
-                              top: `${top * 100}%`,
-                              width: `${width * 100}%`,
-                              height: `${height * 100}%`,
+                              left: `${(rect.left / pageSize.width) * 100}%`,
+                              top: `${(rect.top / pageSize.height) * 100}%`,
+                              width: `${(Math.max(1, rect.width) / pageSize.width) * 100}%`,
+                              height: `${(Math.max(1, rect.height) / pageSize.height) * 100}%`,
                             }}
                           >
-                            <span className="absolute -top-5 left-0 rounded-md bg-teal-600 px-1.5 py-0.5 text-[10px] font-mono text-white">
+                            <span className="absolute left-0 top-0 rounded-br-md bg-teal-600/90 px-1.5 py-0.5 text-[10px] font-mono text-white">
                               {t.imageType}: {img.extension || "unknown"}
                             </span>
                           </div>
                         );
                       })}
-                      {page === pageNo ? <div className="pointer-events-none absolute inset-0 ring-1 ring-zinc-900/25" /> : null}
+                      {visiblePage === pageNo ? <div className="pointer-events-none absolute inset-0 ring-1 ring-zinc-900/25" /> : null}
                     </div>
                   );
                 })}
@@ -1743,13 +2300,58 @@ export function PDFViewer({
         <div className="w-[20rem] flex flex-col h-full">
           <div className="h-14 border-b border-zinc-200 dark:border-zinc-800 flex items-center justify-between px-4 shrink-0 bg-zinc-50 dark:bg-zinc-950">
             <div className="flex items-center gap-2 font-semibold text-zinc-900 dark:text-zinc-100 text-sm">
-              <MessageSquare size={16} /> {t.notesAnnotations}
+              {sidePanelView === "translation" ? <Languages size={16} /> : <MessageSquare size={16} />}
+              {sidePanelView === "translation" ? t.translationPreview : t.notesAnnotations}
             </div>
             <div className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium" style={{ backgroundColor: "var(--reader-accent-soft)", color: "var(--reader-accent)" }}>
               <Sparkles size={12} /> {t.page} {page}
             </div>
           </div>
 
+          <div className="border-b border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-2">
+            <div className="grid grid-cols-2 gap-1 rounded-lg bg-zinc-100 dark:bg-zinc-950 p-1">
+              <button
+                type="button"
+                className={`h-8 rounded-md text-xs font-semibold transition-colors ${sidePanelView === "notes" ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-100" : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"}`}
+                onClick={() => setSidePanelView("notes")}
+              >
+                {t.sidePanelNotes}
+              </button>
+              <button
+                type="button"
+                className={`h-8 rounded-md text-xs font-semibold transition-colors ${sidePanelView === "translation" ? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-800 dark:text-zinc-100" : "text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100"}`}
+                onClick={() => setSidePanelView("translation")}
+              >
+                {t.sidePanelTranslation}
+              </button>
+            </div>
+          </div>
+
+          {sidePanelView === "translation" ? (
+            <div className="flex-1 overflow-y-auto p-5 space-y-4 bg-white dark:bg-zinc-900">
+              <div>
+                <div className="font-serif text-2xl font-bold text-zinc-900 dark:text-zinc-100 leading-tight">{t.translationPreview}</div>
+                <p className="text-sm text-zinc-500 dark:text-zinc-400 mt-2">{translationPanel?.selection.reference || t.translationEmpty}</p>
+              </div>
+              {translationPanel ? (
+                <div className="space-y-3">
+                  <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 p-3">
+                    <div className="mb-2 text-[11px] uppercase tracking-wide text-zinc-500 dark:text-zinc-400">{translationPanel.selection.sourceTitle}</div>
+                    <div className="max-h-48 overflow-auto text-xs leading-5 text-zinc-600 dark:text-zinc-300">
+                      {translationPanel.selection.text}
+                    </div>
+                  </div>
+                  <div className="min-h-48 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 p-4 text-sm leading-6 text-zinc-800 dark:text-zinc-100 whitespace-pre-wrap">
+                    {translationPanel.status || translationPanel.answer}
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-dashed border-zinc-300 dark:border-zinc-700 px-3 py-10 text-center text-sm text-zinc-500 dark:text-zinc-400">
+                  {t.translationEmpty}
+                </div>
+              )}
+            </div>
+          ) : (
           <div className="flex-1 overflow-y-auto p-5 space-y-5 bg-white dark:bg-zinc-900">
             <div>
               <div className="font-serif text-2xl font-bold text-zinc-900 dark:text-zinc-100 leading-tight">{title}</div>
@@ -1857,6 +2459,7 @@ export function PDFViewer({
               </div>
             ) : null}
           </div>
+          )}
         </div>
       </div>
 

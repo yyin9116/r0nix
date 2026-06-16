@@ -1,4 +1,5 @@
 import { START_PAGE_URL } from "../constants/startPage";
+import { readVersionedLocalState, writeVersionedLocalState } from "./localStore";
 
 export type DefaultExportFormat = "png" | "jpg" | "svg";
 export type ThemeMode = "system" | "light" | "dark";
@@ -42,6 +43,7 @@ export interface UserSettings {
 
 export const USER_SETTINGS_KEY = "pdf_reader_user_settings_v2";
 export const USER_SETTINGS_EVENT = "pdf-reader-settings-updated";
+const USER_SETTINGS_VERSION = 2;
 
 const DEFAULT_SETTINGS: UserSettings = {
   defaultExportFormat: "png",
@@ -140,25 +142,21 @@ export function sanitizeUserSettings(raw: unknown): UserSettings {
 }
 
 export function loadUserSettings(): UserSettings {
-  if (typeof window === "undefined") return DEFAULT_SETTINGS;
-  try {
-    const raw = window.localStorage.getItem(USER_SETTINGS_KEY);
-    if (!raw) return DEFAULT_SETTINGS;
-    const parsed = JSON.parse(raw) as Partial<UserSettings>;
+  const settings = readVersionedLocalState(USER_SETTINGS_KEY, USER_SETTINGS_VERSION, DEFAULT_SETTINGS, (raw) => {
+    const parsed = raw as Partial<UserSettings>;
     const settings = sanitizeUserSettings(parsed);
     if (parsed.webPanelMode === "iframe") {
       settings.webPanelMode = "native_webview";
       saveUserSettings(settings);
     }
     return settings;
-  } catch {
-    return DEFAULT_SETTINGS;
-  }
+  });
+  return settings;
 }
 
 export function saveUserSettings(next: UserSettings): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(USER_SETTINGS_KEY, JSON.stringify(next));
+  writeVersionedLocalState(USER_SETTINGS_KEY, USER_SETTINGS_VERSION, next);
   window.dispatchEvent(new CustomEvent(USER_SETTINGS_EVENT, { detail: next }));
 }
 

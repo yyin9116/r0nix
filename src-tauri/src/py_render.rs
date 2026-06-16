@@ -193,9 +193,6 @@ try:
         raise ValueError(f"page {page_no} out of range (1..={total})")
 
     page = doc.load_page(page_no - 1)
-    page_w = float(page.rect.width or 1.0)
-    page_h = float(page.rect.height or 1.0)
-
     items = []
     for image in page.get_images(full=True):
         xref = int(image[0])
@@ -218,14 +215,10 @@ try:
             continue
 
         for rect in rects:
-            x0 = max(0.0, min(1.0, float(rect.x0) / page_w))
-            y0 = max(0.0, min(1.0, float(rect.y0) / page_h))
-            x1 = max(0.0, min(1.0, float(rect.x1) / page_w))
-            y1 = max(0.0, min(1.0, float(rect.y1) / page_h))
-            left = min(x0, x1)
-            right = max(x0, x1)
-            top = min(y0, y1)
-            bottom = max(y0, y1)
+            left = float(min(rect.x0, rect.x1))
+            right = float(max(rect.x0, rect.x1))
+            top = float(min(rect.y0, rect.y1))
+            bottom = float(max(rect.y0, rect.y1))
             items.append({
                 "xref": xref,
                 "pageNumber": int(page_no),

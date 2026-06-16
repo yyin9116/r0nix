@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { tempDir } from "@tauri-apps/api/path";
-import { readDir, writeFile } from "@tauri-apps/plugin-fs";
 import { AnimatePresence, motion } from "motion/react";
 import { Sidebar } from "./components/Sidebar";
 import { Tabs } from "./components/Tabs";
@@ -24,6 +22,21 @@ import {
   type UserSettings,
 } from "./services/userSettings";
 import { canUseNativeWebview, closeNativeWebviewTab } from "./services/nativeWebview";
+import {
+  collectNativeImportablePaths,
+  writeNativeBinaryFile,
+  writeNativeTempFile,
+  writeNativeTextFile,
+} from "./services/nativeFiles";
+import { normalizeHttpUrl, normalizeWebUrl } from "./services/urlPolicy";
+import {
+  PERSISTENCE_WARNING_EVENT,
+  consumePersistenceWarnings,
+  readVersionedLocalState,
+  writeVersionedLocalState,
+  type PersistenceWarning,
+} from "./services/localStore";
+import { debugWarn } from "./services/debugLogger";
 import { START_PAGE_URL } from "./constants/startPage";
 import { downloadPdfViaProxy } from "./services/webProxy";
 
@@ -31,6 +44,12 @@ const DOCUMENTS_KEY = "r0nix_reader_documents_v2";
 const COLLECTIONS_KEY = "r0nix_reader_collections_v1";
 const NOTES_KEY = "r0nix_reader_notes_v1";
 const ANNOTATIONS_KEY = "r0nix_reader_annotations_v1";
+const TABS_KEY = "r0nix_reader_tabs_v1";
+const DOCUMENTS_STATE_VERSION = 2;
+const COLLECTIONS_STATE_VERSION = 1;
+const NOTES_STATE_VERSION = 1;
+const ANNOTATIONS_STATE_VERSION = 1;
+const TABS_STATE_VERSION = 1;
 const PINNED_TABS: Tab[] = [
   { id: "library-main", type: "library", title: "Library", filter: "all", pinned: true },
 ];
@@ -77,10 +96,7 @@ function samePath(left: string, right: string) {
 }
 
 function normalizeUrl(raw: string) {
-  const value = raw.trim();
-  if (!value) return "";
-  if (/^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(value)) return value;
-  return `https://${value}`;
+  return normalizeWebUrl(raw);
 }
 
 function resolveTheme(mode: UserSettings["themeMode"]) {
@@ -172,11 +188,8 @@ function documentsToCsv(docs: ReaderDocument[]) {
   return [header.join(","), ...rows].join("\n");
 }
 function loadStoredDocuments(): ReaderDocument[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(DOCUMENTS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as Array<Partial<ReaderDocument>>;
+  return readVersionedLocalState(DOCUMENTS_KEY, DOCUMENTS_STATE_VERSION, [], (raw) => {
+    const parsed = raw as Array<Partial<ReaderDocument>>;
     if (!Array.isArray(parsed)) return [];
     return parsed
       .filter((item) => typeof item?.path === "string" && item.path.trim().length > 0)
@@ -198,17 +211,12 @@ function loadStoredDocuments(): ReaderDocument[] {
         trashedAt: typeof item.trashedAt === "string" && item.trashedAt ? item.trashedAt : undefined,
       }))
       .sort((left, right) => new Date(right.lastOpenedAt).getTime() - new Date(left.lastOpenedAt).getTime());
-  } catch {
-    return [];
-  }
+  });
 }
 
 function loadStoredCollections(): ReaderCollection[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(COLLECTIONS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as Array<Partial<ReaderCollection>>;
+  return readVersionedLocalState(COLLECTIONS_KEY, COLLECTIONS_STATE_VERSION, [], (raw) => {
+    const parsed = raw as Array<Partial<ReaderCollection>>;
     if (!Array.isArray(parsed)) return [];
     return parsed
       .filter((item) => typeof item?.id === "string" && typeof item?.name === "string")
@@ -224,17 +232,12 @@ function loadStoredCollections(): ReaderCollection[] {
             : new Date().toISOString(),
       }))
       .sort((left, right) => left.name.localeCompare(right.name));
-  } catch {
-    return [];
-  }
+  });
 }
 
 function loadStoredNotes(): Record<string, ReaderNote[]> {
-  if (typeof window === "undefined") return {};
-  try {
-    const raw = window.localStorage.getItem(NOTES_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as Record<string, Array<Partial<ReaderNote>>>;
+  return readVersionedLocalState(NOTES_KEY, NOTES_STATE_VERSION, {}, (raw) => {
+    const parsed = raw as Record<string, Array<Partial<ReaderNote>>>;
     const next: Record<string, ReaderNote[]> = {};
     for (const [key, value] of Object.entries(parsed || {})) {
       if (!Array.isArray(value)) continue;
@@ -251,17 +254,12 @@ function loadStoredNotes(): Record<string, ReaderNote[]> {
         .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
     }
     return next;
-  } catch {
-    return {};
-  }
+  });
 }
 
 function loadStoredAnnotations(): Record<string, ReaderAnnotation[]> {
-  if (typeof window === "undefined") return {};
-  try {
-    const raw = window.localStorage.getItem(ANNOTATIONS_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as Record<string, Array<Partial<ReaderAnnotation>>>;
+  return readVersionedLocalState(ANNOTATIONS_KEY, ANNOTATIONS_STATE_VERSION, {}, (raw) => {
+    const parsed = raw as Record<string, Array<Partial<ReaderAnnotation>>>;
     const next: Record<string, ReaderAnnotation[]> = {};
     for (const [key, value] of Object.entries(parsed || {})) {
       if (!Array.isArray(value)) continue;
@@ -297,9 +295,58 @@ function loadStoredAnnotations(): Record<string, ReaderAnnotation[]> {
         .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
     }
     return next;
-  } catch {
-    return {};
-  }
+  });
+}
+
+function sanitizeStoredTabs(raw: unknown): { tabs: Tab[]; activeTabId: string } {
+  const parsed = raw && typeof raw === "object" ? (raw as { tabs?: unknown; activeTabId?: unknown }) : {};
+  const rawTabs = Array.isArray(parsed.tabs) ? parsed.tabs : [];
+  const restored = rawTabs
+    .filter((item): item is Partial<Tab> => Boolean(item) && typeof item === "object")
+    .map((item): Tab | null => {
+      const type = item.type;
+      const id = typeof item.id === "string" && item.id ? item.id : `${type || "tab"}-${Date.now()}`;
+      const title = typeof item.title === "string" && item.title ? item.title : "Library";
+      if (type === "library") {
+        return {
+          id,
+          type,
+          title,
+          filter: typeof item.filter === "string" ? item.filter as LibraryFilter : "all",
+          pinned: Boolean(item.pinned || id === DEFAULT_ACTIVE_TAB_ID),
+        };
+      }
+      if (type === "web") {
+        return { id, type, title, url: typeof item.url === "string" ? item.url : START_PAGE_URL, pinned: Boolean(item.pinned) };
+      }
+      if (type === "settings") {
+        return { id, type, title, pinned: Boolean(item.pinned) };
+      }
+      if ((type === "pdf" || type === "markdown") && typeof item.filePath === "string" && item.filePath.trim()) {
+        return {
+          id,
+          type,
+          title,
+          filePath: item.filePath,
+          content: type === "markdown" && typeof item.content === "string" ? item.content : undefined,
+          pdfViewState: type === "pdf" && item.pdfViewState ? item.pdfViewState : undefined,
+          pinned: Boolean(item.pinned),
+        };
+      }
+      return null;
+    })
+    .filter((item): item is Tab => Boolean(item));
+
+  const hasMain = restored.some((tab) => tab.id === DEFAULT_ACTIVE_TAB_ID);
+  const tabs = hasMain ? restored : [PINNED_TABS[0], ...restored];
+  const activeTabId = typeof parsed.activeTabId === "string" && tabs.some((tab) => tab.id === parsed.activeTabId)
+    ? parsed.activeTabId
+    : DEFAULT_ACTIVE_TAB_ID;
+  return { tabs, activeTabId };
+}
+
+function loadStoredTabs(): { tabs: Tab[]; activeTabId: string } {
+  return readVersionedLocalState(TABS_KEY, TABS_STATE_VERSION, { tabs: PINNED_TABS, activeTabId: DEFAULT_ACTIVE_TAB_ID }, sanitizeStoredTabs);
 }
 
 function guessPdfFileName(url: string, contentDisposition = "") {
@@ -324,13 +371,6 @@ function guessPdfFileName(url: string, contentDisposition = "") {
   }
 }
 
-function joinPath(dir: string, fileName: string) {
-  if (!dir) return fileName;
-  const normalized = dir.endsWith("/") || dir.endsWith("\\") ? dir.slice(0, -1) : dir;
-  const separator = normalized.includes("\\") ? "\\" : "/";
-  return `${normalized}${separator}${fileName}`;
-}
-
 function shortHostSafe(url: string) {
   try {
     return new URL(normalizeUrl(url)).host;
@@ -339,118 +379,16 @@ function shortHostSafe(url: string) {
   }
 }
 
-interface FsDirEntry {
-  path?: string;
-  name?: string;
-  isDirectory?: boolean;
-  isFile?: boolean;
-  children?: FsDirEntry[];
-}
-
-function isImportablePath(path: string) {
-  const lowered = path.trim().toLowerCase();
-  return lowered.endsWith(".pdf") || lowered.endsWith(".md") || lowered.endsWith(".markdown");
-}
-
-async function collectPdfPaths(root: string): Promise<string[]> {
-  const results = new Set<string>();
-  const normalizedRoot = root.trim();
-  const isWindowsRootLike = /^[a-zA-Z]:[\\/]*$/.test(normalizedRoot);
-  const prefersBackslash = normalizedRoot.includes("\\") || isWindowsRootLike;
-
-  const resolveEntryPath = (parent: string, entry: FsDirEntry) => {
-    if (typeof entry.path === "string" && entry.path.trim()) {
-      return entry.path;
-    }
-    if (typeof entry.name !== "string" || !entry.name.trim()) {
-      return "";
-    }
-    return joinPath(parent, entry.name.trim());
-  };
-
-  const toQueuePath = (raw: string) => {
-    if (!raw) return "";
-    return prefersBackslash ? raw.replace(/\//g, "\\") : raw.replace(/\\/g, "/");
-  };
-
-  const collectFromTree = (entries: FsDirEntry[], parent: string) => {
-    const stack: Array<{ entry: FsDirEntry; parent: string }> = entries.map((entry) => ({ entry, parent }));
-    while (stack.length > 0) {
-      const current = stack.pop();
-      if (!current) continue;
-      const { entry, parent: currentParent } = current;
-      const entryPath = resolveEntryPath(currentParent, entry);
-      if (entryPath && isImportablePath(entryPath)) {
-        results.add(toQueuePath(entryPath));
-      }
-      if (Array.isArray(entry.children) && entry.children.length > 0) {
-        for (const child of entry.children) {
-          stack.push({ entry: child, parent: entryPath || currentParent });
-        }
-      }
-    }
-  };
-
-  try {
-    const recursiveEntries = (await readDir(root)) as unknown as FsDirEntry[];
-    collectFromTree(recursiveEntries, normalizedRoot);
-    if (results.size > 0) {
-      return Array.from(results);
-    }
-  } catch {
-    // Fall through to conservative manual traversal.
-  }
-
-  const queue: string[] = [normalizedRoot];
-  while (queue.length > 0) {
-    const current = queue.shift();
-    if (!current) continue;
-
-    let entries: FsDirEntry[] = [];
-    try {
-      entries = (await readDir(current)) as unknown as FsDirEntry[];
-    } catch {
-      // Tolerate inaccessible node and continue scanning others.
-      continue;
-    }
-
-    for (const entry of entries) {
-      const entryPath = resolveEntryPath(current, entry);
-      if (!entryPath) continue;
-
-      if (isImportablePath(entryPath)) {
-        results.add(toQueuePath(entryPath));
-        continue;
-      }
-
-      if (entry.isDirectory) {
-        queue.push(toQueuePath(entryPath));
-      } else if (Array.isArray(entry.children) && entry.children.length > 0) {
-        collectFromTree(entry.children, entryPath);
-      } else if (!entry.isFile) {
-        try {
-          const nested = (await readDir(entryPath)) as unknown as FsDirEntry[];
-          if (nested.length > 0) {
-            queue.push(toQueuePath(entryPath));
-          }
-        } catch {
-          // not a directory or inaccessible node
-        }
-      }
-    }
-  }
-
-  return Array.from(results);
-}
 export default function App() {
+  const storedTabs = useMemo(loadStoredTabs, []);
   const [settings, setSettings] = useState<UserSettings>(() => loadUserSettings());
   const [theme, setTheme] = useState<"light" | "dark">(() => resolveTheme(loadUserSettings().themeMode));
   const [documents, setDocuments] = useState<ReaderDocument[]>(loadStoredDocuments);
   const [collections, setCollections] = useState<ReaderCollection[]>(loadStoredCollections);
   const [notesByDocument, setNotesByDocument] = useState<Record<string, ReaderNote[]>>(loadStoredNotes);
   const [annotationsByDocument, setAnnotationsByDocument] = useState<Record<string, ReaderAnnotation[]>>(loadStoredAnnotations);
-  const [tabs, setTabs] = useState<Tab[]>(PINNED_TABS);
-  const [activeTabId, setActiveTabId] = useState(DEFAULT_ACTIVE_TAB_ID);
+  const [tabs, setTabs] = useState<Tab[]>(storedTabs.tabs);
+  const [activeTabId, setActiveTabId] = useState(storedTabs.activeTabId);
   const [busyMessage, setBusyMessage] = useState("");
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [tabContextMenu, setTabContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
@@ -507,31 +445,50 @@ export default function App() {
   }, []);
 
   const closeWebTabNative = useCallback((tabId: string) => {
-    void closeNativeWebviewTab(tabId).catch(() => {
-      // ignore transient close errors
+    void closeNativeWebviewTab(tabId).catch((error) => {
+      debugWarn("webview.close", "failed to close native webview tab", { tabId, error });
     });
   }, []);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
     const serializable = documents.map(({ fileId, ...doc }) => doc);
-    window.localStorage.setItem(DOCUMENTS_KEY, JSON.stringify(serializable));
+    writeVersionedLocalState(DOCUMENTS_KEY, DOCUMENTS_STATE_VERSION, serializable);
   }, [documents]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(COLLECTIONS_KEY, JSON.stringify(collections));
+    writeVersionedLocalState(COLLECTIONS_KEY, COLLECTIONS_STATE_VERSION, collections);
   }, [collections]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(NOTES_KEY, JSON.stringify(notesByDocument));
+    writeVersionedLocalState(NOTES_KEY, NOTES_STATE_VERSION, notesByDocument);
   }, [notesByDocument]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(ANNOTATIONS_KEY, JSON.stringify(annotationsByDocument));
+    writeVersionedLocalState(ANNOTATIONS_KEY, ANNOTATIONS_STATE_VERSION, annotationsByDocument);
   }, [annotationsByDocument]);
+
+  useEffect(() => {
+    const serializableTabs = tabs.map(({ fileId, ...tab }) => tab);
+    writeVersionedLocalState(TABS_KEY, TABS_STATE_VERSION, { tabs: serializableTabs, activeTabId });
+  }, [activeTabId, tabs]);
+
+  useEffect(() => {
+    const showWarning = (warning: PersistenceWarning) => {
+      updateBusyMessage(
+        `Local data issue: ${warning.key} was isolated${warning.backupKey ? ` as ${warning.backupKey}` : ""}`,
+        5200
+      );
+    };
+    for (const warning of consumePersistenceWarnings()) {
+      showWarning(warning);
+    }
+    const onWarning = (event: Event) => {
+      const warning = (event as CustomEvent<PersistenceWarning>).detail;
+      if (warning) showWarning(warning);
+    };
+    window.addEventListener(PERSISTENCE_WARNING_EVENT, onWarning);
+    return () => window.removeEventListener(PERSISTENCE_WARNING_EVENT, onWarning);
+  }, [updateBusyMessage]);
 
   useEffect(() => {
     if (settings.themeMode !== "system") {
@@ -553,6 +510,7 @@ export default function App() {
 
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
+    document.documentElement.dataset.theme = theme;
   }, [theme]);
 
   const persistSettings = useCallback((next: UserSettings) => {
@@ -665,8 +623,7 @@ export default function App() {
   const saveMarkdownFile = useCallback(
     async (path: string, fileId: string | undefined, content: string) => {
       if (isTauriRuntime()) {
-        const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-        await writeTextFile(path, content);
+        await writeNativeTextFile(path, content);
       } else if (fileId) {
         await api.saveMarkdown(fileId, content);
       } else {
@@ -837,8 +794,8 @@ export default function App() {
         });
 
         if (existingDoc?.fileId && existingDoc.fileId !== fileInfo.id) {
-          void api.closeFile(existingDoc.fileId).catch(() => {
-            // ignore old handle close failures
+          void api.closeFile(existingDoc.fileId).catch((error) => {
+            debugWarn("pdf.close", "failed to close replaced file handle", { fileId: existingDoc.fileId, error });
           });
         }
 
@@ -852,6 +809,27 @@ export default function App() {
     },
     [documents, updateBusyMessage, upsertDocumentFromOpen]
   );
+
+  useEffect(() => {
+    const pending = tabs.find(
+      (tab) =>
+        (tab.type === "pdf" || tab.type === "markdown") &&
+        tab.filePath &&
+        !tab.fileId
+    );
+    if (!pending?.filePath) return;
+    void openPdfByPath(pending.filePath, pending.title, { silentBusy: true });
+  }, [openPdfByPath, tabs]);
+
+  const updatePdfTabViewState = useCallback((tabId: string, viewState: NonNullable<Tab["pdfViewState"]>) => {
+    setTabs((prev) =>
+      prev.map((tab) =>
+        tab.id === tabId && tab.type === "pdf"
+          ? { ...tab, pdfViewState: viewState }
+          : tab
+      )
+    );
+  }, []);
   const downloadResourceToFile = useCallback(
     async (rawUrl: string, options?: { preferPdf?: boolean }) => {
       const normalized = normalizeUrl(rawUrl);
@@ -899,7 +877,7 @@ export default function App() {
           updateBusyMessage("Download cancelled", 1500);
           return null;
         }
-        await writeFile(savePath, new Uint8Array(bytes));
+        await writeNativeBinaryFile(savePath, new Uint8Array(bytes));
         updateBusyMessage(`Saved ${fileName}`, 2200);
         return { savePath, fileName, finalUrl };
       } catch (error) {
@@ -940,9 +918,7 @@ export default function App() {
         }
 
         const fileName = guessPdfFileName(finalUrl, contentDisposition);
-        const tempRoot = await tempDir();
-        const tempPath = joinPath(tempRoot, `r0nix-web-${Date.now()}-${fileName}`);
-        await writeFile(tempPath, new Uint8Array(bytes));
+        const tempPath = await writeNativeTempFile(`r0nix-web-${Date.now()}-${fileName}`, new Uint8Array(bytes));
         return await openPdfByPath(tempPath, fileName.replace(/\.pdf$/i, ""), { silentBusy: true });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1019,7 +995,7 @@ export default function App() {
     if (typeof selected !== "string" || !selected.trim()) return;
     try {
       updateBusyMessage("Scanning folder...");
-      const pdfPaths = await collectPdfPaths(selected);
+      const pdfPaths = await collectNativeImportablePaths(selected);
       if (pdfPaths.length === 0) {
         updateBusyMessage("No documents found in folder", 2200);
         return;
@@ -1062,15 +1038,18 @@ export default function App() {
   );
 
   const handleOpenExternal = useCallback(async (url: string) => {
-    const normalized = normalizeUrl(url);
-    if (!normalized) return;
+    const normalized = normalizeHttpUrl(url);
+    if (!normalized) {
+      updateBusyMessage("Only HTTP(S) links can be opened externally", 2600);
+      return;
+    }
     if (canUseNativeWebview()) {
       const shell = await import("@tauri-apps/plugin-shell");
       await shell.open(normalized);
       return;
     }
     window.open(normalized, "_blank", "noopener,noreferrer");
-  }, []);
+  }, [updateBusyMessage]);
 
   const focusLibrarySearch = useCallback(() => {
     setActiveTabId(DEFAULT_ACTIVE_TAB_ID);
@@ -1150,8 +1129,8 @@ export default function App() {
       for (const target of targets) {
         delete progressRef.current[makeNoteStorageKey(target.path)];
         if (target.fileId) {
-          void api.closeFile(target.fileId).catch(() => {
-            // ignore handle close failures during deletion
+          void api.closeFile(target.fileId).catch((error) => {
+            debugWarn("pdf.close", "failed to close deleted file handle", { fileId: target.fileId, error });
           });
         }
       }
@@ -1218,7 +1197,7 @@ export default function App() {
           ? JSON.stringify(docs.map(({ fileId, ...doc }) => doc), null, 2)
           : documentsToCsv(docs);
 
-        await writeFile(finalPath, new TextEncoder().encode(content));
+        await writeNativeTextFile(finalPath, content);
         updateBusyMessage(`Exported ${docs.length} item${docs.length === 1 ? "" : "s"}`, 2200);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1391,7 +1370,7 @@ export default function App() {
     <div
       style={appStyle}
       className={`flex h-screen w-full overflow-hidden font-sans selection:bg-zinc-200 dark:selection:bg-zinc-700 ${
-        theme === "dark" ? "dark bg-zinc-950 text-zinc-100" : "bg-zinc-100 text-zinc-900"
+        theme === "dark" ? "dark bg-[var(--chrome-surface-1)] text-zinc-100" : "bg-zinc-100 text-zinc-900"
       }`}
     >
       <Sidebar
@@ -1418,7 +1397,7 @@ export default function App() {
         onManageQuickLinks={() => openSettingsTab("quick-links")}
       />
 
-      <div className="flex-1 flex flex-col min-w-0 bg-white dark:bg-zinc-900">
+      <div className="flex-1 flex flex-col min-w-0 bg-white dark:bg-[var(--chrome-surface-1)]">
         <Tabs
           tabs={tabs}
           activeTabId={activeTabId}
@@ -1435,7 +1414,7 @@ export default function App() {
           }}
         />
 
-        <div className="flex-1 overflow-hidden relative bg-zinc-50 dark:bg-zinc-950">
+        <div className="flex-1 overflow-hidden relative bg-zinc-50 dark:bg-[var(--chrome-surface-1)]">
           <AnimatePresence>
             {busyMessage ? (
               <motion.div
@@ -1564,6 +1543,9 @@ export default function App() {
                 }}
                 onResolveDefaultPath={(fileName) => withDefaultDir(fileName, settings.defaultSaveDir)}
                 onOpenExternal={handleOpenExternal}
+                aiModelEndpoint={settings.aiModelPath}
+                initialViewState={activeTab.pdfViewState}
+                onViewStateChange={(viewState) => updatePdfTabViewState(activeTab.id, viewState)}
                 onProgress={(pageNo, totalPages) => {
                   if (!activeTab.filePath) return;
                   const progressKey = activeTab.filePath.trim().toLowerCase();
@@ -1596,6 +1578,7 @@ export default function App() {
                 filePath={activeTab.filePath}
                 content={activeTab.content || ""}
                 language={settings.language}
+                aiModelEndpoint={settings.aiModelPath}
                 onOpenExternal={handleOpenExternal}
                 onContentChange={(next) => {
                   updateMarkdownTabContent(activeTab.id, next);

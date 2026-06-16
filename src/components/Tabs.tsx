@@ -130,6 +130,7 @@ export function Tabs({
         <button
           onClick={onToggleSidebar}
           data-no-drag="true"
+          aria-label={toggleSidebarLabel}
           className={`p-1.5 rounded-md transition-colors ${
             isSidebarOpen
               ? "text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-800"
@@ -210,6 +211,7 @@ export function Tabs({
                   {closable ? (
                     <button
                       data-no-drag="true"
+                      aria-label={closeTabLabel}
                       onClick={(event) => {
                         event.stopPropagation();
                         onTabClose(tab.id);

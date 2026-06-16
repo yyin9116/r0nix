@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import type { AppLanguage, QuickLinkItem } from "../services/userSettings";
+import { normalizeWebUrl } from "../services/urlPolicy";
 
 type EngineId = "google" | "bing" | "baidu";
 
@@ -60,10 +61,7 @@ const I18N = {
 } as const;
 
 function normalizeUrl(raw: string) {
-  const value = raw.trim();
-  if (!value) return "";
-  if (/^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(value)) return value;
-  return `https://${value}`;
+  return normalizeWebUrl(raw);
 }
 
 function looksLikeUrl(raw: string) {

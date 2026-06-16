@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { writeNativeBinaryFile, writeNativeTextFile } from "./nativeFiles";
 
 export interface PdfInfo {
   file_id: string;
@@ -121,7 +122,6 @@ export async function savePngToFile(
   defaultFilename: string
 ): Promise<void> {
   const { save } = await import("@tauri-apps/plugin-dialog");
-  const { writeFile } = await import("@tauri-apps/plugin-fs");
 
   const filePath = await save({
     defaultPath: defaultFilename,
@@ -134,7 +134,7 @@ export async function savePngToFile(
   });
 
   if (filePath) {
-    await writeFile(filePath, base64ToBytes(pngBase64));
+    await writeNativeBinaryFile(filePath, base64ToBytes(pngBase64));
   }
 }
 
@@ -143,7 +143,6 @@ export async function saveSvgToFile(
   defaultFilename: string
 ): Promise<void> {
   const { save } = await import('@tauri-apps/plugin-dialog');
-  const { writeTextFile } = await import('@tauri-apps/plugin-fs');
 
   const filePath = await save({
     defaultPath: defaultFilename,
@@ -156,6 +155,6 @@ export async function saveSvgToFile(
   });
 
   if (filePath) {
-    await writeTextFile(filePath, svgContent);
+    await writeNativeTextFile(filePath, svgContent);
   }
 }

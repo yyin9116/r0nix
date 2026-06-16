@@ -99,13 +99,12 @@ const I18N = {
     defaultExportFormatDesc: "\u7528\u4e8e PDF \u53f3\u952e\u5bfc\u51fa\u64cd\u4f5c\u3002",
     defaultSaveDirectory: "\u9ed8\u8ba4\u4fdd\u5b58\u76ee\u5f55",
     defaultSaveDirectoryDesc: "\u5bfc\u51fa\u65f6\u9884\u586b\u4f60\u7684\u4f18\u9009\u8f93\u51fa\u76ee\u5f55\u3002",
-    localAiModelPath: "\u672c\u5730 AI \u6a21\u578b\u8def\u5f84",
-    localAiModelPathDesc: "\u4f9b\u672a\u6765\u5e03\u5c40\u5206\u6790\u7b49\u672c\u5730 AI \u80fd\u529b\u4f7f\u7528\u3002",
+    localAiModelPath: "阅读辅助模型服务",
+    localAiModelPathDesc: "填写 HTTP(S) 模型服务地址后，可对选中段落直接提问。提问会发送选中段落、引用位置和问题到该服务；也可暂时留空。",
     browse: "\u6d4f\u89c8",
     selectExportDirectory: "\u9009\u62e9\u9ed8\u8ba4\u5bfc\u51fa\u76ee\u5f55",
-    selectAiModelsDirectory: "\u9009\u62e9 AI \u6a21\u578b\u76ee\u5f55",
     chooseExportDirectory: "\u9009\u62e9\u5bfc\u51fa\u76ee\u5f55",
-    selectLocalModelFolder: "\u9009\u62e9\u672c\u5730\u6a21\u578b\u76ee\u5f55",
+    selectLocalModelFolder: "https://127.0.0.1:11434/api/read",
     quickLinks: "\u5feb\u6377\u94fe\u63a5",
     quickLinksDesc: "\u5feb\u6377\u94fe\u63a5\u53ef\u4ee5\u7f16\u8f91\uff0c\u4fdd\u5b58\u540e\u4fa7\u8fb9\u680f\u4f1a\u7acb\u5373\u66f4\u65b0\u3002",
     title: "\u6807\u9898",
@@ -153,13 +152,12 @@ const I18N = {
     defaultExportFormatDesc: "Used by the PDF right-click export action.",
     defaultSaveDirectory: "Default save directory",
     defaultSaveDirectoryDesc: "Prefill exported file paths with your preferred output location.",
-    localAiModelPath: "Local AI model path",
-    localAiModelPathDesc: "Directory for future layout/formula models used by local AI capabilities.",
+    localAiModelPath: "Reading assistant model service",
+    localAiModelPathDesc: "Set an HTTP(S) model endpoint to ask questions about selected paragraphs. Asking sends the paragraph, reference, and question to that service; you can leave it empty.",
     browse: "Browse",
     selectExportDirectory: "Select Default Export Directory",
-    selectAiModelsDirectory: "Select AI Models Directory",
     chooseExportDirectory: "Choose an export directory",
-    selectLocalModelFolder: "Select a local model folder",
+    selectLocalModelFolder: "https://127.0.0.1:11434/api/read",
     quickLinks: "Quick Links",
     quickLinksDesc: "Quick Links are editable, not fixed. Add or remove them here and the sidebar updates immediately.",
     title: "Title",
@@ -204,11 +202,11 @@ export function Settings({ settings, onThemeChange, onSettingsChange, focusSecti
     []
   );
 
-  const handlePickDirectory = async (field: "defaultSaveDir" | "aiModelPath") => {
+  const handlePickDirectory = async (field: "defaultSaveDir") => {
     const selected = await open({
       directory: true,
       multiple: false,
-      title: field === "aiModelPath" ? t.selectAiModelsDirectory : t.selectExportDirectory,
+      title: t.selectExportDirectory,
     });
     if (typeof selected !== "string" || !selected.trim()) return;
     updateSettings({ [field]: selected } as Partial<UserSettings>);
@@ -343,6 +341,7 @@ export function Settings({ settings, onThemeChange, onSettingsChange, focusSecti
                   className={`px-3 py-1.5 rounded-md text-xs font-medium ${settings.proxyEnabled ? "" : "bg-zinc-200 dark:bg-zinc-800"}`}
                   style={settings.proxyEnabled ? { backgroundColor: "var(--reader-accent)", color: "var(--reader-accent-contrast)" } : undefined}
                   onClick={() => updateSettings({ proxyEnabled: !settings.proxyEnabled })}
+                  type="button"
                 >
                   {settings.proxyEnabled ? t.enabled : t.disabled}
                 </button>
@@ -362,6 +361,7 @@ export function Settings({ settings, onThemeChange, onSettingsChange, focusSecti
                 className={`px-3 py-1.5 rounded-md text-xs font-medium ${settings.openLinksInsideApp ? "" : "bg-zinc-200 dark:bg-zinc-800"}`}
                 style={settings.openLinksInsideApp ? { backgroundColor: "var(--reader-accent)", color: "var(--reader-accent-contrast)" } : undefined}
                 onClick={() => updateSettings({ openLinksInsideApp: !settings.openLinksInsideApp })}
+                type="button"
               >
                 {settings.openLinksInsideApp ? t.insideApp : t.externalBrowser}
               </button>
@@ -418,6 +418,7 @@ export function Settings({ settings, onThemeChange, onSettingsChange, focusSecti
                 <button
                   className="px-3 py-2 bg-zinc-200 dark:bg-zinc-800 hover:bg-zinc-300 dark:hover:bg-zinc-700 rounded-md text-sm font-medium transition-colors"
                   onClick={() => void handlePickDirectory("defaultSaveDir")}
+                  type="button"
                 >
                   {t.browse}
                 </button>
@@ -433,12 +434,6 @@ export function Settings({ settings, onThemeChange, onSettingsChange, focusSecti
                   className="w-72 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-md px-3 py-2 text-sm font-mono"
                   placeholder={t.selectLocalModelFolder}
                 />
-                <button
-                  className="px-3 py-2 bg-zinc-200 dark:bg-zinc-800 hover:bg-zinc-300 dark:hover:bg-zinc-700 rounded-md text-sm font-medium transition-colors"
-                  onClick={() => void handlePickDirectory("aiModelPath")}
-                >
-                  {t.browse}
-                </button>
               </div>
             </SettingsRow>
           </div>
@@ -457,6 +452,7 @@ export function Settings({ settings, onThemeChange, onSettingsChange, focusSecti
                 <label className="block text-xs text-zinc-500 mb-1">{t.title}</label>
                 <input
                   ref={titleInputRef}
+                  aria-label={t.title}
                   type="text"
                   value={draftQuickLink.title}
                   onChange={(event) => setDraftQuickLink((prev) => ({ ...prev, title: event.target.value }))}
@@ -467,6 +463,7 @@ export function Settings({ settings, onThemeChange, onSettingsChange, focusSecti
               <div>
                 <label className="block text-xs text-zinc-500 mb-1">{t.url}</label>
                 <input
+                  aria-label={t.url}
                   type="text"
                   value={draftQuickLink.url}
                   onChange={(event) => setDraftQuickLink((prev) => ({ ...prev, url: event.target.value }))}
@@ -476,6 +473,7 @@ export function Settings({ settings, onThemeChange, onSettingsChange, focusSecti
               </div>
               <button
                 onClick={addQuickLink}
+                type="button"
                 className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-md text-sm font-medium"
                 style={{ backgroundColor: "var(--reader-accent)", color: "var(--reader-accent-contrast)" }}
               >
@@ -495,6 +493,8 @@ export function Settings({ settings, onThemeChange, onSettingsChange, focusSecti
                     className="p-2 rounded-md text-zinc-400 hover:text-red-500 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"
                     onClick={() => removeQuickLink(item.id)}
                     title={t.removeQuickLink}
+                    aria-label={t.removeQuickLink}
+                    type="button"
                   >
                     <Trash2 size={14} />
                   </button>
@@ -512,6 +512,8 @@ function ThemeCard({ icon, label, active, onClick }: { icon: React.ReactNode; la
   return (
     <button
       onClick={onClick}
+      type="button"
+      aria-pressed={active}
       className={`flex-1 flex flex-col items-center gap-3 p-4 rounded-lg border-2 transition-all ${
         active
           ? "border-zinc-900 dark:border-zinc-100 bg-white dark:bg-zinc-900"

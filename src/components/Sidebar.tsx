@@ -123,6 +123,7 @@ export function Sidebar({
           <button
             className="p-1 hover:bg-zinc-200 dark:hover:bg-zinc-800 rounded-md text-zinc-500 dark:text-zinc-400 transition-colors"
             title={text.searchWorkspace}
+            aria-label={text.searchWorkspace}
             onClick={onSearchWorkspace}
           >
             <Search size={16} />
@@ -194,7 +195,12 @@ export function Sidebar({
           <div className="px-3 mb-2 mt-6">
             <div className="flex items-center justify-between text-xs font-serif font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-widest mb-2 px-2">
               <span>{text.collections}</span>
-              <button className="hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors" title={text.createCollection} onClick={onCreateCollection}>
+              <button
+                className="hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                title={text.createCollection}
+                aria-label={text.createCollection}
+                onClick={onCreateCollection}
+              >
                 <Plus size={14} />
               </button>
             </div>
@@ -226,6 +232,7 @@ export function Sidebar({
                 className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md py-1 text-left transition-colors hover:text-zinc-700 dark:hover:text-zinc-300"
                 type="button"
                 aria-expanded={quickLinksOpen}
+                aria-label={text.quickLinks}
                 onClick={() => setQuickLinksOpen((value) => !value)}
               >
                 <ChevronDown
@@ -237,6 +244,7 @@ export function Sidebar({
               <button
                 className="shrink-0 rounded-md px-1 py-1 normal-case tracking-normal text-[11px] transition-colors hover:text-zinc-700 dark:hover:text-zinc-300"
                 title={text.manageQuickLinks}
+                aria-label={text.manageQuickLinks}
                 onClick={onManageQuickLinks}
                 type="button"
               >
@@ -306,6 +314,7 @@ function NavItem({
       }`}
       style={active ? { backgroundColor: "var(--reader-accent-soft)" } : undefined}
       title={onDoubleClick ? pinHint : undefined}
+      aria-label={label}
     >
       {icon}
       <span className="truncate flex-1">{label}</span>

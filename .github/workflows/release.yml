@@ -35,6 +35,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -66,7 +68,45 @@ jobs:
       - name: Prepare Embedded Python Runtime
         run: python scripts/prepare-python-runtime.py --runtime-dir src-tauri/runtime
 
+      - name: Validate macOS signing secrets
+        if: matrix.platform.name == 'macos'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_SECRET: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD_SECRET: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY_SECRET: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID_SECRET: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD_SECRET: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID_SECRET: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          missing=()
+          [[ -n "$APPLE_CERTIFICATE_SECRET" ]] || missing+=("APPLE_CERTIFICATE")
+          [[ -n "$APPLE_CERTIFICATE_PASSWORD_SECRET" ]] || missing+=("APPLE_CERTIFICATE_PASSWORD")
+          [[ -n "$APPLE_SIGNING_IDENTITY_SECRET" ]] || missing+=("APPLE_SIGNING_IDENTITY")
+          [[ -n "$APPLE_ID_SECRET" ]] || missing+=("APPLE_ID")
+          [[ -n "$APPLE_PASSWORD_SECRET" ]] || missing+=("APPLE_PASSWORD")
+          [[ -n "$APPLE_TEAM_ID_SECRET" ]] || missing+=("APPLE_TEAM_ID")
+
+          if (( ${#missing[@]} > 0 )); then
+            printf 'macOS release packaging requires Developer ID signing and notarization secrets. Missing: %s\n' "${missing[*]}" >&2
+            printf 'Unsigned DMG/app artifacts are blocked because Gatekeeper can report them as damaged after download.\n' >&2
+            exit 1
+          fi
+
       - name: Build Tauri Bundles
+        if: matrix.platform.name != 'macos'
+        run: npx tauri build --bundles "${{ matrix.platform.bundles }}"
+
+      - name: Build Signed and Notarized macOS Bundles
+        if: matrix.platform.name == 'macos'
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: npx tauri build --bundles "${{ matrix.platform.bundles }}"
 
       - name: Upload Build Artifacts
@@ -84,6 +124,23 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare Release Notes
+        shell: bash
+        run: |
+          if git cat-file -e "${GITHUB_REF_NAME}^{tag}" 2>/dev/null; then
+            git tag -l --format='%(contents)' "$GITHUB_REF_NAME" > RELEASE_NOTES.md
+          fi
+
+          if [[ ! -s RELEASE_NOTES.md ]]; then
+            {
+              echo "r0nix ${GITHUB_REF_NAME}"
+              echo
+              echo "本次发布包含最新的阅读工作台、网页浏览、Markdown/PDF 阅读辅助和稳定性改进。"
+            } > RELEASE_NOTES.md
+          fi
 
       - name: Download all artifacts
         uses: actions/download-artifact@v4

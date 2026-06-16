@@ -32,6 +32,25 @@ export function debugLog(scope: string, message: string, payload?: unknown): voi
   });
 }
 
+export function debugWarn(scope: string, message: string, payload?: unknown): void {
+  const timestamp = new Date().toISOString();
+  if (payload === undefined) {
+    console.warn(`[${timestamp}][${scope}] ${message}`);
+  } else {
+    console.warn(`[${timestamp}][${scope}] ${message}`, payload);
+  }
+
+  if (!isTauri) return;
+  void invoke("frontend_log", {
+    level: "warn",
+    scope,
+    message,
+    payload: toJson(payload),
+  }).catch(() => {
+    // terminal diagnostics are best-effort
+  });
+}
+
 export function debugError(scope: string, message: string, payload?: unknown): void {
   const timestamp = new Date().toISOString();
   if (payload === undefined) {

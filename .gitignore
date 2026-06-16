@@ -9,6 +9,12 @@ backup/
 demo-image/
 tmp/
 docs/
+!docs/
+docs/*
+!docs/images/
+docs/images/*
+!docs/images/workspace-preview.png
+!docs/images/reading-assist-preview.png
 /icon
 /icon.*
 /icon*/

@@ -20,9 +20,12 @@ import {
   createOrShowNativeWebviewTab,
   hideNativeWebviewTab,
   navigateNativeWebviewTab,
+  navigateNativeWebviewTabHistory,
   showNativeWebviewTab,
   syncNativeWebviewTabBounds,
 } from "../services/nativeWebview";
+import { normalizeHttpUrl, normalizeWebUrl } from "../services/urlPolicy";
+import { readVersionedLocalState, writeVersionedLocalState } from "../services/localStore";
 import { START_PAGE_URL } from "../constants/startPage";
 import { StartPage } from "./StartPage";
 
@@ -46,6 +49,7 @@ type BrowserBookmark = {
 };
 
 const BOOKMARKS_KEY = "r0nix_reader_web_bookmarks_v1";
+const BOOKMARKS_STATE_VERSION = 1;
 const NATIVE_WEBVIEW_TOP_ADJUST_PX = 32;
 
 const I18N = {
@@ -68,7 +72,8 @@ const I18N = {
     menuOpenExternal: "系统浏览器打开",
     menuOpenPdf: "在应用中打开 PDF",
     menuFocusNative: "聚焦原生 WebView",
-    iframeNotice: "Iframe 仅适合作为备用模式；多数网站会拒绝嵌入，建议使用原生 WebView。",
+    nativeNavigationFailed: "原生网页导航失败",
+    iframeNotice: "当前是浏览器预览环境，原生 WebView 仅在桌面端启用；部分网站可能拒绝 iframe 嵌入。",
     loadingPage: "正在加载",
     nativeActiveTitle: "原生 WebView 已启用",
     nativeActiveDesc: "当前页面由 Tauri 原生 WebView 承载，可绕过部分 iframe 限制并支持 PDF 链接拦截。",
@@ -102,7 +107,8 @@ const I18N = {
     menuOpenExternal: "Open externally",
     menuOpenPdf: "Open PDF in app",
     menuFocusNative: "Focus native webview",
-    iframeNotice: "Iframe is a fallback mode only. Most sites reject embedding, so native WebView is recommended.",
+    nativeNavigationFailed: "Native page navigation failed",
+    iframeNotice: "This is a browser preview. Native WebView only runs in the desktop app; some sites may reject iframe embedding.",
     loadingPage: "Loading",
     nativeActiveTitle: "Native WebView Active",
     nativeActiveDesc: "This area is powered by a Tauri native webview, allowing protected sites and in-app PDF interception.",
@@ -120,10 +126,7 @@ const I18N = {
 } as const;
 
 function normalizeUrl(raw: string) {
-  const value = raw.trim();
-  if (!value) return "";
-  if (/^[a-zA-Z][a-zA-Z\d+\-.]*:\/\//.test(value)) return value;
-  return `https://${value}`;
+  return normalizeWebUrl(raw);
 }
 
 function normalizeBookmarkUrl(raw: string) {
@@ -139,11 +142,8 @@ function normalizeBookmarkUrl(raw: string) {
 }
 
 function loadStoredBookmarks(): BrowserBookmark[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(BOOKMARKS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as Array<Partial<BrowserBookmark>>;
+  return readVersionedLocalState(BOOKMARKS_KEY, BOOKMARKS_STATE_VERSION, [], (raw) => {
+    const parsed = raw as Array<Partial<BrowserBookmark>>;
     if (!Array.isArray(parsed)) return [];
     const seen = new Set<string>();
     const bookmarks: BrowserBookmark[] = [];
@@ -159,9 +159,7 @@ function loadStoredBookmarks(): BrowserBookmark[] {
       });
     }
     return bookmarks;
-  } catch {
-    return [];
-  }
+  });
 }
 
 function guessHomeUrl() {
@@ -200,8 +198,8 @@ export function WebBrowser({
 }: WebBrowserProps) {
   const t = I18N[language];
   const supportsNative = canUseNativeWebview();
-  const nativeMode = supportsNative || mode === "native_webview";
-  const showIframeCompatibilityNotice = mode === "iframe" && !supportsNative;
+  const nativeMode = supportsNative && mode === "native_webview";
+  const showIframeCompatibilityNotice = (mode === "iframe" || mode === "native_webview") && !supportsNative;
   const [url, setUrl] = useState(initialUrl === START_PAGE_URL ? START_PAGE_URL : normalizeUrl(initialUrl));
   const [inputUrl, setInputUrl] = useState(initialUrl === START_PAGE_URL ? "" : normalizeUrl(initialUrl));
   const [reloadToken, setReloadToken] = useState(0);
@@ -255,8 +253,7 @@ export function WebBrowser({
   }, [initialUrl]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(BOOKMARKS_KEY, JSON.stringify(bookmarks));
+    writeVersionedLocalState(BOOKMARKS_KEY, BOOKMARKS_STATE_VERSION, bookmarks);
   }, [bookmarks]);
 
   const clearLoadingTimers = useCallback(() => {
@@ -498,15 +495,26 @@ export function WebBrowser({
 
   const openExternal = () => {
     if (!currentUrl) return;
-    if (onOpenExternal) {
-      onOpenExternal(currentUrl);
+    const normalized = normalizeHttpUrl(currentUrl);
+    if (!normalized) {
+      showMessage(t.nativeNavigationFailed);
       return;
     }
-    window.open(currentUrl, "_blank", "noopener,noreferrer");
+    if (onOpenExternal) {
+      onOpenExternal(normalized);
+      return;
+    }
+    window.open(normalized, "_blank", "noopener,noreferrer");
   };
 
   const navigateBack = () => {
-    if (nativeMode) return;
+    if (nativeMode) {
+      beginLoading(3000);
+      void navigateNativeWebviewTabHistory(tabId, "back")
+        .catch((error) => showMessage(`${t.nativeNavigationFailed}: ${String(error)}`))
+        .finally(() => endLoadingNow());
+      return;
+    }
     try {
       iframeRef.current?.contentWindow?.history.back();
     } catch {
@@ -515,7 +523,13 @@ export function WebBrowser({
   };
 
   const navigateForward = () => {
-    if (nativeMode) return;
+    if (nativeMode) {
+      beginLoading(3000);
+      void navigateNativeWebviewTabHistory(tabId, "forward")
+        .catch((error) => showMessage(`${t.nativeNavigationFailed}: ${String(error)}`))
+        .finally(() => endLoadingNow());
+      return;
+    }
     try {
       iframeRef.current?.contentWindow?.history.forward();
     } catch {
@@ -569,21 +583,21 @@ export function WebBrowser({
   };
 
   const navButtonClass =
-    "inline-flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100";
+    "inline-flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-[var(--chrome-surface-4)] dark:hover:text-zinc-100";
 
   return (
     <div
-      className="flex h-full flex-col bg-zinc-50 text-zinc-900 dark:bg-zinc-950 dark:text-zinc-100"
+      className="flex h-full flex-col bg-zinc-50 text-zinc-900 dark:bg-[var(--chrome-surface-1)] dark:text-zinc-100"
       onMouseDownCapture={keepNativeVisible}
       onPointerDownCapture={keepNativeVisible}
     >
-      <div className="z-10 shrink-0 border-b border-zinc-200 bg-white/95 px-3 py-2 shadow-sm backdrop-blur dark:border-zinc-800 dark:bg-zinc-950/95">
+      <div className="z-10 shrink-0 border-b border-zinc-200 bg-white/95 px-3 py-2 shadow-sm backdrop-blur dark:border-[var(--chrome-border)] dark:bg-[var(--chrome-surface-1)]/95">
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1">
-            <button className={navButtonClass} title={t.navBack} onClick={navigateBack} disabled={nativeMode}>
+            <button className={navButtonClass} title={t.navBack} aria-label={t.navBack} onClick={navigateBack}>
               <ArrowLeft size={16} />
             </button>
-            <button className={navButtonClass} title={t.navForward} onClick={navigateForward} disabled={nativeMode}>
+            <button className={navButtonClass} title={t.navForward} aria-label={t.navForward} onClick={navigateForward}>
               <ArrowRight size={16} />
             </button>
             <button
@@ -603,10 +617,11 @@ export function WebBrowser({
                 setReloadToken((value) => value + 1);
               }}
               title={t.refresh}
+              aria-label={t.refresh}
             >
               <RotateCw size={16} className={loading ? "animate-spin" : ""} />
             </button>
-            <button className={navButtonClass} onClick={() => navigateTo(START_PAGE_URL)} title={t.home}>
+            <button className={navButtonClass} onClick={() => navigateTo(START_PAGE_URL)} title={t.home} aria-label={t.home}>
               <Home size={16} />
             </button>
           </div>
@@ -626,12 +641,13 @@ export function WebBrowser({
               value={inputUrl}
               onChange={(event) => setInputUrl(event.target.value)}
               placeholder={t.addressPlaceholder}
-              className="w-full rounded-xl border border-zinc-200 bg-zinc-50 py-2 pl-9 pr-10 text-sm text-zinc-900 transition-all placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-[var(--reader-accent)] dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-500"
+              className="w-full rounded-xl border border-zinc-200 bg-zinc-50 py-2 pl-9 pr-10 text-sm text-zinc-900 transition-all placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-[var(--reader-accent)] dark:border-[var(--chrome-border)] dark:bg-[var(--chrome-surface-2)] dark:text-zinc-100 dark:placeholder:text-zinc-500"
             />
             <button
               type="button"
               className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 transition-colors dark:text-zinc-500"
               title={bookmarked ? t.bookmarkRemove : t.bookmarkAdd}
+              aria-label={bookmarked ? t.bookmarkRemove : t.bookmarkAdd}
               onClick={toggleBookmark}
               style={{ color: bookmarked ? "var(--reader-accent)" : undefined }}
             >
@@ -641,15 +657,16 @@ export function WebBrowser({
 
           <div className="ml-auto flex items-center gap-1.5">
             <button
-              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-900"
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-[var(--chrome-border)] dark:bg-[var(--chrome-surface-2)] dark:text-zinc-200 dark:hover:bg-[var(--chrome-surface-4)]"
               onClick={handleOpenPdfInApp}
               title={looksLikePdfUrl(pdfLink) ? t.openPdfInAppHintDetected : t.openPdfInAppHintFallback}
+              aria-label={t.openPdfInApp}
             >
               <FileText size={14} />
               <span className="hidden xl:inline">{t.openPdfInApp}</span>
             </button>
 
-            <button className={navButtonClass} onClick={openExternal} title={t.openExternal}>
+            <button className={navButtonClass} onClick={openExternal} title={t.openExternal} aria-label={t.openExternal}>
               <ExternalLink size={16} />
             </button>
 
@@ -659,17 +676,18 @@ export function WebBrowser({
                 void handleDownload(looksLikePdfUrl(pdfLink));
               }}
               title={t.download}
+              aria-label={t.download}
               disabled={actionBusy}
             >
               {actionBusy ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
             </button>
 
             <div className="relative" ref={menuRef}>
-              <button className={navButtonClass} title={t.more} onClick={() => setMenuOpen((value) => !value)}>
+              <button className={navButtonClass} title={t.more} aria-label={t.more} onClick={() => setMenuOpen((value) => !value)}>
                 <MoreVertical size={16} />
               </button>
               {menuOpen ? (
-                <div className="absolute right-0 top-10 z-30 w-64 rounded-2xl border border-zinc-200 bg-white p-2 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+                <div className="absolute right-0 top-10 z-30 w-64 rounded-2xl border border-zinc-200 bg-white p-2 shadow-sm dark:border-[var(--chrome-border)] dark:bg-[var(--chrome-surface-2)]">
                   <MenuButton
                     icon={<Star size={14} />}
                     label={bookmarked ? t.bookmarkRemove : t.bookmarkAdd}
@@ -711,14 +729,14 @@ export function WebBrowser({
       </div>
 
       {showIframeCompatibilityNotice ? (
-        <div className="mx-4 mt-3 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-xs text-zinc-600 shadow-sm dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300">
+        <div className="mx-4 mt-3 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-xs text-zinc-600 shadow-sm dark:border-[var(--chrome-border)] dark:bg-[var(--chrome-surface-2)] dark:text-zinc-300">
           {t.iframeNotice}
         </div>
       ) : null}
 
       <div
         ref={anchorRef}
-        className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-white dark:bg-zinc-950"
+        className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-white dark:bg-[var(--chrome-surface-1)]"
         onMouseEnter={() => {
           if (!nativeMode || isStartPage) return;
           void showNativeWebviewTab(tabId, false);
@@ -729,8 +747,8 @@ export function WebBrowser({
         }}
       >
         {loading ? (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/80 text-sm text-zinc-500 dark:bg-zinc-950/70 dark:text-zinc-300">
-            <div className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 py-2 shadow-sm dark:border-zinc-800 dark:bg-zinc-950">
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/80 text-sm text-zinc-500 dark:bg-[var(--chrome-surface-1)]/70 dark:text-zinc-300">
+            <div className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 py-2 shadow-sm dark:border-[var(--chrome-border)] dark:bg-[var(--chrome-surface-2)]">
               <Loader2 className="h-4 w-4 animate-spin" />
               {t.loadingPage} {url || "page"}...
             </div>
