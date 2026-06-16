@@ -68,7 +68,8 @@ jobs:
       - name: Prepare Embedded Python Runtime
         run: python scripts/prepare-python-runtime.py --runtime-dir src-tauri/runtime
 
-      - name: Validate macOS signing secrets
+      - name: Check macOS signing secrets
+        id: macos_signing
         if: matrix.platform.name == 'macos'
         shell: bash
         env:
@@ -90,15 +91,18 @@ jobs:
           if (( ${#missing[@]} > 0 )); then
             printf 'macOS release packaging requires Developer ID signing and notarization secrets. Missing: %s\n' "${missing[*]}" >&2
             printf 'Unsigned DMG/app artifacts are blocked because Gatekeeper can report them as damaged after download.\n' >&2
-            exit 1
+            printf 'macOS artifacts will be skipped for this release; configure the missing secrets and push a new tag to publish signed macOS builds.\n' >&2
+            echo "has_secrets=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
+          echo "has_secrets=true" >> "$GITHUB_OUTPUT"
 
       - name: Build Tauri Bundles
         if: matrix.platform.name != 'macos'
         run: npx tauri build --bundles "${{ matrix.platform.bundles }}"
 
       - name: Build Signed and Notarized macOS Bundles
-        if: matrix.platform.name == 'macos'
+        if: matrix.platform.name == 'macos' && steps.macos_signing.outputs.has_secrets == 'true'
         shell: bash
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -110,6 +114,7 @@ jobs:
         run: npx tauri build --bundles "${{ matrix.platform.bundles }}"
 
       - name: Upload Build Artifacts
+        if: matrix.platform.name != 'macos' || steps.macos_signing.outputs.has_secrets == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform.artifact_name }}
