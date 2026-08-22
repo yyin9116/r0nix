@@ -106,6 +106,18 @@ async function run() {
       return input instanceof HTMLInputElement && input.value === "https://example.com";
     });
     await expectVisible(page.locator("iframe[title='https://example.com']"), "browser iframe fallback");
+
+    await page.getByPlaceholder("输入网址或搜索地址").fill("example.org");
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => {
+      const input = document.querySelector("input[placeholder='输入网址或搜索地址']");
+      return input instanceof HTMLInputElement && input.value === "https://example.org";
+    });
+    await page.getByRole("button", { name: "后退" }).click();
+    await page.waitForFunction(() => {
+      const input = document.querySelector("input[placeholder='输入网址或搜索地址']");
+      return input instanceof HTMLInputElement && input.value === "https://example.com";
+    });
   } finally {
     await browser.close();
   }

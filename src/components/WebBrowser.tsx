@@ -221,6 +221,7 @@ export function WebBrowser({
   const loadingTimerRef = useRef<number | null>(null);
   const loadingWatchdogRef = useRef<number | null>(null);
   const lastInitialUrlRef = useRef(initialHistoryUrl);
+  const selfNavigatedUrlRef = useRef<string | null>(null);
 
   const isStartPage = url === START_PAGE_URL;
   const currentUrl = useMemo(() => (isStartPage ? "" : normalizeUrl(url || inputUrl)), [inputUrl, isStartPage, url]);
@@ -244,6 +245,10 @@ export function WebBrowser({
         syncOnlyRef.current = true;
         return START_PAGE_URL;
       });
+      if (selfNavigatedUrlRef.current === START_PAGE_URL) {
+        selfNavigatedUrlRef.current = null;
+        return;
+      }
       if (lastInitialUrlRef.current !== START_PAGE_URL) {
         lastInitialUrlRef.current = START_PAGE_URL;
         setHistoryEntries([START_PAGE_URL]);
@@ -259,6 +264,10 @@ export function WebBrowser({
       if (prev === normalized) return prev;
       return normalized;
     });
+    if (selfNavigatedUrlRef.current === normalized) {
+      selfNavigatedUrlRef.current = null;
+      return;
+    }
     if (lastInitialUrlRef.current !== normalized) {
       lastInitialUrlRef.current = normalized;
       setHistoryEntries([normalized]);
@@ -485,6 +494,7 @@ export function WebBrowser({
   const navigateTo = (raw: string, options?: { recordHistory?: boolean }) => {
     const recordHistory = options?.recordHistory !== false;
     if (raw === START_PAGE_URL) {
+      selfNavigatedUrlRef.current = START_PAGE_URL;
       setUrl(START_PAGE_URL);
       setInputUrl("");
       endLoadingNow();
@@ -504,6 +514,7 @@ export function WebBrowser({
 
     const normalized = normalizeUrl(raw);
     if (!normalized) return;
+    selfNavigatedUrlRef.current = normalized;
     setUrl(normalized);
     setInputUrl(normalized);
     if (recordHistory) {
