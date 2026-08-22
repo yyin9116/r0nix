@@ -3392,7 +3392,7 @@ export function PDFViewer({
                           y: event.clientY,
                           isOpen: true,
                           pageNo: clampPage(pageNo, totalPages),
-                          imageTarget: null,
+                          imageTarget: imageTargetAtPointRef.current(pageNo, event.clientX, event.clientY),
                         });
                       }}
                     >
