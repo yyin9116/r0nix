@@ -86,9 +86,12 @@ const DEFAULT_PAGE_SIZE: PageSize = { width: 595, height: 842 };
 const ACTIVE_NEIGHBOR = 2;
 const TEXT_NOTE_DEFAULT_WIDTH = 0.22;
 const TEXT_NOTE_DEFAULT_HEIGHT = 0.08;
-const MIN_IMAGE_OVERLAY_AREA = 0.0025;
-const MIN_IMAGE_OVERLAY_SIDE = 18;
-const MAX_IMAGE_OVERLAY_ASPECT = 8;
+// Keep these thresholds aligned with the native image index. Raster xref
+// resources are already identified by PDF metadata; filtering them by text
+// overlap hides legitimate figures with labels or captions.
+const MIN_IMAGE_OVERLAY_AREA = 0.00005;
+const MIN_IMAGE_OVERLAY_SIDE = 6;
+const MAX_IMAGE_OVERLAY_ASPECT = 64;
 type CanvasRenderTask = { cancel: () => void; promise: Promise<void> };
 const activeCanvasRenders = new WeakMap<HTMLCanvasElement, CanvasRenderTask>();
 const PAGE_RENDER_OVERSCAN_WHILE_ZOOMING = 5;
@@ -445,12 +448,13 @@ function isLikelyImageCandidate(
   const imageBlockMatch = blocks.some(
     (block) => block.kind === "image" && block.rect && rectsOverlapRatio(rect, block.rect, pageSize) >= 0.18
   );
+  if (img.source !== "vector") return true;
   if (imageBlockMatch) return true;
 
   const textOverlap = blocks
     .filter((block) => block.kind !== "image" && block.rect)
     .reduce((max, block) => Math.max(max, rectsOverlapRatio(rect, block.rect as NonNullable<PdfReadingBlock["rect"]>, pageSize)), 0);
-  return img.source === "vector" ? textOverlap < 0.46 : textOverlap < 0.32;
+  return textOverlap < 0.46;
 }
 
 function imageBlockToCandidate(block: PdfReadingBlock, pageSize: PageSize): { img: PDFImageInfo; rect: { left: number; top: number; width: number; height: number } } | null {
