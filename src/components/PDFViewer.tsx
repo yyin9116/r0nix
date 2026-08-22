@@ -1586,7 +1586,12 @@ export function PDFViewer({
   const lockedZoomPageRef = useRef<number | null>(null);
   const readingBlocksByPageRef = useRef<Map<number, PdfReadingBlock[]>>(new Map());
   const pdfImagesByPageRef = useRef<Record<number, PDFImageInfo[]>>({});
-  const imageDetectionInFlightRef = useRef<Map<number, Promise<PDFImageInfo[]>>>(new Map());
+  const imageDetectionInFlightRef = useRef<Map<number, {
+    promise: Promise<PDFImageInfo[]>;
+    controller: AbortController;
+    consumers: number;
+    settled: boolean;
+  }>>(new Map());
   const readingBlocksLoadRef = useRef<Promise<PdfReadingBlock[]> | null>(null);
   const readingBlocksLoadedFileRef = useRef<string | null>(null);
   const fullTranslationAbortRef = useRef<AbortController | null>(null);
@@ -2631,35 +2636,94 @@ export function PDFViewer({
     async (pageNo: number, signal?: AbortSignal) => {
       if (!fileId) return;
       const target = clampPage(pageNo, totalPages);
+      if (signal?.aborted) {
+        throw signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError");
+      }
       if (pdfImagesByPageRef.current[target] !== undefined) return pdfImagesByPageRef.current[target];
-      const existing = imageDetectionInFlightRef.current.get(target);
-      if (existing) return existing;
-      const task = (async () => {
-        const { images } = await api.getPDFImages(fileId, target, signal);
-        setPdfImagesByPage((prev) => {
-          const nextImages = images.map((image, index) => ({
-            ...image,
-            documentId: documentId || image.documentId,
-            resourceId: image.resourceId || `${documentId || fileId}:image:${target}:${image.xref || index}`,
-          }));
-          const next = { ...prev, [target]: nextImages };
-          pdfImagesByPageRef.current = next;
-          return next;
-        });
-        return images;
-      })();
-      imageDetectionInFlightRef.current.set(target, task);
+      let shared = imageDetectionInFlightRef.current.get(target);
+      if (!shared) {
+        const controller = new AbortController();
+        const task = (async () => {
+          const { images } = await api.getPDFImages(fileId, target, controller.signal);
+          if (controller.signal.aborted) {
+            throw controller.signal.reason instanceof Error
+              ? controller.signal.reason
+              : new DOMException("The operation was aborted", "AbortError");
+          }
+          setPdfImagesByPage((prev) => {
+            const nextImages = images.map((image, index) => ({
+              ...image,
+              documentId: documentId || image.documentId,
+              resourceId: image.resourceId || `${documentId || fileId}:image:${target}:${image.xref || index}`,
+            }));
+            const next = { ...prev, [target]: nextImages };
+            pdfImagesByPageRef.current = next;
+            return next;
+          });
+          return images;
+        })();
+        shared = { promise: task, controller, consumers: 0, settled: false };
+        imageDetectionInFlightRef.current.set(target, shared);
+        void task.finally(() => {
+          shared!.settled = true;
+          if (imageDetectionInFlightRef.current.get(target) === shared) {
+            imageDetectionInFlightRef.current.delete(target);
+          }
+        }).catch(() => undefined);
+      }
+
+      const task = shared;
+      task.consumers += 1;
+      let released = false;
+      const release = () => {
+        if (released) return;
+        released = true;
+        task.consumers = Math.max(0, task.consumers - 1);
+        if (task.consumers === 0 && !task.settled) {
+          if (imageDetectionInFlightRef.current.get(target) === task) {
+            imageDetectionInFlightRef.current.delete(target);
+          }
+          task.controller.abort(new DOMException("The operation was aborted", "AbortError"));
+        }
+      };
       try {
-        return await task;
+        if (!signal) {
+          try {
+            return await task.promise;
+          } finally {
+            release();
+          }
+        }
+        return await new Promise<PDFImageInfo[]>((resolve, reject) => {
+          const onAbort = () => {
+            signal.removeEventListener("abort", onAbort);
+            release();
+            reject(signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError"));
+          };
+          signal.addEventListener("abort", onAbort, { once: true });
+          if (signal.aborted) {
+            onAbort();
+            return;
+          }
+          task.promise.then(
+            (images) => {
+              signal.removeEventListener("abort", onAbort);
+              release();
+              resolve(images);
+            },
+            (error) => {
+              signal.removeEventListener("abort", onAbort);
+              release();
+              reject(error);
+            },
+          );
+        });
       } catch (error) {
+        release();
         if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
         const message = error instanceof Error ? error.message : String(error);
         setImageLabelStatus({ kind: "error", message: t.imageLabelFailed.replace("{message}", message) });
         throw error;
-      } finally {
-        if (imageDetectionInFlightRef.current.get(target) === task) {
-          imageDetectionInFlightRef.current.delete(target);
-        }
       }
     },
     [documentId, fileId, t.imageLabelFailed, totalPages]
