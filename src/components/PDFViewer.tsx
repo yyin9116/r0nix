@@ -21,6 +21,7 @@ import {
   Trash2,
   Type,
   Underline,
+  X,
   ZoomIn,
   ZoomOut,
 } from "lucide-react";
@@ -3142,13 +3143,18 @@ export function PDFViewer({
             <button
               type="button"
               className="p-1.5 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors disabled:opacity-50"
-              title={isSearching ? t.searching : t.search}
+              title={isSearching ? t.cancel : t.search}
+              aria-label={isSearching ? t.cancel : t.search}
               onClick={() => {
-                void handleSearch();
+                if (isSearching) {
+                  searchAbortRef.current?.abort();
+                } else {
+                  void handleSearch();
+                }
               }}
-              disabled={!hasDoc || isSearching}
+              disabled={!hasDoc}
             >
-              <Search size={18} />
+              {isSearching ? <X size={18} /> : <Search size={18} />}
             </button>
           </div>
 
