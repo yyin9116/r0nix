@@ -1581,14 +1581,16 @@ export function PDFViewer({
   const lockedZoomPageRef = useRef<number | null>(null);
   const readingBlocksByPageRef = useRef<Map<number, PdfReadingBlock[]>>(new Map());
   const pdfImagesByPageRef = useRef<Record<number, PDFImageInfo[]>>({});
-  const imageDetectionInFlightRef = useRef<Set<number>>(new Set());
+  const imageDetectionInFlightRef = useRef<Map<number, Promise<PDFImageInfo[]>>>(new Map());
   const readingBlocksLoadRef = useRef<Promise<PdfReadingBlock[]> | null>(null);
   const readingBlocksLoadedFileRef = useRef<string | null>(null);
   const fullTranslationAbortRef = useRef<AbortController | null>(null);
+  const translationRetryAbortRef = useRef<AbortController | null>(null);
   const searchAbortRef = useRef<AbortController | null>(null);
   const exportAbortRef = useRef<AbortController | null>(null);
   const resourcesScanRef = useRef(0);
   const resourceScanAbortRef = useRef<AbortController | null>(null);
+  const translationAbortRef = useRef<AbortController | null>(null);
   const resourceCacheLoadedRef = useRef(false);
   const linksByPageRef = useRef<Record<number, DocumentLinkResource[]>>({});
   const resourceTextByPageRef = useRef<Record<number, string>>({});
@@ -1690,6 +1692,7 @@ export function PDFViewer({
     setResourceScanAttempt(0);
     setPdfImagesByPage({});
     pdfImagesByPageRef.current = {};
+    imageDetectionInFlightRef.current.clear();
     resourceCacheLoadedRef.current = false;
     setReadingBlocksVersion(0);
     setImageLabelStatus({ kind: "idle", message: "" });
@@ -1698,6 +1701,10 @@ export function PDFViewer({
     readingBlocksLoadRef.current = null;
     fullTranslationAbortRef.current?.abort();
     fullTranslationAbortRef.current = null;
+    translationRetryAbortRef.current?.abort();
+    translationRetryAbortRef.current = null;
+    translationAbortRef.current?.abort();
+    translationAbortRef.current = null;
     searchAbortRef.current?.abort();
     searchAbortRef.current = null;
     setIsSearching(false);
@@ -1833,6 +1840,8 @@ export function PDFViewer({
       }
       searchAbortRef.current?.abort();
       exportAbortRef.current?.abort();
+      translationAbortRef.current?.abort();
+      translationRetryAbortRef.current?.abort();
     };
   }, []);
 
@@ -2617,9 +2626,10 @@ export function PDFViewer({
     async (pageNo: number, signal?: AbortSignal) => {
       if (!fileId) return;
       const target = clampPage(pageNo, totalPages);
-      if (pdfImagesByPageRef.current[target] !== undefined || imageDetectionInFlightRef.current.has(target)) return;
-      imageDetectionInFlightRef.current.add(target);
-      try {
+      if (pdfImagesByPageRef.current[target] !== undefined) return pdfImagesByPageRef.current[target];
+      const existing = imageDetectionInFlightRef.current.get(target);
+      if (existing) return existing;
+      const task = (async () => {
         const { images } = await api.getPDFImages(fileId, target, signal);
         setPdfImagesByPage((prev) => {
           const nextImages = images.map((image, index) => ({
@@ -2632,15 +2642,19 @@ export function PDFViewer({
           return next;
         });
         return images;
+      })();
+      imageDetectionInFlightRef.current.set(target, task);
+      try {
+        return await task;
       } catch (error) {
-        if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
-          return;
-        }
+        if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
         const message = error instanceof Error ? error.message : String(error);
         setImageLabelStatus({ kind: "error", message: t.imageLabelFailed.replace("{message}", message) });
         throw error;
       } finally {
-        imageDetectionInFlightRef.current.delete(target);
+        if (imageDetectionInFlightRef.current.get(target) === task) {
+          imageDetectionInFlightRef.current.delete(target);
+        }
       }
     },
     [documentId, fileId, t.imageLabelFailed, totalPages]
@@ -2788,6 +2802,8 @@ export function PDFViewer({
     }
 
     fullTranslationAbortRef.current?.abort();
+    translationRetryAbortRef.current?.abort();
+    translationRetryAbortRef.current = null;
     const controller = new AbortController();
     fullTranslationAbortRef.current = controller;
     setIsNotesOpen(true);
@@ -2861,22 +2877,32 @@ export function PDFViewer({
 
   const retryFullTranslationBlock = useCallback(async (block: PdfReadingBlock) => {
     if (!fileId) return;
+    translationRetryAbortRef.current?.abort();
+    const controller = new AbortController();
+    translationRetryAbortRef.current = controller;
     setFullTranslation((prev) => ({ ...prev, status: language === "zh-CN" ? "正在重试段落..." : "Retrying block..." }));
     try {
-      const result = await translateReadingBlock({ config: aiModelConfig, block, sourceTitle: title });
+      const result = await translateReadingBlock({ config: aiModelConfig, block, sourceTitle: title, signal: controller.signal });
+      if (controller.signal.aborted || translationRetryAbortRef.current !== controller) return;
       setFullTranslation((prev) => {
         const results = [...prev.results.filter((item) => item.block.id !== block.id), result].sort((a, b) => a.block.id.localeCompare(b.block.id));
         saveTranslationCache("pdf", documentId || fileId, aiModelConfig, results.map((item) => item.block), results);
         return { ...prev, results, status: language === "zh-CN" ? "段落翻译已更新" : "Block translation updated" };
       });
     } catch (error) {
+      if (controller.signal.aborted || translationRetryAbortRef.current !== controller) return;
       const message = error instanceof Error ? error.message : String(error);
       setFullTranslation((prev) => ({ ...prev, results: prev.results.map((item) => item.block.id === block.id ? { ...item, error: message } : item), status: `${t.translateFailed}: ${message}` }));
+    } finally {
+      if (translationRetryAbortRef.current === controller) translationRetryAbortRef.current = null;
     }
   }, [aiModelConfig, documentId, fileId, language, t.translateFailed, title]);
 
   const openTranslationPreview = useCallback(
     (selection: ReadingAssistSelection) => {
+      translationAbortRef.current?.abort();
+      const controller = new AbortController();
+      translationAbortRef.current = controller;
       setIsNotesOpen(true);
       setSidePanelView("translation");
       setTranslationPanel({
@@ -2889,8 +2915,10 @@ export function PDFViewer({
         config: aiModelConfig,
         excerpt: selection.text,
         reference: `${selection.sourceTitle} / ${selection.reference}`,
+        signal: controller.signal,
       })
         .then((result) => {
+          if (controller.signal.aborted || translationAbortRef.current !== controller) return;
           setTranslationPanel({
             selection,
             answer: result.answer,
@@ -2899,6 +2927,7 @@ export function PDFViewer({
           });
         })
         .catch((error) => {
+          if (controller.signal.aborted || translationAbortRef.current !== controller) return;
           const message = error instanceof Error ? error.message : String(error);
           setTranslationPanel({
             selection,
@@ -2906,6 +2935,9 @@ export function PDFViewer({
             status: `${t.translateFailed}: ${message}`,
             isLoading: false,
           });
+        })
+        .finally(() => {
+          if (translationAbortRef.current === controller) translationAbortRef.current = null;
         });
     },
     [aiModelConfig, t.translateFailed, t.translating]
@@ -2918,7 +2950,7 @@ export function PDFViewer({
       return;
     }
     const controller = new AbortController();
-    void detectPageImages(page, controller.signal);
+    void detectPageImages(page, controller.signal).catch(() => undefined);
     return () => controller.abort();
   }, [detectPageImages, fileId, isImageLabelReader, page, pdfDoc, prefetchImageLabelsAround]);
 

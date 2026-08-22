@@ -235,6 +235,7 @@ export function MarkdownViewer({
   const [editingNoteId, setEditingNoteId] = useState<string | null>(null);
   const [editingNoteDraft, setEditingNoteDraft] = useState("");
   const translationAbortRef = useRef<AbortController | null>(null);
+  const retryAbortRef = useRef<AbortController | null>(null);
   const headingRefMap = useRef<Map<string, HTMLHeadingElement>>(new Map());
   const currentPathRef = useRef<string | undefined>(filePath);
   const t = I18N[language];
@@ -242,9 +243,15 @@ export function MarkdownViewer({
   useEffect(() => {
     const changedFile = currentPathRef.current !== filePath;
     if (changedFile) {
+      translationAbortRef.current?.abort();
+      retryAbortRef.current?.abort();
+      translationAbortRef.current = null;
+      retryAbortRef.current = null;
       currentPathRef.current = filePath;
       setDraft(content);
       setSavedContent(content);
+      setTranslationResults([]);
+      setTranslationStatus("");
       setStatusHint("");
       return;
     }
@@ -283,12 +290,22 @@ export function MarkdownViewer({
   }, [aiModelConfig, t.translationReady, title, translationBlocks, translationDocumentId]);
 
   useEffect(() => {
+    translationAbortRef.current?.abort();
+    retryAbortRef.current?.abort();
+    translationAbortRef.current = null;
+    retryAbortRef.current = null;
+  }, [translationBlocks]);
+
+  useEffect(() => {
     if (translationResults.length > 0) {
       saveTranslationCache("markdown", translationDocumentId, aiModelConfig, translationBlocks, translationResults);
     }
   }, [aiModelConfig, translationBlocks, translationDocumentId, translationResults]);
 
-  useEffect(() => () => translationAbortRef.current?.abort(), []);
+  useEffect(() => () => {
+    translationAbortRef.current?.abort();
+    retryAbortRef.current?.abort();
+  }, []);
 
   const runTranslation = async () => {
     if (isTranslating) return;
@@ -299,27 +316,34 @@ export function MarkdownViewer({
     setTranslationStatus(t.translating);
     try {
       const results = await translateReadingBlocks({ config: aiModelConfig, blocks: translationBlocks, sourceTitle: title, signal: controller.signal });
+      if (controller.signal.aborted || translationAbortRef.current !== controller) return;
       setTranslationResults(results);
       setTranslationStatus(t.translationReady);
     } catch (error) {
+      if (controller.signal.aborted || translationAbortRef.current !== controller) return;
       setTranslationStatus(error instanceof Error ? error.message : String(error));
     } finally {
       setIsTranslating(false);
-      translationAbortRef.current = null;
+      if (translationAbortRef.current === controller) translationAbortRef.current = null;
     }
   };
 
   const retryTranslationBlock = async (blockId: string) => {
     const block = translationBlocks.find((item) => item.id === blockId);
     if (!block) return;
+    retryAbortRef.current?.abort();
     const controller = new AbortController();
+    retryAbortRef.current = controller;
     setTranslationStatus(t.translating);
     try {
       const result = await translateReadingBlock({ config: aiModelConfig, block, sourceTitle: title, signal: controller.signal });
       setTranslationResults((prev) => [...prev.filter((item) => item.block.id !== blockId), result].sort((a, b) => a.block.id.localeCompare(b.block.id)));
       setTranslationStatus(t.translationReady);
     } catch (error) {
+      if (controller.signal.aborted) return;
       setTranslationResults((prev) => prev.map((item) => item.block.id === blockId ? { ...item, error: error instanceof Error ? error.message : String(error) } : item));
+    } finally {
+      if (retryAbortRef.current === controller) retryAbortRef.current = null;
     }
   };
 
