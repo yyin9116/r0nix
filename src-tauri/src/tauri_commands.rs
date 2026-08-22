@@ -1373,6 +1373,16 @@ mod tests {
             listed.as_array().is_some_and(|items| items.len() >= 2),
             "wide raster resources must remain discoverable"
         );
+        let raster_items = listed
+            .as_array()
+            .expect("image list array")
+            .iter()
+            .filter(|item| item["source"] == "xref")
+            .collect::<Vec<_>>();
+        assert!(
+            raster_items.len() >= 3,
+            "nearby placements of one xref must remain separate export targets"
+        );
         let vector_items = listed
             .as_array()
             .expect("image list array")

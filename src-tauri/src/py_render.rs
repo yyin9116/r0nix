@@ -358,7 +358,9 @@ try:
                 continue
             normalized_rects.append((left, top, right, bottom))
 
-        for left, top, right, bottom in merge_rects(normalized_rects):
+        # A reused xref can appear in several nearby placements. Only merge
+        # clipped duplicates, otherwise adjacent figures become one export.
+        for left, top, right, bottom in merge_rects(normalized_rects, tolerance=0.0, overlap_threshold=0.92):
             items.append({
                 "xref": xref,
                 "pageNumber": int(page_no),
@@ -489,6 +491,8 @@ import fitz
 doc = fitz.open()
 page = doc.new_page(width=200, height=200)
 page.insert_image(fitz.Rect(20, 20, 100, 100), stream=image_bytes)
+# A nearby reused xref must remain two exportable placements.
+page.insert_image(fitz.Rect(102, 20, 182, 100), stream=image_bytes)
 # A wide, short raster resource protects against aspect-ratio filtering that
 # used to hide banners and figure labels from the export list.
 page.insert_image(fitz.Rect(110, 160, 195, 168), stream=image_bytes)
