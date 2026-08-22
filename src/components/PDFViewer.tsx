@@ -750,6 +750,8 @@ function collectPdfParagraphSpansFromTarget(target: HTMLElement, cachedSpans?: P
   const allLines = groupPdfTextLines(spans);
   const targetLine = allLines.find((line) => line.spans.some((item) => item.node === targetSpan.node));
   if (!targetLine) return [];
+  const layerRect = layer.getBoundingClientRect();
+  if (layerRect.width <= 0 || layerRect.height <= 0) return [];
 
   // A PDF page commonly has two columns. Keep paragraph grouping inside the
   // column under the pointer; grouping the whole text layer makes the first
@@ -771,8 +773,16 @@ function collectPdfParagraphSpansFromTarget(target: HTMLElement, cachedSpans?: P
     }
   }
   const columnLine = targetLineSpans.slice(segmentStart, segmentEnd);
-  const columnLeft = Math.min(...columnLine.map((item) => item.rect.left));
-  const columnRight = Math.max(...columnLine.map((item) => item.rect.right));
+  const targetColumnCenter = (
+    Math.min(...columnLine.map((item) => item.rect.left)) +
+    Math.max(...columnLine.map((item) => item.rect.right))
+  ) / 2;
+  const columnSpans = spans.filter((item) =>
+    Math.abs(item.rect.left + item.rect.width / 2 - targetColumnCenter) <= layerRect.width * 0.28
+  );
+  const scopedColumnSpans = columnSpans.length > 0 ? columnSpans : columnLine;
+  const columnLeft = Math.min(...scopedColumnSpans.map((item) => item.rect.left));
+  const columnRight = Math.max(...scopedColumnSpans.map((item) => item.rect.right));
   const columnPadding = Math.max(8, medianHeight * 1.8);
   const lines = groupPdfTextLines(
     spans.filter((item) => {
