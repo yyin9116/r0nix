@@ -16,13 +16,18 @@ if ($install.ExitCode -ne 0) {
   throw "NSIS installer failed with exit code $($install.ExitCode)."
 }
 
-$binary = Join-Path $installDir "r0nix.exe"
-$runtime = Join-Path $installDir "resources/runtime"
-if (-not (Test-Path $binary)) {
-  throw "Installed application binary is missing: $binary"
+$installedBinaries = @(Get-ChildItem -Path $installDir -Filter "r0nix.exe" -File -Recurse -ErrorAction SilentlyContinue)
+if ($installedBinaries.Count -ne 1) {
+  $tree = Get-ChildItem -Path $installDir -Recurse -Force -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty FullName
+  throw "Expected exactly one installed r0nix.exe, found $($installedBinaries.Count). Installation tree:`n$($tree -join "`n")"
 }
-if (-not (Test-Path $runtime)) {
-  throw "Embedded runtime is missing: $runtime"
+
+$binary = $installedBinaries[0].FullName
+$applicationRoot = $installedBinaries[0].Directory.FullName
+$runtime = Join-Path $applicationRoot "resources/runtime"
+if (-not (Test-Path $runtime -PathType Container)) {
+  throw "Embedded runtime is missing beside the installed binary: $runtime"
 }
 
 $process = Start-Process -FilePath $binary -PassThru
