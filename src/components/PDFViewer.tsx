@@ -1968,7 +1968,6 @@ export function PDFViewer({
     const targetPage = clampPage(lockedZoomPageRef.current ?? pageRef.current, totalPages);
     window.requestAnimationFrame(() => {
       scrollPageToAnchor(targetPage, { vertical: "center", emit: false });
-      window.setTimeout(() => scrollPageToAnchor(targetPage, { vertical: "center", emit: false }), 180);
     });
   }, [fileId, scrollPageToAnchor, totalPages]);
 
