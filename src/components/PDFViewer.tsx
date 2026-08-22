@@ -950,6 +950,7 @@ function PageCanvas({
   } | null>(null);
   const tokenRef = useRef(0);
   const hasPaintedRef = useRef(false);
+  const paintedDocRef = useRef<PDFDocumentProxy | null>(null);
   const [status, setStatus] = useState<"idle" | "rendering" | "ready">("idle");
 
   useEffect(() => {
@@ -1037,6 +1038,8 @@ function PageCanvas({
   useEffect(() => {
     if (!doc) {
       setStatus("idle");
+      hasPaintedRef.current = false;
+      paintedDocRef.current = null;
       textSpanCacheRef.current = null;
       paragraphCacheRef.current = new WeakMap();
       textLayerRef.current?.cancel();
@@ -1047,7 +1050,11 @@ function PageCanvas({
 
     let cancelled = false;
     let renderTask: CanvasRenderTask | null = null;
-      const token = ++tokenRef.current;
+    if (paintedDocRef.current !== doc) {
+      hasPaintedRef.current = false;
+      paintedDocRef.current = doc;
+    }
+    const token = ++tokenRef.current;
     textSpanCacheRef.current = null;
     paragraphCacheRef.current = new WeakMap();
 
@@ -1254,8 +1261,8 @@ function PageCanvas({
       <div
         ref={textHostRef}
         className={`page-text-overlay transition-opacity duration-150 ${
-          enableTextLayer && status === "ready" ? "opacity-100" : "opacity-0"
-        } ${enableTextLayer && !enableAssistBlocks && status === "ready" ? "is-selectable" : ""} ${
+          enableTextLayer && (status === "ready" || (active && hasPaintedRef.current)) ? "opacity-100" : "opacity-0"
+        } ${enableTextLayer && !enableAssistBlocks && (status === "ready" || (active && hasPaintedRef.current)) ? "is-selectable" : ""} ${
           enableTextLayer && enableAssistBlocks && status === "ready" ? "is-assist" : ""
         }`}
       />
