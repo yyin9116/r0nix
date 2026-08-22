@@ -25,10 +25,21 @@ const permissions = capability.permissions || [];
 const csp = tauriConfig.app?.security?.csp;
 const bundle = tauriConfig.bundle || {};
 const cargoToml = readFileSync(path.join(root, "src-tauri/Cargo.toml"), "utf8");
+const tauriMain = readFileSync(path.join(root, "src-tauri/src/main.rs"), "utf8");
 const releaseWorkflowPath = path.join(root, ".github/workflows/release.yml");
 const releaseWorkflow = existsSync(releaseWorkflowPath) ? readFileSync(releaseWorkflowPath, "utf8") : "";
+const ciWorkflowPath = path.join(root, ".github/workflows/ci.yml");
+const ciWorkflow = existsSync(ciWorkflowPath) ? readFileSync(ciWorkflowPath, "utf8") : "";
+const macosBundlePatchPath = path.join(root, "scripts/patch-macos-bundle.sh");
+const macosNotarizePath = path.join(root, "scripts/notarize-macos-artifact.sh");
+const windowsSmokePath = path.join(root, "scripts/windows-installer-smoke.ps1");
+const virtualizationCheckPath = path.join(root, "scripts/check-pdf-virtualization.mjs");
 
 assert(typeof csp === "string" && csp.trim().length > 0, "Tauri CSP must be explicit and non-empty.");
+assert(tauriConfig.build?.beforeBuildCommand === "npm run build", "Tauri release builds must compile the frontend from the current source.");
+assert(bundle.targets === "all", "Tauri bundle targets must remain explicit.");
+assert(Array.isArray(bundle.resources) && bundle.resources.includes("runtime"), "Embedded Python runtime must be included in desktop bundles.");
+assert(tauriMain.includes("TrayIconBuilder") && tauriMain.includes('"tray-quit"'), "Desktop builds must keep a functional tray menu with an explicit quit action.");
 assert(!csp.includes("default-src *"), "Tauri CSP must not allow every origin by default.");
 assert(csp.includes("object-src 'none'"), "Tauri CSP must block object embeds.");
 assert(csp.includes("base-uri 'self'"), "Tauri CSP must constrain base-uri.");
@@ -46,6 +57,14 @@ assert(releaseWorkflow.includes("APPLE_CERTIFICATE"), "macOS release workflow mu
 assert(releaseWorkflow.includes("APPLE_TEAM_ID"), "macOS release workflow must require Apple notarization team ID.");
 assert(releaseWorkflow.includes('APPLE_SIGNING_IDENTITY: "-"'), "macOS release workflow must provide an ad-hoc signing fallback for unsigned builds.");
 assert(releaseWorkflow.includes("Build Ad-Hoc macOS Bundles"), "macOS release workflow must name the ad-hoc packaging path explicitly.");
+assert(existsSync(macosBundlePatchPath), "macOS bundles must have a post-build runtime patch step.");
+assert(releaseWorkflow.includes("patch-macos-bundle.sh"), "macOS release workflow must patch embedded dynamic-library paths after bundling.");
+assert(existsSync(macosNotarizePath), "Signed macOS bundles must have an explicit post-patch notarization step.");
+assert(releaseWorkflow.includes("notarize-macos-artifact.sh"), "Signed macOS release workflow must notarize patched artifacts.");
+assert(existsSync(windowsSmokePath), "Windows releases must have an installer smoke test.");
+assert(releaseWorkflow.includes("windows-installer-smoke.ps1"), "Windows release workflow must run the installed application smoke test.");
+assert(ciWorkflow.includes("cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored"), "CI must exercise embedded PDF runtime regression tests.");
+assert(existsSync(virtualizationCheckPath), "PDF virtualization must have a source-level budget check.");
 
 for (const iconPath of bundle.icon || []) {
   assert(existsSync(path.join(root, "src-tauri", iconPath)), `Missing bundle icon: ${iconPath}`);

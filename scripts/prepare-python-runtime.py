@@ -5,6 +5,7 @@ import argparse
 import os
 import shutil
 import site
+import subprocess
 import sys
 import sysconfig
 import zipfile
@@ -31,6 +32,38 @@ def cleanup_tree(root: Path) -> None:
         return
     for cache_dir in root.rglob("__pycache__"):
         shutil.rmtree(cache_dir, ignore_errors=True)
+
+
+def patch_macos_runtime(runtime_dir: Path) -> None:
+    """Make copied extension libraries relocatable inside a Tauri app bundle."""
+    if sys.platform != "darwin":
+        return
+
+    dylib = runtime_dir / f"libpython{sys.version_info.major}.{sys.version_info.minor}.dylib"
+    if dylib.exists():
+        subprocess.run(
+            ["install_name_tool", "-id", f"@rpath/{dylib.name}", str(dylib)],
+            check=True,
+        )
+
+    pymupdf_dir = runtime_dir / "site-packages" / "pymupdf"
+    libraries = list(pymupdf_dir.glob("*.dylib")) + list(pymupdf_dir.glob("*.so"))
+    for library in libraries:
+        subprocess.run(
+            ["install_name_tool", "-id", f"@rpath/{library.name}", str(library)],
+            check=True,
+        )
+        dependencies = subprocess.check_output(
+            ["otool", "-L", str(library)], text=True
+        ).splitlines()[1:]
+        for dependency in dependencies:
+            dependency = dependency.strip().split(" ", 1)[0]
+            name = Path(dependency).name
+            if name in {"libmupdf.dylib", "libmupdfcpp.so"} and dependency != f"@rpath/{name}":
+                subprocess.run(
+                    ["install_name_tool", "-change", dependency, f"@rpath/{name}", str(library)],
+                    check=True,
+                )
 
 
 def find_site_packages() -> Path:
@@ -128,6 +161,8 @@ def prepare_runtime(runtime_dir: Path) -> None:
     pymupdf_devel = site_packages_dst / "pymupdf" / "mupdf-devel"
     if pymupdf_devel.exists():
         shutil.rmtree(pymupdf_devel, ignore_errors=True)
+
+    patch_macos_runtime(runtime_dir)
 
     print(f"[prepare-runtime] python: {Path(sys.executable)}")
     print(f"[prepare-runtime] home: {python_home}")

@@ -204,6 +204,9 @@ export function WebBrowser({
   const [inputUrl, setInputUrl] = useState(initialUrl === START_PAGE_URL ? "" : normalizeUrl(initialUrl));
   const [reloadToken, setReloadToken] = useState(0);
   const [nativeReloadToken, setNativeReloadToken] = useState(0);
+  const initialHistoryUrl = initialUrl === START_PAGE_URL ? START_PAGE_URL : normalizeUrl(initialUrl);
+  const [historyEntries, setHistoryEntries] = useState<string[]>([initialHistoryUrl]);
+  const [historyIndex, setHistoryIndex] = useState(0);
   const [loading, setLoading] = useState(false);
   const [bookmarks, setBookmarks] = useState<BrowserBookmark[]>(loadStoredBookmarks);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -217,6 +220,7 @@ export function WebBrowser({
   const syncOnlyRef = useRef(false);
   const loadingTimerRef = useRef<number | null>(null);
   const loadingWatchdogRef = useRef<number | null>(null);
+  const lastInitialUrlRef = useRef(initialHistoryUrl);
 
   const isStartPage = url === START_PAGE_URL;
   const currentUrl = useMemo(() => (isStartPage ? "" : normalizeUrl(url || inputUrl)), [inputUrl, isStartPage, url]);
@@ -240,6 +244,11 @@ export function WebBrowser({
         syncOnlyRef.current = true;
         return START_PAGE_URL;
       });
+      if (lastInitialUrlRef.current !== START_PAGE_URL) {
+        lastInitialUrlRef.current = START_PAGE_URL;
+        setHistoryEntries([START_PAGE_URL]);
+        setHistoryIndex(0);
+      }
       return;
     }
 
@@ -250,6 +259,11 @@ export function WebBrowser({
       if (prev === normalized) return prev;
       return normalized;
     });
+    if (lastInitialUrlRef.current !== normalized) {
+      lastInitialUrlRef.current = normalized;
+      setHistoryEntries([normalized]);
+      setHistoryIndex(0);
+    }
   }, [initialUrl]);
 
   useEffect(() => {
@@ -468,12 +482,20 @@ export function WebBrowser({
     setMenuOpen(false);
   }, [currentBookmarkUrl, t.bookmarkAdded, t.bookmarkRemoved, t.noPageToBookmark]);
 
-  const navigateTo = (raw: string) => {
+  const navigateTo = (raw: string, options?: { recordHistory?: boolean }) => {
+    const recordHistory = options?.recordHistory !== false;
     if (raw === START_PAGE_URL) {
       setUrl(START_PAGE_URL);
       setInputUrl("");
       endLoadingNow();
       onUrlChange?.(START_PAGE_URL);
+      if (recordHistory) {
+        setHistoryEntries((previous) => {
+          const next = [...previous.slice(0, historyIndex + 1), START_PAGE_URL];
+          setHistoryIndex(next.length - 1);
+          return next;
+        });
+      }
       if (nativeMode) {
         void hideNativeWebviewTab(tabId);
       }
@@ -484,6 +506,15 @@ export function WebBrowser({
     if (!normalized) return;
     setUrl(normalized);
     setInputUrl(normalized);
+    if (recordHistory) {
+      setHistoryEntries((previous) => {
+        const current = previous[historyIndex];
+        if (current === normalized) return previous;
+        const next = [...previous.slice(0, historyIndex + 1), normalized];
+        setHistoryIndex(next.length - 1);
+        return next;
+      });
+    }
     beginLoading(9000);
     onUrlChange?.(normalized);
     if (nativeMode) {
@@ -508,6 +539,12 @@ export function WebBrowser({
   };
 
   const navigateBack = () => {
+    if (historyIndex > 0) {
+      const target = historyEntries[historyIndex - 1];
+      setHistoryIndex((value) => Math.max(0, value - 1));
+      navigateTo(target, { recordHistory: false });
+      return;
+    }
     if (nativeMode) {
       beginLoading(3000);
       void navigateNativeWebviewTabHistory(tabId, "back")
@@ -523,6 +560,12 @@ export function WebBrowser({
   };
 
   const navigateForward = () => {
+    if (historyIndex < historyEntries.length - 1) {
+      const target = historyEntries[historyIndex + 1];
+      setHistoryIndex((value) => Math.min(historyEntries.length - 1, value + 1));
+      navigateTo(target, { recordHistory: false });
+      return;
+    }
     if (nativeMode) {
       beginLoading(3000);
       void navigateNativeWebviewTabHistory(tabId, "forward")
@@ -594,10 +637,10 @@ export function WebBrowser({
       <div className="z-10 shrink-0 border-b border-zinc-200 bg-white/95 px-3 py-2 shadow-sm backdrop-blur dark:border-[var(--chrome-border)] dark:bg-[var(--chrome-surface-1)]/95">
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1">
-            <button className={navButtonClass} title={t.navBack} aria-label={t.navBack} onClick={navigateBack}>
+            <button className={navButtonClass} title={t.navBack} aria-label={t.navBack} onClick={navigateBack} disabled={historyIndex === 0 && !nativeMode}>
               <ArrowLeft size={16} />
             </button>
-            <button className={navButtonClass} title={t.navForward} aria-label={t.navForward} onClick={navigateForward}>
+            <button className={navButtonClass} title={t.navForward} aria-label={t.navForward} onClick={navigateForward} disabled={historyIndex >= historyEntries.length - 1 && !nativeMode}>
               <ArrowRight size={16} />
             </button>
             <button

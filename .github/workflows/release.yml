@@ -41,7 +41,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
       - name: Setup Rust
@@ -67,6 +67,9 @@ jobs:
 
       - name: Prepare Embedded Python Runtime
         run: python scripts/prepare-python-runtime.py --runtime-dir src-tauri/runtime
+
+      - name: Check Release Readiness
+        run: npm run check:release
 
       - name: Check macOS signing secrets
         id: macos_signing
@@ -100,12 +103,20 @@ jobs:
         if: matrix.platform.name != 'macos'
         run: npx tauri build --bundles "${{ matrix.platform.bundles }}"
 
+      - name: Smoke test installed Windows application
+        if: matrix.platform.name == 'windows'
+        shell: pwsh
+        run: ./scripts/windows-installer-smoke.ps1
+
       - name: Build Ad-Hoc macOS Bundles
         if: matrix.platform.name == 'macos' && steps.macos_signing.outputs.has_secrets != 'true'
         shell: bash
         env:
           APPLE_SIGNING_IDENTITY: "-"
-        run: npx tauri build --bundles "${{ matrix.platform.bundles }}"
+        run: |
+          npx tauri build --bundles app
+          bash scripts/patch-macos-bundle.sh "src-tauri/target/release/bundle/macos/r0nix.app"
+          npx tauri bundle --bundles dmg --no-sign
 
       - name: Build Signed and Notarized macOS Bundles
         if: matrix.platform.name == 'macos' && steps.macos_signing.outputs.has_secrets == 'true'
@@ -117,7 +128,14 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: npx tauri build --bundles "${{ matrix.platform.bundles }}"
+        run: |
+          npx tauri build --bundles app
+          bash scripts/patch-macos-bundle.sh "src-tauri/target/release/bundle/macos/r0nix.app"
+          bash scripts/notarize-macos-artifact.sh "src-tauri/target/release/bundle/macos/r0nix.app"
+          npx tauri bundle --bundles dmg --no-sign
+          for dmg in src-tauri/target/release/bundle/dmg/*.dmg; do
+            bash scripts/notarize-macos-artifact.sh "$dmg"
+          done
 
       - name: Upload Build Artifacts
         uses: actions/upload-artifact@v4

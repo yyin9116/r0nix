@@ -93,11 +93,34 @@ export async function exportPagePng(
   return await invoke<string>("export_page_png", { fileId, pageNo, zoom });
 }
 
+export async function extractPdfImage(
+  fileId: string,
+  pageNo: number,
+  xref: number
+): Promise<string> {
+  return await invoke<string>("extract_pdf_image", { fileId, pageNo, xref });
+}
+
 export async function exportPageSvg(
   fileId: string,
   pageNo: number
 ): Promise<string> {
   return await invoke<string>("export_page_svg", { fileId, pageNo });
+}
+
+export async function exportPageSvgCrop(
+  fileId: string,
+  pageNo: number,
+  rect: { left: number; top: number; width: number; height: number }
+): Promise<string> {
+  return await invoke<string>("export_page_svg_crop", {
+    fileId,
+    pageNo,
+    left: rect.left,
+    top: rect.top,
+    width: rect.width,
+    height: rect.height,
+  });
 }
 
 
@@ -106,6 +129,10 @@ export async function getPageImages(
   pageNo: number
 ): Promise<string> {
   return await invoke<string>("get_page_images", { fileId, pageNo });
+}
+
+export async function getPdfReadingBlocks(fileId: string, startPage?: number, endPage?: number): Promise<string> {
+  return await invoke<string>("get_pdf_reading_blocks", { fileId, startPage, endPage });
 }
 
 function base64ToBytes(base64: string): Uint8Array {
@@ -121,20 +148,28 @@ export async function savePngToFile(
   pngBase64: string,
   defaultFilename: string
 ): Promise<void> {
+  await saveBinaryToFile(pngBase64, defaultFilename, ["png"]);
+}
+
+export async function saveBinaryToFile(
+  dataBase64: string,
+  defaultFilename: string,
+  extensions: string[]
+): Promise<void> {
   const { save } = await import("@tauri-apps/plugin-dialog");
 
   const filePath = await save({
     defaultPath: defaultFilename,
     filters: [
       {
-        name: "PNG Image",
-        extensions: ["png"],
+        name: "Image",
+        extensions,
       },
     ],
   });
 
   if (filePath) {
-    await writeNativeBinaryFile(filePath, base64ToBytes(pngBase64));
+    await writeNativeBinaryFile(filePath, base64ToBytes(dataBase64));
   }
 }
 

@@ -82,17 +82,7 @@ async function run() {
     await page.getByRole("button", { name: "设置" }).click();
     await expectVisible(page.getByRole("heading", { name: "设置 | 简体中文" }), "settings heading");
     await expectVisible(page.getByText("原生 WebView", { exact: true }), "native WebView setting");
-    const exportFormatValues = await page
-      .locator("select")
-      .evaluateAll((selects) =>
-        selects.flatMap((select) =>
-          Array.from(select.options).map((option) => option.value)
-        )
-      );
-    if (!exportFormatValues.includes("svg")) {
-      throw new Error("Default export format select does not include SVG.");
-    }
-    await expectVisible(page.getByText("提问会发送选中段落、引用位置和问题到该服务"), "privacy setting copy");
+    await expectVisible(page.getByText("填写 LiteLLM 或 OpenAI-compatible Base URL", { exact: false }), "model service privacy copy");
 
     await page.getByRole("button", { name: "深色" }).click();
     const className = await page.locator("html").getAttribute("class");

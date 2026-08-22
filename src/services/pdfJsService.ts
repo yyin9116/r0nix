@@ -1,5 +1,4 @@
-import './pdfJsSetup';
-import { getDocument, type PDFDocumentProxy } from 'pdfjs-dist';
+import type { PDFDocumentProxy } from 'pdfjs-dist';
 
 const documentCache = new Map<string, PDFDocumentProxy>();
 
@@ -12,6 +11,8 @@ export async function loadPdfDocument(
     return existing;
   }
 
+  await import('./pdfJsSetup');
+  const { getDocument } = await import('pdfjs-dist');
   const loadingTask = getDocument({ data });
   const doc = await loadingTask.promise;
   documentCache.set(fileId, doc);

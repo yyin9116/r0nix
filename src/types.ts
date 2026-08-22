@@ -62,9 +62,13 @@ export type ReaderNoteKind = "note" | "summary" | "highlight";
 
 export interface ReaderNote {
   id: string;
+  documentId?: string;
+  blockId?: string;
   page: number;
   kind: ReaderNoteKind;
   content: string;
+  reference?: string;
+  sourceRect?: ReaderAnnotationRect;
   createdAt: string;
 }
 
@@ -79,6 +83,7 @@ export interface ReaderAnnotationRect {
 
 export interface ReaderAnnotation {
   id: string;
+  documentId?: string;
   page: number;
   kind: ReaderAnnotationKind;
   rect: ReaderAnnotationRect;
@@ -94,13 +99,18 @@ export type PdfReadingBlockKind =
   | "image"
   | "equation"
   | "code"
+  | "quote"
   | "auxiliary";
 
 export interface PdfReadingBlock {
   id: string;
+  documentId?: string;
   page: number;
   kind: PdfReadingBlockKind;
   text: string;
   rect?: ReaderAnnotationRect;
-  source: "mineru" | "pdfjs-dom";
+  source: "mineru" | "pdfjs-dom" | "pymupdf" | "markdown";
+  sourcePath?: string;
+  depth?: number;
+  tableAlign?: Array<"left" | "center" | "right">;
 }

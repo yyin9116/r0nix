@@ -1,12 +1,13 @@
 use crate::pdf_manager::PDF_MANAGER;
 use crate::py_render::{
-    get_page_count as get_pdf_page_count, get_page_images_json, render_page_png, render_page_svg,
+    extract_pdf_image_json, get_page_count as get_pdf_page_count, get_page_images_json,
+    get_pdf_reading_blocks_json, render_page_png, render_page_svg, render_page_svg_crop,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use image::codecs::png::PngEncoder;
 use image::{imageops, ColorType, ImageEncoder, RgbaImage};
 use pdf_core::{plan_visible_tiles, PdfInfo, TileReadyPayload, TileRequestAck, TileViewport};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -23,6 +24,7 @@ static CANCELED_REQUESTS: once_cell::sync::Lazy<Mutex<HashSet<String>>> =
 static WEBVIEW_TABS: once_cell::sync::Lazy<Mutex<HashMap<String, String>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 const DEFAULT_NATIVE_WEBVIEW_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 Edg/132.0.0.0";
+const MAX_PROXY_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
 const NATIVE_WEBVIEW_NAV_PATCH_SCRIPT: &str = r#"(function () {
   if ((window).__r0nixNavPatchInstalled) return;
   (window).__r0nixNavPatchInstalled = true;
@@ -87,6 +89,25 @@ pub struct ProxyDownloadPayload {
     pub content_type: Option<String>,
     pub content_disposition: Option<String>,
     pub status_code: u16,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmChatMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmChatCompletionRequest {
+    pub base_url: String,
+    pub model: String,
+    pub api_key: Option<String>,
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<u32>,
+    pub timeout_ms: Option<u64>,
+    pub messages: Vec<LlmChatMessage>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -165,6 +186,15 @@ fn decode_base64_bytes(data_base64: &str) -> Result<Vec<u8>, String> {
     BASE64
         .decode(data_base64)
         .map_err(|err| format!("invalid base64 payload: {err}"))
+}
+
+fn normalize_download_url(raw: &str) -> Result<reqwest::Url, String> {
+    let parsed =
+        reqwest::Url::parse(raw.trim()).map_err(|err| format!("invalid download url: {err}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("download url must start with http:// or https://".to_string());
+    }
+    Ok(parsed)
 }
 
 pub(crate) fn is_pdf_url(url: &str) -> bool {
@@ -272,7 +302,22 @@ fn ensure_allowed_binary_write_path(path: &Path) -> Result<(), String> {
         .and_then(|value| value.to_str())
         .map(|ext| {
             let ext = ext.to_ascii_lowercase();
-            matches!(ext.as_str(), "pdf" | "png" | "jpg" | "jpeg")
+            matches!(
+                ext.as_str(),
+                "pdf"
+                    | "png"
+                    | "jpg"
+                    | "jpeg"
+                    | "gif"
+                    | "webp"
+                    | "bmp"
+                    | "tif"
+                    | "tiff"
+                    | "jp2"
+                    | "jpx"
+                    | "jbig2"
+                    | "ccitt"
+            )
         })
         .unwrap_or(false);
     if allowed {
@@ -352,8 +397,13 @@ pub async fn collect_importable_paths(root: String) -> Result<Vec<String>, Strin
     let root = ensure_non_empty_path(&root)?;
     tokio::task::spawn_blocking(move || {
         let mut results = Vec::new();
+        let mut visited_dirs = HashSet::new();
         let mut stack = vec![root];
         while let Some(current) = stack.pop() {
+            let current = match current.canonicalize() {
+                Ok(path) if visited_dirs.insert(path.clone()) => path,
+                _ => continue,
+            };
             let entries = match std::fs::read_dir(&current) {
                 Ok(entries) => entries,
                 Err(_) => continue,
@@ -675,6 +725,22 @@ pub async fn export_page_png(
 }
 
 #[tauri::command]
+pub async fn extract_pdf_image(
+    file_id: String,
+    page_no: usize,
+    xref: usize,
+) -> Result<String, String> {
+    eprintln!(
+        "[extract_pdf_image] file_id={} page={} xref={}",
+        file_id, page_no, xref
+    );
+    let path = resolve_file_path(&file_id).await?;
+    tokio::task::spawn_blocking(move || extract_pdf_image_json(&path, page_no, xref))
+        .await
+        .map_err(|err| format!("pdf image extraction task failed: {err}"))?
+}
+
+#[tauri::command]
 pub async fn export_page_svg(file_id: String, page_no: usize) -> Result<String, String> {
     eprintln!("[export_page_svg] file_id={} page={}", file_id, page_no);
     let path = resolve_file_path(&file_id).await?;
@@ -682,6 +748,28 @@ pub async fn export_page_svg(file_id: String, page_no: usize) -> Result<String, 
     tokio::task::spawn_blocking(move || render_page_svg(&path, page_no))
         .await
         .map_err(|err| format!("svg export task failed: {err}"))?
+}
+
+#[tauri::command]
+pub async fn export_page_svg_crop(
+    file_id: String,
+    page_no: usize,
+    left: f64,
+    top: f64,
+    width: f64,
+    height: f64,
+) -> Result<String, String> {
+    eprintln!(
+        "[export_page_svg_crop] file_id={} page={} left={} top={} width={} height={}",
+        file_id, page_no, left, top, width, height
+    );
+    let path = resolve_file_path(&file_id).await?;
+
+    tokio::task::spawn_blocking(move || {
+        render_page_svg_crop(&path, page_no, left, top, width, height)
+    })
+    .await
+    .map_err(|err| format!("svg crop export task failed: {err}"))?
 }
 
 #[tauri::command]
@@ -695,12 +783,35 @@ pub async fn get_page_images(file_id: String, page_no: usize) -> Result<String, 
 }
 
 #[tauri::command]
+pub async fn get_pdf_reading_blocks(
+    file_id: String,
+    start_page: Option<usize>,
+    end_page: Option<usize>,
+) -> Result<String, String> {
+    eprintln!(
+        "[get_pdf_reading_blocks] file_id={} start={:?} end={:?}",
+        file_id, start_page, end_page
+    );
+    let path = resolve_file_path(&file_id).await?;
+
+    let task = tokio::task::spawn_blocking(move || {
+        get_pdf_reading_blocks_json(&path, start_page, end_page)
+    });
+    match tokio::time::timeout(Duration::from_secs(30), task).await {
+        Ok(result) => result.map_err(|err| format!("get_pdf_reading_blocks task failed: {err}"))?,
+        Err(_) => Err("PDF reading block extraction timed out after 30 seconds".to_string()),
+    }
+}
+
+#[tauri::command]
 pub async fn download_pdf_via_proxy(
     url: String,
     proxy_url: Option<String>,
 ) -> Result<ProxyDownloadPayload, String> {
+    let parsed_url = normalize_download_url(&url)?;
     let mut client_builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(8))
+        .timeout(Duration::from_secs(30))
         .danger_accept_invalid_certs(false);
     if let Some(proxy) = proxy_url {
         let trimmed = proxy.trim().to_string();
@@ -713,8 +824,8 @@ pub async fn download_pdf_via_proxy(
     let client = client_builder
         .build()
         .map_err(|err| format!("failed to create proxy client: {err}"))?;
-    let response = client
-        .get(url)
+    let mut response = client
+        .get(parsed_url)
         .send()
         .await
         .map_err(|err| format!("request via proxy failed: {err}"))?;
@@ -730,17 +841,180 @@ pub async fn download_pdf_via_proxy(
         .get(reqwest::header::CONTENT_DISPOSITION)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_string());
-    let bytes = response
-        .bytes()
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_PROXY_DOWNLOAD_BYTES as u64)
+    {
+        return Err(format!(
+            "download response exceeds {} MiB limit",
+            MAX_PROXY_DOWNLOAD_BYTES / 1024 / 1024
+        ));
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .map_err(|err| format!("read response bytes failed: {err}"))?;
+        .map_err(|err| format!("read response bytes failed: {err}"))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_PROXY_DOWNLOAD_BYTES {
+            return Err(format!(
+                "download response exceeds {} MiB limit",
+                MAX_PROXY_DOWNLOAD_BYTES / 1024 / 1024
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
     Ok(ProxyDownloadPayload {
-        data_base64: BASE64.encode(bytes),
+        data_base64: BASE64.encode(&bytes),
         final_url,
         content_type,
         content_disposition,
         status_code,
     })
+}
+
+fn normalize_llm_base_url(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err("model base url is empty".to_string());
+    }
+    let parsed =
+        reqwest::Url::parse(trimmed).map_err(|err| format!("invalid model base url: {err}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        _ => return Err("model base url must start with http:// or https://".to_string()),
+    }
+    Ok(trimmed.to_string())
+}
+
+fn join_llm_chat_url(base_url: &str) -> String {
+    if base_url.ends_with("/chat/completions") {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/chat/completions")
+    }
+}
+
+fn sanitize_llm_messages(messages: Vec<LlmChatMessage>) -> Result<Vec<serde_json::Value>, String> {
+    if messages.is_empty() {
+        return Err("messages are empty".to_string());
+    }
+    if messages.len() > 16 {
+        return Err("too many messages".to_string());
+    }
+    messages
+        .into_iter()
+        .map(|message| {
+            let role = message.role.trim();
+            if role != "system" && role != "user" && role != "assistant" {
+                return Err(format!("unsupported message role: {role}"));
+            }
+            let content = message.content.trim();
+            if content.is_empty() {
+                return Err("message content is empty".to_string());
+            }
+            if content.chars().count() > 24_000 {
+                return Err("message content is too long".to_string());
+            }
+            Ok(serde_json::json!({
+                "role": role,
+                "content": content,
+            }))
+        })
+        .collect()
+}
+
+#[tauri::command]
+pub async fn llm_chat_completion(request: LlmChatCompletionRequest) -> Result<String, String> {
+    let base_url = normalize_llm_base_url(&request.base_url)?;
+    let model = request.model.trim();
+    if model.is_empty() {
+        return Err("model name is empty".to_string());
+    }
+    let messages = sanitize_llm_messages(request.messages)?;
+    let temperature = request
+        .temperature
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.2)
+        .clamp(0.0, 2.0);
+    let max_tokens = request.max_tokens.unwrap_or(2048).clamp(1, 8192);
+
+    let timeout_ms = request.timeout_ms.unwrap_or(60_000).clamp(1_000, 120_000);
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(3))
+        .timeout(Duration::from_millis(timeout_ms))
+        .danger_accept_invalid_certs(false)
+        .build()
+        .map_err(|err| format!("failed to create model client: {err}"))?;
+
+    let mut builder = client
+        .post(join_llm_chat_url(&base_url))
+        .header(reqwest::header::CONTENT_TYPE, "application/json");
+    if let Some(api_key) = request
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        builder = builder.bearer_auth(api_key);
+    }
+
+    let payload = serde_json::json!({
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "messages": messages,
+    })
+    .to_string();
+
+    let response = builder
+        .body(payload)
+        .send()
+        .await
+        .map_err(|err| format!("model service request failed: {err}"))?;
+
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let body = response
+        .text()
+        .await
+        .map_err(|err| format!("failed to read model response: {err}"))?;
+    if !status.is_success() {
+        let details: String = body.chars().take(240).collect();
+        return Err(format!(
+            "model service returned HTTP {}{}",
+            status.as_u16(),
+            if details.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" {details}")
+            }
+        ));
+    }
+    if body.trim().is_empty() {
+        return Err("model service returned an empty response".to_string());
+    }
+    let prefix = body
+        .trim_start()
+        .chars()
+        .take(500)
+        .collect::<String>()
+        .to_ascii_lowercase();
+    if content_type.contains("text/html")
+        || prefix.starts_with("<!doctype html")
+        || prefix.starts_with("<html")
+        || prefix.contains("<head")
+        || prefix.contains("<body")
+        || prefix.contains("</html>")
+    {
+        return Err("model service returned an HTML page; check that Base URL points to the API endpoint such as http://127.0.0.1:4000/v1, not a web UI".to_string());
+    }
+    Ok(body)
 }
 
 #[tauri::command]
@@ -953,7 +1227,8 @@ pub async fn close_webview_tab(app: AppHandle, tab_id: String) -> Result<(), Str
 mod tests {
     use super::{
         ensure_allowed_binary_write_path, ensure_allowed_text_write_path,
-        ensure_importable_extension, ensure_markdown_extension, is_pdf_url, sanitize_file_name,
+        ensure_importable_extension, ensure_markdown_extension, is_pdf_url, normalize_download_url,
+        sanitize_file_name,
     };
     use std::path::Path;
 
@@ -1003,6 +1278,8 @@ mod tests {
         assert!(ensure_allowed_text_write_path(Path::new("script.sh")).is_err());
 
         assert!(ensure_allowed_binary_write_path(Path::new("page.png")).is_ok());
+        assert!(ensure_allowed_binary_write_path(Path::new("figure.webp")).is_ok());
+        assert!(ensure_allowed_binary_write_path(Path::new("figure.jp2")).is_ok());
         assert!(ensure_allowed_binary_write_path(Path::new("paper.pdf")).is_ok());
         assert!(ensure_allowed_binary_write_path(Path::new("notes.md")).is_err());
     }
@@ -1014,5 +1291,120 @@ mod tests {
         assert!(sanitize_file_name("../paper.pdf").is_err());
         assert!(sanitize_file_name("nested/paper.pdf").is_err());
         assert!(sanitize_file_name("nested\\paper.pdf").is_err());
+    }
+
+    #[test]
+    fn restricts_proxy_download_urls_to_http() {
+        assert!(normalize_download_url("https://example.com/paper.pdf").is_ok());
+        assert!(normalize_download_url("http://127.0.0.1:8080/paper.pdf").is_ok());
+        assert!(normalize_download_url("file:///tmp/paper.pdf").is_err());
+        assert!(normalize_download_url("javascript:alert(1)").is_err());
+        assert!(normalize_download_url("").is_err());
+    }
+
+    #[test]
+    #[ignore = "requires the embedded Python/PyMuPDF runtime"]
+    fn verifies_original_image_and_svg_crop_exports() {
+        use crate::py_render::{
+            extract_pdf_image_json, get_page_images_json, render_page_svg_crop,
+        };
+        use base64::Engine as _;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let path = std::env::temp_dir().join(format!(
+            "r0nix-export-fixture-{}.pdf",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let image_bytes = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            .expect("fixture PNG");
+        crate::py_render::ensure_test_pdf_with_image(&path, &image_bytes)
+            .expect("create PDF fixture");
+
+        let listed: serde_json::Value = serde_json::from_str(
+            &get_page_images_json(path.to_str().expect("fixture path"), 1)
+                .expect("list PDF images"),
+        )
+        .expect("valid image list JSON");
+        let image = listed
+            .as_array()
+            .and_then(|items| items.first())
+            .expect("one embedded image");
+        let xref = image["xref"].as_u64().expect("image xref") as usize;
+        assert_eq!(image["extension"], "png");
+        assert_eq!(image["width"], 1);
+        assert_eq!(image["height"], 1);
+
+        let extracted: serde_json::Value = serde_json::from_str(
+            &extract_pdf_image_json(path.to_str().expect("fixture path"), 1, xref)
+                .expect("extract original image"),
+        )
+        .expect("valid extracted image JSON");
+        assert_eq!(extracted["xref"].as_u64(), Some(xref as u64));
+        assert_eq!(extracted["extension"], "png");
+        assert_eq!(extracted["width"], 1);
+        assert_eq!(extracted["height"], 1);
+        let extracted_bytes = base64::engine::general_purpose::STANDARD
+            .decode(extracted["dataBase64"].as_str().expect("base64 image"))
+            .expect("decode extracted image");
+        assert!(extracted_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert!(!extracted_bytes.is_empty());
+
+        let svg = render_page_svg_crop(
+            path.to_str().expect("fixture path"),
+            1,
+            20.0,
+            20.0,
+            80.0,
+            80.0,
+        )
+        .expect("export SVG crop");
+        assert!(svg.contains("<svg"));
+        assert!(
+            svg.len() < 50_000,
+            "crop unexpectedly expanded to page-sized SVG"
+        );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[ignore = "requires the embedded Python/PyMuPDF runtime"]
+    fn extracts_a_1000_page_document_in_bounded_chunks() {
+        use crate::py_render::{ensure_test_pdf_with_text_pages, get_pdf_reading_blocks_json};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let path = std::env::temp_dir().join(format!(
+            "r0nix-long-fixture-{}.pdf",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        ensure_test_pdf_with_text_pages(&path, 1000).expect("create long PDF fixture");
+
+        let mut pages = std::collections::BTreeSet::new();
+        for start_page in (1..=1000).step_by(24) {
+            let end_page = (start_page + 23).min(1000);
+            let raw = get_pdf_reading_blocks_json(
+                path.to_str().expect("fixture path"),
+                Some(start_page),
+                Some(end_page),
+            )
+            .expect("extract chunk");
+            let blocks: Vec<serde_json::Value> =
+                serde_json::from_str(&raw).expect("valid blocks JSON");
+            for block in blocks {
+                if let Some(page) = block["page"].as_u64() {
+                    pages.insert(page as usize);
+                }
+            }
+        }
+        assert_eq!(pages.len(), 1000);
+        assert_eq!(pages.first(), Some(&1));
+        assert_eq!(pages.last(), Some(&1000));
+        let _ = std::fs::remove_file(path);
     }
 }

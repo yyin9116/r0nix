@@ -10,6 +10,7 @@ import * as rustPdf from './rustPdf';
 import { loadPdfDocument, getCachedDocument, closePdfDocument } from './pdfJsService';
 import { debugError, debugLog, debugWarn } from './debugLogger';
 import { readNativeTextFile, writeNativeTempFile } from './nativeFiles';
+import type { PdfReadingBlock, PdfReadingBlockKind, ReaderAnnotationRect } from '../types';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 
 const isTauri =
@@ -126,11 +127,23 @@ export interface MarkdownContentResponse {
 
 export interface PDFImageInfo {
   xref: number;
+  resourceId?: string;
+  documentId?: string;
   pageNumber: number;
   width: number;
   height: number;
   extension: string;
   bbox?: number[];
+  source?: "xref" | "block" | "vector";
+}
+
+export interface ExtractedPdfImage {
+  xref: number;
+  pageNumber: number;
+  extension: string;
+  width: number;
+  height: number;
+  dataBase64: string;
 }
 
 export interface ExtractedImage {
@@ -157,17 +170,71 @@ export interface TileViewport {
 
 export type TileReadyPayload = rustPdf.TileReadyPayload;
 
+const PDF_READING_BLOCK_KINDS = new Set<PdfReadingBlockKind>([
+  "text",
+  "title",
+  "list",
+  "table",
+  "image",
+  "equation",
+  "code",
+  "quote",
+  "auxiliary",
+]);
+
+function normalizeReadingBlockRect(raw: unknown): ReaderAnnotationRect | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const rect = raw as Record<string, unknown>;
+  const x = Number(rect.x);
+  const y = Number(rect.y);
+  const width = Number(rect.width);
+  const height = Number(rect.height);
+  if (![x, y, width, height].every(Number.isFinite)) return undefined;
+  if (width <= 0 || height <= 0) return undefined;
+  return {
+    x: Math.max(0, Math.min(1, x)),
+    y: Math.max(0, Math.min(1, y)),
+    width: Math.max(0, Math.min(1, width)),
+    height: Math.max(0, Math.min(1, height)),
+  };
+}
+
+function normalizePdfReadingBlocks(raw: unknown): PdfReadingBlock[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((item, index): PdfReadingBlock | null => {
+      if (!item || typeof item !== "object") return null;
+      const obj = item as Record<string, unknown>;
+      const id = typeof obj.id === "string" && obj.id.trim() ? obj.id : "";
+      const page = Math.max(1, Math.round(Number(obj.page) || 1));
+      const kind = typeof obj.kind === "string" && PDF_READING_BLOCK_KINDS.has(obj.kind as PdfReadingBlockKind)
+        ? (obj.kind as PdfReadingBlockKind)
+        : "text";
+      const text = typeof obj.text === "string" ? obj.text.replace(/\s+/g, " ").trim() : "";
+      if (!text && kind !== "image") return null;
+      return {
+        id: id || `pymupdf-${page}-${index}`,
+        page,
+        kind,
+        text,
+        rect: normalizeReadingBlockRect(obj.rect),
+        source: "pymupdf",
+      };
+    })
+    .filter((item): item is PdfReadingBlock => Boolean(item));
+}
+
 // ============ File Management ============
 
 export async function openFile(path: string): Promise<FileInfo> {
   debugLog('api.openFile', 'start', { path, isTauri });
   if (isTauri) {
     const fileId = `file-${Date.now()}`;
-    const info = await withTimeout(rustPdf.openPdf(fileId, path), 10000, 'Rust open_pdf');
+    const info = await rustPdf.openPdf(fileId, path);
     debugLog('api.openFile', 'rust open_pdf success', info);
     let pages = info.page_count;
     try {
-      const data = await withTimeout(rustPdf.readOpenedPdfBytes(info.file_id), 8000, 'Rust read_opened_pdf_bytes');
+      const data = await withTimeout(rustPdf.readOpenedPdfBytes(info.file_id), 30000, 'Rust read_opened_pdf_bytes');
       const doc = await loadPdfDocument(info.file_id, data);
       pages = doc.numPages;
       debugLog('api.openFile', 'pdfjs loaded', { pages });
@@ -337,8 +404,11 @@ export async function listFiles(): Promise<{ files: FileInfo[] }> {
 
 export async function closeFile(fileId: string): Promise<{ success: boolean }> {
   if (isTauri) {
-    await closePdfDocument(fileId);
-    await rustPdf.closePdf(fileId);
+    try {
+      await closePdfDocument(fileId);
+    } finally {
+      await rustPdf.closePdf(fileId);
+    }
     return { success: true };
   } else {
     if (browserLocalFiles.has(fileId)) {
@@ -400,6 +470,26 @@ export async function exportPagePNG(
   return rustPdf.exportPagePng(fileId, pageNo, zoom);
 }
 
+export async function extractPDFImage(
+  fileId: string,
+  pageNo: number,
+  xref: number
+): Promise<ExtractedPdfImage> {
+  if (!isTauri) {
+    throw new Error('extractPDFImage is only available in Tauri mode');
+  }
+  const parsed = JSON.parse(await rustPdf.extractPdfImage(fileId, pageNo, xref)) as Partial<ExtractedPdfImage>;
+  if (
+    parsed.xref !== xref ||
+    parsed.pageNumber !== pageNo ||
+    typeof parsed.extension !== 'string' ||
+    typeof parsed.dataBase64 !== 'string'
+  ) {
+    throw new Error('Rust returned an invalid extracted PDF image');
+  }
+  return parsed as ExtractedPdfImage;
+}
+
 export async function exportPageSVG(fileId: string, pageNo: number): Promise<string> {
   if (!isTauri) {
     throw new Error('exportPageSVG is only available in Tauri mode');
@@ -407,11 +497,34 @@ export async function exportPageSVG(fileId: string, pageNo: number): Promise<str
   return rustPdf.exportPageSvg(fileId, pageNo);
 }
 
+export async function exportPageSVGCrop(
+  fileId: string,
+  pageNo: number,
+  rect: { left: number; top: number; width: number; height: number }
+): Promise<string> {
+  if (!isTauri) {
+    throw new Error('exportPageSVGCrop is only available in Tauri mode');
+  }
+  return rustPdf.exportPageSvgCrop(fileId, pageNo, rect);
+}
+
 export async function savePNGToFile(pngBase64: string, defaultFilename: string): Promise<void> {
   if (!isTauri) {
     throw new Error('savePNGToFile is only available in Tauri mode');
   }
   await rustPdf.savePngToFile(pngBase64, defaultFilename);
+}
+
+export async function saveImageToFile(
+  dataBase64: string,
+  defaultFilename: string,
+  extension: string
+): Promise<void> {
+  if (!isTauri) {
+    throw new Error('saveImageToFile is only available in Tauri mode');
+  }
+  const normalizedExtension = extension.toLowerCase().replace(/[^a-z0-9]/g, '') || 'bin';
+  await rustPdf.saveBinaryToFile(dataBase64, defaultFilename, [normalizedExtension]);
 }
 
 export async function saveSVGToFile(svgContent: string, defaultFilename: string): Promise<void> {
@@ -486,6 +599,7 @@ export async function getPDFImages(
               height: Number(obj.height) || 0,
               extension: typeof obj.extension === 'string' ? obj.extension : '',
               bbox: bbox && bbox.length === 4 ? bbox : undefined,
+              source: obj.source === "vector" ? "vector" : "xref",
             };
           })
           .filter((item): item is PDFImageInfo => Boolean(item))
@@ -504,6 +618,94 @@ export async function getPDFImages(
   return {
     images: images.filter((img) => Number(img.pageNumber) === pageNumber),
   };
+}
+
+export async function getPDFReadingBlocks(
+  fileId: string,
+  onProgress?: (completed: number, total: number) => void,
+  signal?: AbortSignal,
+  range?: { startPage?: number; endPage?: number }
+): Promise<PdfReadingBlock[]> {
+  const throwIfAborted = () => {
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError");
+    }
+  };
+  throwIfAborted();
+  if (isTauri) {
+    const total = await rustPdf.getPageCount(fileId);
+    throwIfAborted();
+    const chunkSize = 24;
+    const blocks: PdfReadingBlock[] = [];
+    const firstPage = Math.max(1, Math.min(total, Math.round(range?.startPage ?? 1)));
+    const lastPage = Math.max(firstPage, Math.min(total, Math.round(range?.endPage ?? total)));
+    for (let startPage = firstPage; startPage <= lastPage; startPage += chunkSize) {
+      throwIfAborted();
+      const endPage = Math.min(lastPage, startPage + chunkSize - 1);
+      const json = await rustPdf.getPdfReadingBlocks(fileId, startPage, endPage);
+      throwIfAborted();
+      const raw = JSON.parse(json) as unknown;
+      blocks.push(...normalizePdfReadingBlocks(raw));
+      onProgress?.(endPage, total);
+    }
+    return blocks;
+  }
+
+  const doc = getCachedDocument(fileId);
+  if (!doc) return [];
+  const blocks: PdfReadingBlock[] = [];
+  const firstPage = Math.max(1, Math.min(doc.numPages, Math.round(range?.startPage ?? 1)));
+  const lastPage = Math.max(firstPage, Math.min(doc.numPages, Math.round(range?.endPage ?? doc.numPages)));
+  for (let pageNo = firstPage; pageNo <= lastPage; pageNo += 1) {
+    throwIfAborted();
+    const page = await doc.getPage(pageNo);
+    const viewport = page.getViewport({ scale: 1 });
+    const content = await page.getTextContent();
+    throwIfAborted();
+    const items = content.items as Array<Record<string, unknown>>;
+    const text = items
+      .map((item) => (typeof item.str === "string" ? item.str : ""))
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!text) continue;
+
+    const rects = items
+      .map((item) => {
+        const transform = Array.isArray(item.transform) ? item.transform.map(Number) : [];
+        const x = Number(transform[4]);
+        const baseline = Number(transform[5]);
+        const width = Number(item.width);
+        const height = Number(item.height) || Math.abs(Number(transform[3]));
+        if (![x, baseline, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
+        return {
+          left: x,
+          top: viewport.height - baseline - height,
+          right: x + width,
+          bottom: viewport.height - baseline,
+        };
+      })
+      .filter((rect): rect is { left: number; top: number; right: number; bottom: number } => Boolean(rect));
+    const left = rects.length > 0 ? Math.max(0, Math.min(...rects.map((rect) => rect.left))) : 0;
+    const top = rects.length > 0 ? Math.max(0, Math.min(...rects.map((rect) => rect.top))) : 0;
+    const right = rects.length > 0 ? Math.min(viewport.width, Math.max(...rects.map((rect) => rect.right))) : viewport.width;
+    const bottom = rects.length > 0 ? Math.min(viewport.height, Math.max(...rects.map((rect) => rect.bottom))) : viewport.height;
+    blocks.push({
+      id: `pdfjs-${pageNo}-text`,
+      page: pageNo,
+      kind: "text",
+      text,
+      rect: {
+        x: left / Math.max(1, viewport.width),
+        y: top / Math.max(1, viewport.height),
+        width: Math.max(0.01, (right - left) / Math.max(1, viewport.width)),
+        height: Math.max(0.01, (bottom - top) / Math.max(1, viewport.height)),
+      },
+      source: "pdfjs-dom",
+    });
+    onProgress?.(pageNo, doc.numPages);
+  }
+  return blocks;
 }
 
 export async function getPDFImage(fileId: string, xref: number): Promise<Blob> {

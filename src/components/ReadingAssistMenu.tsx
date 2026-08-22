@@ -5,8 +5,10 @@ import {
   READING_ASSIST_MAX_QUESTION_CHARS,
   askReadingAssistant,
   isModelEndpointConfigured,
+  type LlmServiceConfig,
 } from "../services/readingAssistant";
 import type { AppLanguage } from "../services/userSettings";
+import type { ReaderAnnotationRect } from "../types";
 import "./ReadingAssistMenu.css";
 
 export interface ReadingAssistSelection {
@@ -16,15 +18,18 @@ export interface ReadingAssistSelection {
   sourceTitle: string;
   x: number;
   y: number;
+  blockId?: string;
+  sourceRect?: ReaderAnnotationRect;
 }
 
 interface ReadingAssistMenuProps {
   selection: ReadingAssistSelection | null;
   language: AppLanguage;
-  modelEndpoint: string;
+  modelConfig: LlmServiceConfig;
   onClose: () => void;
   onHint?: (message: string) => void;
   onTranslate?: (selection: ReadingAssistSelection) => void;
+  onSaveQuote?: (selection: ReadingAssistSelection, quote: string) => void;
   variant?: "panel" | "inline-toolbar";
 }
 
@@ -107,7 +112,7 @@ async function copyText(text: string) {
   await navigator.clipboard.writeText(text);
 }
 
-export function ReadingAssistMenu({ selection, language, modelEndpoint, onClose, onHint, onTranslate, variant = "panel" }: ReadingAssistMenuProps) {
+export function ReadingAssistMenu({ selection, language, modelConfig, onClose, onHint, onTranslate, onSaveQuote, variant = "panel" }: ReadingAssistMenuProps) {
   const t = I18N[language];
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
@@ -155,7 +160,7 @@ export function ReadingAssistMenu({ selection, language, modelEndpoint, onClose,
     };
   }, [onClose, selection]);
 
-  const canAsk = isModelEndpointConfigured(modelEndpoint);
+  const canAsk = isModelEndpointConfigured(modelConfig);
   const presets =
     language === "zh-CN"
       ? [
@@ -172,6 +177,11 @@ export function ReadingAssistMenu({ selection, language, modelEndpoint, onClose,
   if (!selection) return null;
 
   const quoteText = `> ${selection.text.replace(/\n+/g, "\n> ")}\n\n— ${selection.sourceTitle}, ${selection.reference}`;
+
+  const closeMenu = () => {
+    askAbortRef.current?.abort();
+    onClose();
+  };
 
   const startDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
@@ -212,6 +222,7 @@ export function ReadingAssistMenu({ selection, language, modelEndpoint, onClose,
   const handleQuote = async () => {
     try {
       await copyText(quoteText);
+      onSaveQuote?.(selection, quoteText);
       onHint?.(t.quoted);
     } catch {
       onHint?.("Clipboard unavailable");
@@ -238,7 +249,7 @@ export function ReadingAssistMenu({ selection, language, modelEndpoint, onClose,
     setStatus(t.asking);
     try {
       const result = await askReadingAssistant({
-        endpoint: modelEndpoint,
+        config: modelConfig,
         excerpt: selection.text,
         question: trimmed,
         reference: `${selection.sourceTitle} / ${selection.reference}`,
@@ -362,11 +373,17 @@ export function ReadingAssistMenu({ selection, language, modelEndpoint, onClose,
         <button
           type="button"
           className="reading-assist-close"
-          onClick={() => {
-            askAbortRef.current?.abort();
-            onClose();
+          onPointerDown={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            closeMenu();
+          }}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
           }}
           title={t.close}
+          aria-label={t.close}
         >
           <X size={15} />
         </button>

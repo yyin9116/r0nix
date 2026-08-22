@@ -85,8 +85,11 @@ export function buildViewerContextActions(options: {
     addNoteHere: string;
     exportCurrentPng: string;
     exportCurrentSvg?: string;
+    exportImagePng?: string;
+    exportImageSvg?: string;
     cancel: string;
   };
+  imageTarget?: boolean;
 }): ContextMenuAction[] {
   const actions: ContextMenuAction[] = [
     {
@@ -103,7 +106,9 @@ export function buildViewerContextActions(options: {
     },
     {
       id: "export-png",
-      label: options.labels?.exportCurrentPng || "Export current page PNG",
+      label: options.imageTarget
+        ? options.labels?.exportImagePng || "Export this PNG"
+        : options.labels?.exportCurrentPng || "Export current page PNG",
       icon: <FileImage size={14} />,
       onSelect: options.onExportPng,
     },
@@ -111,7 +116,9 @@ export function buildViewerContextActions(options: {
   if (options.onExportSvg) {
     actions.push({
       id: "export-svg",
-      label: options.labels?.exportCurrentSvg || "Export current page SVG",
+      label: options.imageTarget
+        ? options.labels?.exportImageSvg || "Export this SVG"
+        : options.labels?.exportCurrentSvg || "Export current page SVG",
       icon: <FileCode2 size={14} />,
       onSelect: options.onExportSvg,
     });

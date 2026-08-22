@@ -374,6 +374,10 @@ function loadBoardState(): WhiteboardState {
           .filter((item): item is WhiteboardConnection => item !== null)
           .filter((item) => cardIds.has(item.fromCardId) && cardIds.has(item.toCardId))
       : [];
+    const groupIds = new Set(groups.map((group) => group.id));
+    for (const card of cards) {
+      if (card.groupId && !groupIds.has(card.groupId)) card.groupId = undefined;
+    }
     return { version: 2, zoom: normalizeZoom(candidate.zoom ?? 1), cards, groups, connections };
   });
 }
@@ -457,6 +461,25 @@ export function Whiteboards({ documents, onOpenPdf, language }: WhiteboardsProps
   useEffect(() => {
     writeVersionedLocalState(STORAGE_KEY, STORAGE_VERSION, board);
   }, [board]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPendingConnectionFromId(null);
+        setSelectedConnectionId(null);
+        return;
+      }
+      if (event.key !== "Delete" && event.key !== "Backspace") return;
+      if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+      if (selectedConnectionId) {
+        removeConnection(selectedConnectionId);
+      } else if (selectedCardId) {
+        removeCard(selectedCardId);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedCardId, selectedConnectionId]);
 
   const clientToBoard = (clientX: number, clientY: number) => {
     const rect = viewportRef.current?.getBoundingClientRect();

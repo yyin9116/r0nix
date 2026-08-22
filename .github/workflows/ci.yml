@@ -20,7 +20,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: "npm"
 
       - name: Setup Rust
@@ -52,3 +52,9 @@ jobs:
 
       - name: Rust Check
         run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Rust Unit Tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Embedded PDF Runtime Tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored

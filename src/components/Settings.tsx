@@ -13,10 +13,12 @@ import {
   Plus,
   Trash2,
   Home,
+  PlugZap,
 } from "lucide-react";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { AppLanguage, QuickLinkItem, UserSettings } from "../services/userSettings";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { testLlmServiceConnection } from "../services/readingAssistant";
 
 interface SettingsProps {
   settings: UserSettings;
@@ -95,16 +97,30 @@ const I18N = {
     newTabDefaultUrl: "\u65b0\u6807\u7b7e\u9ed8\u8ba4 URL",
     newTabDefaultUrlDesc: "\u65b0\u5efa\u7f51\u9875\u6807\u7b7e\u65f6\u4f1a\u4f7f\u7528\u8fd9\u4e2a\u5730\u5740\u3002",
     exportAndAi: "\u5bfc\u51fa\u4e0e AI",
-    defaultExportFormat: "\u9ed8\u8ba4\u5bfc\u51fa\u683c\u5f0f",
-    defaultExportFormatDesc: "\u7528\u4e8e PDF \u53f3\u952e\u5bfc\u51fa\u64cd\u4f5c\u3002",
     defaultSaveDirectory: "\u9ed8\u8ba4\u4fdd\u5b58\u76ee\u5f55",
     defaultSaveDirectoryDesc: "\u5bfc\u51fa\u65f6\u9884\u586b\u4f60\u7684\u4f18\u9009\u8f93\u51fa\u76ee\u5f55\u3002",
     localAiModelPath: "阅读辅助模型服务",
-    localAiModelPathDesc: "填写 HTTP(S) 模型服务地址后，可对选中段落直接提问。提问会发送选中段落、引用位置和问题到该服务；也可暂时留空。",
+    localAiModelPathDesc: "填写 LiteLLM 或 OpenAI-compatible Base URL。提问和翻译会发送选中段落、引用位置和问题到该服务。",
+    aiModelName: "模型名称",
+    aiModelNameDesc: "例如 gpt-4o-mini、claude-3-5-sonnet、ollama/qwen2.5 或 LiteLLM 中配置的模型别名。",
+    aiApiKey: "API Key",
+    aiApiKeyDesc: "可选。只保存在本机设置中，请勿填写不可信服务的密钥。",
+    aiTemperature: "温度",
+    aiTemperatureDesc: "翻译建议 0.0-0.3，问答可适当提高。",
+    askPrompt: "提问系统提示词",
+    askPromptDesc: "约束 Ask AI 的角色、边界和回答风格。",
+    translationPrompt: "翻译系统提示词",
+    translationPromptDesc: "约束全文分块翻译和单段翻译的术语、格式与输出方式。",
+    translationTarget: "翻译目标语言",
+    translationTargetDesc: "例如 Simplified Chinese、English、Japanese。",
+    testModelConnection: "测试连接",
+    testingModelConnection: "测试中...",
+    modelConnectionReady: "模型连接可用",
+    modelConnectionFailed: "模型连接失败",
     browse: "\u6d4f\u89c8",
     selectExportDirectory: "\u9009\u62e9\u9ed8\u8ba4\u5bfc\u51fa\u76ee\u5f55",
     chooseExportDirectory: "\u9009\u62e9\u5bfc\u51fa\u76ee\u5f55",
-    selectLocalModelFolder: "https://127.0.0.1:11434/api/read",
+    selectLocalModelFolder: "http://127.0.0.1:4000/v1",
     quickLinks: "\u5feb\u6377\u94fe\u63a5",
     quickLinksDesc: "\u5feb\u6377\u94fe\u63a5\u53ef\u4ee5\u7f16\u8f91\uff0c\u4fdd\u5b58\u540e\u4fa7\u8fb9\u680f\u4f1a\u7acb\u5373\u66f4\u65b0\u3002",
     title: "\u6807\u9898",
@@ -148,16 +164,30 @@ const I18N = {
     newTabDefaultUrl: "New tab default URL",
     newTabDefaultUrlDesc: "This address is used when creating a new browser tab.",
     exportAndAi: "Export & AI",
-    defaultExportFormat: "Default export format",
-    defaultExportFormatDesc: "Used by the PDF right-click export action.",
     defaultSaveDirectory: "Default save directory",
     defaultSaveDirectoryDesc: "Prefill exported file paths with your preferred output location.",
     localAiModelPath: "Reading assistant model service",
-    localAiModelPathDesc: "Set an HTTP(S) model endpoint to ask questions about selected paragraphs. Asking sends the paragraph, reference, and question to that service; you can leave it empty.",
+    localAiModelPathDesc: "Set a LiteLLM or OpenAI-compatible Base URL. Asking and translation send selected text, references, and questions to this service.",
+    aiModelName: "Model name",
+    aiModelNameDesc: "For example gpt-4o-mini, claude-3-5-sonnet, ollama/qwen2.5, or a LiteLLM model alias.",
+    aiApiKey: "API Key",
+    aiApiKeyDesc: "Optional. Stored only in local settings; do not use keys with untrusted services.",
+    aiTemperature: "Temperature",
+    aiTemperatureDesc: "Use 0.0-0.3 for translation; higher values may be useful for Q&A.",
+    askPrompt: "Ask system prompt",
+    askPromptDesc: "Controls Ask AI's role, boundaries, and answer style.",
+    translationPrompt: "Translation system prompt",
+    translationPromptDesc: "Controls terminology, format, and output style for block translation.",
+    translationTarget: "Translation target language",
+    translationTargetDesc: "For example Simplified Chinese, English, or Japanese.",
+    testModelConnection: "Test connection",
+    testingModelConnection: "Testing...",
+    modelConnectionReady: "Model connection ready",
+    modelConnectionFailed: "Model connection failed",
     browse: "Browse",
     selectExportDirectory: "Select Default Export Directory",
     chooseExportDirectory: "Choose an export directory",
-    selectLocalModelFolder: "https://127.0.0.1:11434/api/read",
+    selectLocalModelFolder: "http://127.0.0.1:4000/v1",
     quickLinks: "Quick Links",
     quickLinksDesc: "Quick Links are editable, not fixed. Add or remove them here and the sidebar updates immediately.",
     title: "Title",
@@ -173,6 +203,10 @@ const I18N = {
 
 export function Settings({ settings, onThemeChange, onSettingsChange, focusSection = null, focusToken = 0 }: SettingsProps) {
   const [draftQuickLink, setDraftQuickLink] = useState({ title: "", url: "" });
+  const [modelTest, setModelTest] = useState<{ status: "idle" | "testing" | "success" | "error"; message: string }>({
+    status: "idle",
+    message: "",
+  });
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const quickLinksSectionRef = useRef<HTMLElement | null>(null);
 
@@ -236,6 +270,23 @@ export function Settings({ settings, onThemeChange, onSettingsChange, focusSecti
 
   const removeQuickLink = (id: string) => {
     updateSettings({ quickLinks: settings.quickLinks.filter((item) => item.id !== id) });
+  };
+
+  const handleTestModelConnection = async () => {
+    setModelTest({ status: "testing", message: t.testingModelConnection });
+    const result = await testLlmServiceConnection({
+      baseUrl: settings.aiModelPath,
+      model: settings.aiModelName,
+      apiKey: settings.aiApiKey,
+      temperature: settings.aiTemperature,
+      askSystemPrompt: settings.aiAskSystemPrompt,
+      translationSystemPrompt: settings.aiTranslationSystemPrompt,
+      translationTargetLanguage: settings.aiTranslationTargetLanguage,
+    });
+    setModelTest({
+      status: result.ok ? "success" : "error",
+      message: result.ok ? result.message || t.modelConnectionReady : `${t.modelConnectionFailed}: ${result.message}`,
+    });
   };
 
   return (
@@ -394,18 +445,6 @@ export function Settings({ settings, onThemeChange, onSettingsChange, focusSecti
           </div>
 
           <div className="bg-zinc-50 dark:bg-zinc-950 border border-zinc-200 dark:border-zinc-800 rounded-xl divide-y divide-zinc-200 dark:divide-zinc-800">
-            <SettingsRow icon={<Download size={15} />} title={t.defaultExportFormat} description={t.defaultExportFormatDesc}>
-              <SelectRow
-                value={settings.defaultExportFormat}
-                options={[
-                  { value: "png", label: "PNG" },
-                  { value: "jpg", label: "JPG" },
-                  { value: "svg", label: "SVG" },
-                ]}
-                onChange={(value) => updateSettings({ defaultExportFormat: value })}
-              />
-            </SettingsRow>
-
             <SettingsRow icon={<FolderOpen size={15} />} title={t.defaultSaveDirectory} description={t.defaultSaveDirectoryDesc}>
               <div className="flex gap-2 flex-wrap justify-end">
                 <input
@@ -435,6 +474,104 @@ export function Settings({ settings, onThemeChange, onSettingsChange, focusSecti
                   placeholder={t.selectLocalModelFolder}
                 />
               </div>
+            </SettingsRow>
+
+            <SettingsRow icon={<Palette size={15} />} title={t.aiModelName} description={t.aiModelNameDesc}>
+              <div className="flex w-full max-w-xl flex-col items-end gap-2">
+                <div className="flex gap-2 flex-wrap justify-end">
+                  <input
+                    type="text"
+                    value={settings.aiModelName}
+                    onChange={(event) => updateSettings({ aiModelName: event.target.value })}
+                    className="w-72 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-md px-3 py-2 text-sm font-mono"
+                    placeholder="gpt-4o-mini"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void handleTestModelConnection()}
+                    disabled={modelTest.status === "testing"}
+                    className="inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-semibold transition-colors disabled:opacity-60"
+                    style={{ backgroundColor: "var(--reader-accent)", color: "var(--reader-accent-contrast)" }}
+                  >
+                    <PlugZap size={15} />
+                    {modelTest.status === "testing" ? t.testingModelConnection : t.testModelConnection}
+                  </button>
+                </div>
+                {modelTest.message ? (
+                  <div
+                    className={`max-w-xl text-right text-xs leading-5 ${
+                      modelTest.status === "success"
+                        ? "text-emerald-600 dark:text-emerald-400"
+                        : modelTest.status === "error"
+                          ? "text-red-600 dark:text-red-400"
+                          : "text-zinc-500 dark:text-zinc-400"
+                    }`}
+                    role="status"
+                  >
+                    {modelTest.message}
+                  </div>
+                ) : null}
+              </div>
+            </SettingsRow>
+
+            <SettingsRow icon={<Palette size={15} />} title={t.aiApiKey} description={t.aiApiKeyDesc}>
+              <input
+                type="password"
+                value={settings.aiApiKey}
+                onChange={(event) => updateSettings({ aiApiKey: event.target.value })}
+                className="w-72 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-md px-3 py-2 text-sm font-mono"
+                placeholder="sk-..."
+                autoComplete="off"
+              />
+            </SettingsRow>
+
+            <SettingsRow icon={<Palette size={15} />} title={t.aiTemperature} description={t.aiTemperatureDesc}>
+              <div className="flex w-72 items-center gap-3">
+                <input
+                  type="range"
+                  min={0}
+                  max={2}
+                  step={0.1}
+                  value={settings.aiTemperature}
+                  onChange={(event) => updateSettings({ aiTemperature: Number(event.target.value) })}
+                  className="flex-1"
+                />
+                <input
+                  type="number"
+                  min={0}
+                  max={2}
+                  step={0.1}
+                  value={settings.aiTemperature}
+                  onChange={(event) => updateSettings({ aiTemperature: Number(event.target.value) })}
+                  className="w-20 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-md px-2 py-2 text-sm font-mono"
+                />
+              </div>
+            </SettingsRow>
+
+            <SettingsRow icon={<Palette size={15} />} title={t.translationTarget} description={t.translationTargetDesc}>
+              <input
+                type="text"
+                value={settings.aiTranslationTargetLanguage}
+                onChange={(event) => updateSettings({ aiTranslationTargetLanguage: event.target.value })}
+                className="w-72 bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-md px-3 py-2 text-sm"
+                placeholder="Simplified Chinese"
+              />
+            </SettingsRow>
+
+            <SettingsRow icon={<Palette size={15} />} title={t.askPrompt} description={t.askPromptDesc}>
+              <textarea
+                value={settings.aiAskSystemPrompt}
+                onChange={(event) => updateSettings({ aiAskSystemPrompt: event.target.value })}
+                className="min-h-24 w-full max-w-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-md px-3 py-2 text-sm leading-5"
+              />
+            </SettingsRow>
+
+            <SettingsRow icon={<Palette size={15} />} title={t.translationPrompt} description={t.translationPromptDesc}>
+              <textarea
+                value={settings.aiTranslationSystemPrompt}
+                onChange={(event) => updateSettings({ aiTranslationSystemPrompt: event.target.value })}
+                className="min-h-24 w-full max-w-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-700 rounded-md px-3 py-2 text-sm leading-5"
+              />
             </SettingsRow>
           </div>
         </section>

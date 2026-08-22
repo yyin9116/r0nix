@@ -1,0 +1,15 @@
+[target.aarch64-apple-darwin]
+rustflags = [
+  "-C",
+  "link-arg=-Wl,-rpath,@executable_path/../Resources/runtime",
+  "-C",
+  "link-arg=-Wl,-rpath,@executable_path/../Resources/runtime/site-packages/pymupdf",
+]
+
+[target.x86_64-apple-darwin]
+rustflags = [
+  "-C",
+  "link-arg=-Wl,-rpath,@executable_path/../Resources/runtime",
+  "-C",
+  "link-arg=-Wl,-rpath,@executable_path/../Resources/runtime/site-packages/pymupdf",
+]

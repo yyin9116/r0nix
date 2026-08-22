@@ -1,15 +1,16 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { AnimatePresence, motion } from "motion/react";
 import { Sidebar } from "./components/Sidebar";
 import { Tabs } from "./components/Tabs";
 import { Library, LIBRARY_SEARCH_FOCUS_EVENT } from "./components/Library";
-import { PDFViewer } from "./components/PDFViewer";
-import { MarkdownViewer } from "./components/MarkdownViewer";
-import { Whiteboards } from "./components/Whiteboards";
-import { WebBrowser } from "./components/WebBrowser";
-import { Settings } from "./components/Settings";
+const PDFViewer = lazy(() => import("./components/PDFViewer").then((module) => ({ default: module.PDFViewer })));
+const MarkdownViewer = lazy(() => import("./components/MarkdownViewer").then((module) => ({ default: module.MarkdownViewer })));
+const Whiteboards = lazy(() => import("./components/Whiteboards").then((module) => ({ default: module.Whiteboards })));
+const WebBrowser = lazy(() => import("./components/WebBrowser").then((module) => ({ default: module.WebBrowser })));
+const Settings = lazy(() => import("./components/Settings").then((module) => ({ default: module.Settings })));
 import type { LibraryFilter, ReaderAnnotation, ReaderCollection, ReaderDocument, ReaderNote, Tab } from "./types";
 import * as api from "./services/pdfApi";
 import {
@@ -37,6 +38,7 @@ import {
   type PersistenceWarning,
 } from "./services/localStore";
 import { debugWarn } from "./services/debugLogger";
+import type { LlmServiceConfig } from "./services/readingAssistant";
 import { START_PAGE_URL } from "./constants/startPage";
 import { downloadPdfViaProxy } from "./services/webProxy";
 
@@ -120,6 +122,11 @@ function isMarkdownPath(path: string) {
   return lowered.endsWith(".md") || lowered.endsWith(".markdown");
 }
 
+function isSupportedDropPath(path: string) {
+  const lowered = path.trim().toLowerCase();
+  return lowered.endsWith(".pdf") || lowered.endsWith(".md") || lowered.endsWith(".markdown");
+}
+
 function isTauriRuntime() {
   return (
     typeof window !== "undefined" &&
@@ -129,6 +136,63 @@ function isTauriRuntime() {
 
 function makeDocumentId(path: string) {
   return `doc-${path.trim().toLowerCase()}`;
+}
+
+function documentTabKey(tab: Tab) {
+  if ((tab.type !== "pdf" && tab.type !== "markdown") || !tab.filePath) return "";
+  return `${tab.type}:${tab.filePath.trim().toLowerCase()}`;
+}
+
+function choosePdfViewState(left?: Tab["pdfViewState"], right?: Tab["pdfViewState"]) {
+  if (!left) return right;
+  if (!right) return left;
+  const leftTime = Date.parse(left.updatedAt || "");
+  const rightTime = Date.parse(right.updatedAt || "");
+  return Number.isFinite(rightTime) && rightTime > (Number.isFinite(leftTime) ? leftTime : 0) ? right : left;
+}
+
+function mergeDuplicateDocumentTabs(tabs: Tab[], activeTabId: string) {
+  const documentIndexByKey = new Map<string, number>();
+  const merged: Tab[] = [];
+  let activeReplacementId = "";
+
+  for (const tab of tabs) {
+    const key = documentTabKey(tab);
+    if (!key) {
+      merged.push(tab);
+      continue;
+    }
+
+    const existingIndex = documentIndexByKey.get(key);
+    if (existingIndex === undefined) {
+      documentIndexByKey.set(key, merged.length);
+      merged.push(tab);
+      continue;
+    }
+
+    const existing = merged[existingIndex];
+    merged[existingIndex] = {
+      ...existing,
+      title: existing.title || tab.title,
+      fileId: existing.fileId || tab.fileId,
+      content: existing.content || tab.content,
+      pdfViewState: choosePdfViewState(existing.pdfViewState, tab.pdfViewState),
+      pinned: Boolean(existing.pinned || tab.pinned),
+    };
+    if (tab.id === activeTabId) {
+      activeReplacementId = existing.id;
+    }
+  }
+
+  return {
+    tabs: merged,
+    activeTabId: merged.some((tab) => tab.id === activeTabId)
+      ? activeTabId
+      : activeReplacementId && merged.some((tab) => tab.id === activeReplacementId)
+        ? activeReplacementId
+        : merged[0]?.id || DEFAULT_ACTIVE_TAB_ID,
+    changed: merged.length !== tabs.length,
+  };
 }
 
 function makeNoteStorageKey(path: string) {
@@ -245,9 +309,13 @@ function loadStoredNotes(): Record<string, ReaderNote[]> {
         .filter((item) => typeof item?.id === "string" && typeof item?.content === "string")
         .map((item): ReaderNote => ({
           id: item.id as string,
+          documentId: typeof item.documentId === "string" && item.documentId ? item.documentId : undefined,
+          blockId: typeof item.blockId === "string" && item.blockId ? item.blockId : undefined,
           page: typeof item.page === "number" ? Math.max(1, Math.round(item.page)) : 1,
           kind: item.kind === "summary" || item.kind === "highlight" ? item.kind : "note",
           content: item.content as string,
+          reference: typeof item.reference === "string" && item.reference.trim() ? item.reference.trim() : undefined,
+          sourceRect: item.sourceRect && typeof item.sourceRect === "object" ? item.sourceRect as ReaderNote["sourceRect"] : undefined,
           createdAt:
             typeof item.createdAt === "string" && item.createdAt ? item.createdAt : new Date().toISOString(),
         }))
@@ -278,6 +346,7 @@ function loadStoredAnnotations(): Record<string, ReaderAnnotation[]> {
           if (kind !== "highlight" && kind !== "underline" && kind !== "strike" && kind !== "text") return null;
           return {
             id: item.id as string,
+            documentId: typeof item.documentId === "string" && item.documentId ? item.documentId : undefined,
             page: Math.max(1, Math.round(item.page as number)),
             kind,
             rect: {
@@ -301,7 +370,7 @@ function loadStoredAnnotations(): Record<string, ReaderAnnotation[]> {
 function sanitizeStoredTabs(raw: unknown): { tabs: Tab[]; activeTabId: string } {
   const parsed = raw && typeof raw === "object" ? (raw as { tabs?: unknown; activeTabId?: unknown }) : {};
   const rawTabs = Array.isArray(parsed.tabs) ? parsed.tabs : [];
-  const restored = rawTabs
+  const restoredRaw = rawTabs
     .filter((item): item is Partial<Tab> => Boolean(item) && typeof item === "object")
     .map((item): Tab | null => {
       const type = item.type;
@@ -337,11 +406,12 @@ function sanitizeStoredTabs(raw: unknown): { tabs: Tab[]; activeTabId: string } 
     })
     .filter((item): item is Tab => Boolean(item));
 
-  const hasMain = restored.some((tab) => tab.id === DEFAULT_ACTIVE_TAB_ID);
-  const tabs = hasMain ? restored : [PINNED_TABS[0], ...restored];
-  const activeTabId = typeof parsed.activeTabId === "string" && tabs.some((tab) => tab.id === parsed.activeTabId)
-    ? parsed.activeTabId
-    : DEFAULT_ACTIVE_TAB_ID;
+  const activeCandidate = typeof parsed.activeTabId === "string" ? parsed.activeTabId : DEFAULT_ACTIVE_TAB_ID;
+  const merged = mergeDuplicateDocumentTabs(restoredRaw, activeCandidate);
+
+  const hasMain = merged.tabs.some((tab) => tab.id === DEFAULT_ACTIVE_TAB_ID);
+  const tabs = hasMain ? merged.tabs : [PINNED_TABS[0], ...merged.tabs];
+  const activeTabId = tabs.some((tab) => tab.id === merged.activeTabId) ? merged.activeTabId : DEFAULT_ACTIVE_TAB_ID;
   return { tabs, activeTabId };
 }
 
@@ -396,8 +466,12 @@ export default function App() {
   const [settingsFocusToken, setSettingsFocusToken] = useState(0);
 
   const busyTimerRef = useRef<number | null>(null);
+  const tabsPersistTimerRef = useRef<number | null>(null);
+  const latestTabsRef = useRef(tabs);
+  const latestActiveTabIdRef = useRef(activeTabId);
   const progressRef = useRef<Record<string, { page: number; totalPages: number }>>({});
   const webTabIdsRef = useRef<string[]>([]);
+  const openingPathsRef = useRef<Set<string>>(new Set());
 
   const activeTab = useMemo(() => tabs.find((tab) => tab.id === activeTabId), [activeTabId, tabs]);
   const activeFilter: LibraryFilter = activeTab?.type === "library" ? activeTab.filter || "all" : "all";
@@ -410,6 +484,26 @@ export default function App() {
       : { solid: "#18181b", soft: "rgba(24, 24, 27, 0.08)", contrast: "#ffffff" };
   }, [accent, settings.themeAccent, theme]);
   const uiText = useMemo(() => getUiText(settings.language), [settings.language]);
+  const aiModelConfig = useMemo<LlmServiceConfig>(
+    () => ({
+      baseUrl: settings.aiModelPath,
+      model: settings.aiModelName,
+      apiKey: settings.aiApiKey,
+      temperature: settings.aiTemperature,
+      askSystemPrompt: settings.aiAskSystemPrompt,
+      translationSystemPrompt: settings.aiTranslationSystemPrompt,
+      translationTargetLanguage: settings.aiTranslationTargetLanguage,
+    }),
+    [
+      settings.aiApiKey,
+      settings.aiAskSystemPrompt,
+      settings.aiModelName,
+      settings.aiModelPath,
+      settings.aiTemperature,
+      settings.aiTranslationSystemPrompt,
+      settings.aiTranslationTargetLanguage,
+    ]
+  );
 
   const appStyle = useMemo(
     () =>
@@ -422,7 +516,7 @@ export default function App() {
   );
 
   const activeNotes = useMemo(() => {
-    if (!activeTab?.filePath || activeTab.type !== "pdf") return [];
+    if (!activeTab?.filePath || (activeTab.type !== "pdf" && activeTab.type !== "markdown")) return [];
     return notesByDocument[makeNoteStorageKey(activeTab.filePath)] || [];
   }, [activeTab?.filePath, activeTab?.type, notesByDocument]);
   const activeAnnotations = useMemo(() => {
@@ -468,8 +562,47 @@ export default function App() {
   }, [annotationsByDocument]);
 
   useEffect(() => {
+    latestTabsRef.current = tabs;
+    latestActiveTabIdRef.current = activeTabId;
     const serializableTabs = tabs.map(({ fileId, ...tab }) => tab);
-    writeVersionedLocalState(TABS_KEY, TABS_STATE_VERSION, { tabs: serializableTabs, activeTabId });
+    if (tabsPersistTimerRef.current !== null) {
+      window.clearTimeout(tabsPersistTimerRef.current);
+    }
+    tabsPersistTimerRef.current = window.setTimeout(() => {
+      tabsPersistTimerRef.current = null;
+      writeVersionedLocalState(TABS_KEY, TABS_STATE_VERSION, { tabs: serializableTabs, activeTabId });
+    }, 240);
+    return () => {
+      if (tabsPersistTimerRef.current !== null) {
+        window.clearTimeout(tabsPersistTimerRef.current);
+        tabsPersistTimerRef.current = null;
+      }
+    };
+  }, [activeTabId, tabs]);
+
+  useEffect(() => {
+    const flushTabs = () => {
+      const serializableTabs = latestTabsRef.current.map(({ fileId, ...tab }) => tab);
+      writeVersionedLocalState(TABS_KEY, TABS_STATE_VERSION, {
+        tabs: serializableTabs,
+        activeTabId: latestActiveTabIdRef.current,
+      });
+    };
+    window.addEventListener("pagehide", flushTabs);
+    window.addEventListener("beforeunload", flushTabs);
+    return () => {
+      window.removeEventListener("pagehide", flushTabs);
+      window.removeEventListener("beforeunload", flushTabs);
+    };
+  }, []);
+
+  useEffect(() => {
+    const merged = mergeDuplicateDocumentTabs(tabs, activeTabId);
+    if (!merged.changed) return;
+    setTabs(merged.tabs);
+    if (merged.activeTabId !== activeTabId) {
+      setActiveTabId(merged.activeTabId);
+    }
   }, [activeTabId, tabs]);
 
   useEffect(() => {
@@ -728,17 +861,31 @@ export default function App() {
             samePath(item.filePath, payload.path)
         );
         if (existing) {
-          const updated: Tab[] = prev.map((item): Tab => {
-            if (item.id !== existing.id) return item;
-            return {
-              ...item,
-              type: (payload.kind === "markdown" ? "markdown" : "pdf") as Tab["type"],
-              title: payload.title,
-              filePath: payload.path,
-              fileId: payload.fileId,
-              content: payload.kind === "markdown" ? payload.content : undefined,
-            };
-          });
+          const updatedTab: Tab = {
+            ...existing,
+            type: (payload.kind === "markdown" ? "markdown" : "pdf") as Tab["type"],
+            title: payload.title,
+            filePath: payload.path,
+            fileId: payload.fileId,
+            content: payload.kind === "markdown" ? payload.content : undefined,
+          };
+          const updated: Tab[] = [];
+          for (const item of prev) {
+            if (
+              (item.type === "pdf" || item.type === "markdown") &&
+              item.filePath &&
+              samePath(item.filePath, payload.path)
+            ) {
+              if (item.id === existing.id) {
+                updated.push({
+                  ...updatedTab,
+                  pdfViewState: choosePdfViewState(updatedTab.pdfViewState, item.pdfViewState),
+                });
+              }
+              continue;
+            }
+            updated.push(item);
+          }
           setActiveTabId(existing.id);
           return updated;
         }
@@ -761,8 +908,25 @@ export default function App() {
 
   const openPdfByPath = useCallback(
     async (path: string, preferredTitle?: string, options?: { silentBusy?: boolean }) => {
-      if (!path.trim()) return false;
+      const cleanPath = path.trim();
+      if (!cleanPath) return false;
+      const openKey = cleanPath.toLowerCase();
       const markdown = isMarkdownPath(path);
+      const existingLoadedTab = tabs.find(
+        (tab) =>
+          (tab.type === "pdf" || tab.type === "markdown") &&
+          tab.filePath &&
+          samePath(tab.filePath, cleanPath) &&
+          tab.fileId
+      );
+      if (existingLoadedTab) {
+        setActiveTabId(existingLoadedTab.id);
+        return true;
+      }
+      if (openingPathsRef.current.has(openKey)) {
+        return false;
+      }
+      openingPathsRef.current.add(openKey);
       const existingDoc = documents.find((item) => samePath(item.path, path));
       try {
         if (!options?.silentBusy) {
@@ -770,7 +934,7 @@ export default function App() {
         }
 
         if (markdown) {
-          const fileInfo = await api.openMarkdownFile(path);
+          const fileInfo = await api.openMarkdownFile(cleanPath);
           const markdownText = await api.readMarkdownText(fileInfo.path);
           upsertDocumentFromOpen({
             title: preferredTitle || fileInfo.name || fileNameFromPath(fileInfo.path),
@@ -784,7 +948,7 @@ export default function App() {
           return true;
         }
 
-        const fileInfo = await api.openFile(path);
+        const fileInfo = await api.openFile(cleanPath);
         upsertDocumentFromOpen({
           title: preferredTitle || fileInfo.name || fileNameFromPath(fileInfo.path),
           path: fileInfo.path,
@@ -805,21 +969,58 @@ export default function App() {
         const message = error instanceof Error ? error.message : String(error);
         updateBusyMessage(`Failed to open file: ${message}`, 3200);
         return false;
+      } finally {
+        openingPathsRef.current.delete(openKey);
       }
     },
-    [documents, updateBusyMessage, upsertDocumentFromOpen]
+    [documents, tabs, updateBusyMessage, upsertDocumentFromOpen]
   );
 
   useEffect(() => {
-    const pending = tabs.find(
-      (tab) =>
-        (tab.type === "pdf" || tab.type === "markdown") &&
-        tab.filePath &&
-        !tab.fileId
-    );
-    if (!pending?.filePath) return;
-    void openPdfByPath(pending.filePath, pending.title, { silentBusy: true });
-  }, [openPdfByPath, tabs]);
+    if (
+      !activeTab ||
+      (activeTab.type !== "pdf" && activeTab.type !== "markdown") ||
+      !activeTab.filePath ||
+      activeTab.fileId ||
+      openingPathsRef.current.has(activeTab.filePath.trim().toLowerCase())
+    ) {
+      return;
+    }
+    void openPdfByPath(activeTab.filePath, activeTab.title, { silentBusy: true });
+  }, [activeTab, openPdfByPath]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+
+    let disposed = false;
+    let unlisten: UnlistenFn | null = null;
+
+    void getCurrentWebview()
+      .onDragDropEvent((event) => {
+        if (event.payload.type !== "drop") return;
+        const droppedPath = event.payload.paths.find(isSupportedDropPath);
+        if (!droppedPath) {
+          updateBusyMessage("只支持拖入 PDF 或 Markdown 文件。", 2400);
+          return;
+        }
+        void openPdfByPath(droppedPath);
+      })
+      .then((dispose) => {
+        if (disposed) {
+          dispose();
+          return;
+        }
+        unlisten = dispose;
+      })
+      .catch((error) => {
+        debugWarn("app.dragDrop", "failed to register file drop listener", { error });
+      });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [openPdfByPath, updateBusyMessage]);
 
   const updatePdfTabViewState = useCallback((tabId: string, viewState: NonNullable<Tab["pdfViewState"]>) => {
     setTabs((prev) =>
@@ -1242,18 +1443,32 @@ export default function App() {
     [settings.language, uiText.webNewTab]
   );
 
-  const addNote = useCallback((path: string, page: number, content: string, kind: ReaderNote["kind"] = "note") => {
+  const addNote = useCallback((path: string, page: number, content: string, kind: ReaderNote["kind"] = "note", reference?: string, source?: Pick<ReaderNote, "blockId" | "sourceRect">) => {
     const trimmed = content.trim();
     if (!trimmed) return;
     const storageKey = makeNoteStorageKey(path);
     const nextNote: ReaderNote = {
       id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      documentId: makeDocumentId(path),
+      blockId: source?.blockId,
       page,
       kind,
       content: trimmed,
+      reference: reference?.trim() || undefined,
+      sourceRect: source?.sourceRect,
       createdAt: new Date().toISOString(),
     };
     setNotesByDocument((prev) => ({ ...prev, [storageKey]: [nextNote, ...(prev[storageKey] || [])] }));
+  }, []);
+
+  const updateNote = useCallback((path: string, noteId: string, content: string) => {
+    const trimmed = content.trim();
+    if (!trimmed) return;
+    const storageKey = makeNoteStorageKey(path);
+    setNotesByDocument((prev) => ({
+      ...prev,
+      [storageKey]: (prev[storageKey] || []).map((note) => note.id === noteId ? { ...note, content: trimmed } : note),
+    }));
   }, []);
 
   const removeNote = useCallback((path: string, noteId: string) => {
@@ -1272,6 +1487,7 @@ export default function App() {
       const storageKey = makeNoteStorageKey(path);
       const nextAnnotation: ReaderAnnotation = {
         ...annotation,
+        documentId: makeDocumentId(path),
         id: `annotation-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         createdAt: new Date().toISOString(),
       };
@@ -1460,6 +1676,13 @@ export default function App() {
             })()
           ) : null}
 
+          <Suspense
+            fallback={
+              <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-500 dark:text-zinc-400">
+                {settings.language === "zh-CN" ? "正在加载视图..." : "Loading view..."}
+              </div>
+            }
+          >
           <div key={activePanelKey} className="absolute inset-0">
             {activeTab?.type === "library" ? (
               activeTab.filter === "whiteboards" ? (
@@ -1518,6 +1741,7 @@ export default function App() {
             {activeTab?.type === "pdf" ? (
               <PDFViewer
                 title={activeTab.title}
+                documentId={activeTab.filePath ? makeDocumentId(activeTab.filePath) : undefined}
                 fileId={activeTab.fileId}
                 language={settings.language}
                 notes={activeNotes}
@@ -1525,9 +1749,13 @@ export default function App() {
                 onOpenFileDialog={() => {
                   void openPdfDialog();
                 }}
-                onAddNote={(pageNo, content, kind) => {
+                onAddNote={(pageNo, content, kind, reference, source) => {
                   if (!activeTab.filePath) return;
-                  addNote(activeTab.filePath, pageNo, content, kind);
+                  addNote(activeTab.filePath, pageNo, content, kind, reference, source);
+                }}
+                onUpdateNote={(noteId, content) => {
+                  if (!activeTab.filePath) return;
+                  updateNote(activeTab.filePath, noteId, content);
                 }}
                 onRemoveNote={(noteId) => {
                   if (!activeTab.filePath) return;
@@ -1543,7 +1771,7 @@ export default function App() {
                 }}
                 onResolveDefaultPath={(fileName) => withDefaultDir(fileName, settings.defaultSaveDir)}
                 onOpenExternal={handleOpenExternal}
-                aiModelEndpoint={settings.aiModelPath}
+                aiModelConfig={aiModelConfig}
                 initialViewState={activeTab.pdfViewState}
                 onViewStateChange={(viewState) => updatePdfTabViewState(activeTab.id, viewState)}
                 onProgress={(pageNo, totalPages) => {
@@ -1578,7 +1806,20 @@ export default function App() {
                 filePath={activeTab.filePath}
                 content={activeTab.content || ""}
                 language={settings.language}
-                aiModelEndpoint={settings.aiModelPath}
+                notes={activeNotes}
+                onAddNote={(pageNo, content, kind, reference, source) => {
+                  if (!activeTab.filePath) return;
+                  addNote(activeTab.filePath, pageNo, content, kind, reference, source);
+                }}
+                onUpdateNote={(noteId, content) => {
+                  if (!activeTab.filePath) return;
+                  updateNote(activeTab.filePath, noteId, content);
+                }}
+                onRemoveNote={(noteId) => {
+                  if (!activeTab.filePath) return;
+                  removeNote(activeTab.filePath, noteId);
+                }}
+                aiModelConfig={aiModelConfig}
                 onOpenExternal={handleOpenExternal}
                 onContentChange={(next) => {
                   updateMarkdownTabContent(activeTab.id, next);
@@ -1636,6 +1877,7 @@ export default function App() {
               />
             ) : null}
           </div>
+          </Suspense>
         </div>
       </div>
     </div>

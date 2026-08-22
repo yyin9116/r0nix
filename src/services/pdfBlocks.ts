@@ -103,12 +103,41 @@ function mergeRects(rects: DOMRect[], layerRect: DOMRect): ReaderAnnotationRect 
   const top = Math.min(...rects.map((rect) => rect.top));
   const right = Math.max(...rects.map((rect) => rect.right));
   const bottom = Math.max(...rects.map((rect) => rect.bottom));
+  const padX = Math.min(6, layerRect.width * 0.006);
+  const padY = Math.min(4, layerRect.height * 0.004);
+  const paddedLeft = Math.max(layerRect.left, left - padX);
+  const paddedTop = Math.max(layerRect.top, top - padY);
+  const paddedRight = Math.min(layerRect.right, right + padX);
+  const paddedBottom = Math.min(layerRect.bottom, bottom + padY);
   return {
-    x: Math.max(0, (left - layerRect.left) / layerRect.width),
-    y: Math.max(0, (top - layerRect.top) / layerRect.height),
-    width: Math.min(1, (right - left) / layerRect.width),
-    height: Math.min(1, (bottom - top) / layerRect.height),
+    x: Math.max(0, (paddedLeft - layerRect.left) / layerRect.width),
+    y: Math.max(0, (paddedTop - layerRect.top) / layerRect.height),
+    width: Math.min(1, (paddedRight - paddedLeft) / layerRect.width),
+    height: Math.min(1, (paddedBottom - paddedTop) / layerRect.height),
   };
+}
+
+function splitLineIntoColumns(line: DomTextSpan[]): DomTextSpan[][] {
+  if (line.length <= 1) return [line];
+  const sorted = [...line].sort((left, right) => left.rect.left - right.rect.left);
+  const medianHeight = [...sorted].sort((left, right) => left.rect.height - right.rect.height)[Math.floor(sorted.length / 2)]?.rect.height ?? 12;
+  const segments: DomTextSpan[][] = [];
+  let current: DomTextSpan[] = [];
+  for (const span of sorted) {
+    const previous = current[current.length - 1];
+    const gap = previous ? span.rect.left - previous.rect.right : 0;
+    // Text-layer coordinates scale with the rendered page. A fixed 36px
+    // threshold merges narrow double columns at small zoom levels.
+    const splitGap = Math.max(18, medianHeight * 2.4);
+    if (previous && gap > splitGap) {
+      segments.push(current);
+      current = [span];
+    } else {
+      current.push(span);
+    }
+  }
+  if (current.length > 0) segments.push(current);
+  return segments;
 }
 
 export function buildDomPdfReadingBlocks(layer: HTMLElement, pageNo: number): PdfReadingBlock[] {
@@ -134,15 +163,33 @@ export function buildDomPdfReadingBlocks(layer: HTMLElement, pageNo: number): Pd
     }
   }
 
+  const lineSegments = lines.flatMap(splitLineIntoColumns).sort((left, right) => {
+    const leftColumn = Math.floor(Math.min(...left.map((span) => span.rect.left)) / Math.max(1, layerRect.width * 0.28));
+    const rightColumn = Math.floor(Math.min(...right.map((span) => span.rect.left)) / Math.max(1, layerRect.width * 0.28));
+    if (leftColumn !== rightColumn) return leftColumn - rightColumn;
+    const leftTop = Math.min(...left.map((span) => span.rect.top));
+    const rightTop = Math.min(...right.map((span) => span.rect.top));
+    if (Math.abs(leftTop - rightTop) > 4) return leftTop - rightTop;
+    return Math.min(...left.map((span) => span.rect.left)) - Math.min(...right.map((span) => span.rect.left));
+  });
+
   const blocks: DomTextSpan[][] = [];
-  for (const line of lines) {
+  for (const line of lineSegments) {
     const previous = blocks[blocks.length - 1];
-    const previousLine = previous?.slice(-line.length) ?? [];
     const previousBottom = previous ? Math.max(...previous.map((span) => span.rect.bottom)) : 0;
     const lineTop = Math.min(...line.map((span) => span.rect.top));
+    const lineLeft = Math.min(...line.map((span) => span.rect.left));
+    const lineRight = Math.max(...line.map((span) => span.rect.right));
     const gap = lineTop - previousBottom;
     const lineHeight = Math.max(...line.map((span) => span.rect.height));
-    const startsNewParagraph = !previous || gap > lineHeight * 1.25 || Math.min(...line.map((span) => span.rect.left)) > Math.min(...previousLine.map((span) => span.rect.left)) + 80;
+    const previousLeft = previous ? Math.min(...previous.map((span) => span.rect.left)) : 0;
+    const previousRight = previous ? Math.max(...previous.map((span) => span.rect.right)) : 0;
+    const overlapsPreviousColumn = !previous || Math.min(lineRight, previousRight) - Math.max(lineLeft, previousLeft) > Math.min(lineRight - lineLeft, previousRight - previousLeft) * 0.36;
+    const startsNewParagraph =
+      !previous ||
+      !overlapsPreviousColumn ||
+      gap > lineHeight * 1.35 ||
+      lineLeft > previousLeft + 70;
     if (startsNewParagraph) {
       blocks.push([...line]);
     } else {
