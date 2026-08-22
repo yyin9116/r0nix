@@ -43,6 +43,7 @@ assert(tauriConfig.build?.beforeBuildCommand === "npm run build", "Tauri release
 assert(bundle.targets === "all", "Tauri bundle targets must remain explicit.");
 assert(Array.isArray(bundle.resources) && bundle.resources.includes("runtime"), "Embedded Python runtime must be included in desktop bundles.");
 assert(tauriMain.includes("TrayIconBuilder") && tauriMain.includes('"tray-quit"'), "Desktop builds must keep a functional tray menu with an explicit quit action.");
+assert(tauriMain.includes("cancel_llm_chat_completion"), "Desktop builds must expose native LLM request cancellation.");
 assert(!csp.includes("default-src *"), "Tauri CSP must not allow every origin by default.");
 assert(csp.includes("object-src 'none'"), "Tauri CSP must block object embeds.");
 assert(csp.includes("base-uri 'self'"), "Tauri CSP must constrain base-uri.");

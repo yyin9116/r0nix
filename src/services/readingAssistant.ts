@@ -137,6 +137,11 @@ function createTimeoutSignal(parentSignal: AbortSignal | undefined, timeoutMs: n
   return controller.signal;
 }
 
+function runtimeRequestId(prefix: string) {
+  const uuid = globalThis.crypto?.randomUUID?.();
+  return `${prefix}-${uuid || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`}`;
+}
+
 function joinUrl(baseUrl: string, path: string) {
   const trimmed = baseUrl.replace(/\/+$/, "");
   return trimmed.endsWith("/chat/completions") ? trimmed : `${trimmed}${path}`;
@@ -194,6 +199,11 @@ async function requestChatCompletionText(
     if (signal?.aborted) {
       throw signal.reason instanceof Error ? signal.reason : new Error("模型服务请求已取消。");
     }
+    const requestId = runtimeRequestId("llm");
+    const cancelNativeTask = () => {
+      void invoke("cancel_llm_chat_completion", { requestId }).catch(() => undefined);
+    };
+    signal?.addEventListener("abort", cancelNativeTask, { once: true });
     try {
       const text = await invoke<string>("llm_chat_completion", {
         request: {
@@ -203,6 +213,7 @@ async function requestChatCompletionText(
           temperature: config.temperature,
           maxTokens: options?.maxTokens,
           timeoutMs: options?.timeoutMs,
+          requestId,
           messages,
         },
       });
@@ -213,6 +224,8 @@ async function requestChatCompletionText(
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`模型服务连接失败：${message}`);
+    } finally {
+      signal?.removeEventListener("abort", cancelNativeTask);
     }
   }
 

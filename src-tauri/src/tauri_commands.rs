@@ -117,6 +117,7 @@ pub struct LlmChatCompletionRequest {
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
     pub timeout_ms: Option<u64>,
+    pub request_id: Option<String>,
     pub messages: Vec<LlmChatMessage>,
 }
 
@@ -527,6 +528,15 @@ async fn is_request_canceled(request_id: &str) -> bool {
     canceled.contains(request_id)
 }
 
+async fn wait_for_request_canceled(request_id: &str) {
+    loop {
+        if is_request_canceled(request_id).await {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+    }
+}
+
 async fn resolve_file_path(file_id: &str) -> Result<String, String> {
     let manager = PDF_MANAGER.lock().await;
     let info = manager
@@ -757,6 +767,15 @@ pub async fn cancel_tile_request(request_id: String) -> Result<(), String> {
     eprintln!("[cancel_tile_request] request_id={}", request_id);
     let mut canceled = CANCELED_REQUESTS.lock().await;
     canceled.insert(request_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cancel_llm_chat_completion(request_id: String) -> Result<(), String> {
+    if request_id.trim().is_empty() {
+        return Err("LLM request id cannot be empty".to_string());
+    }
+    CANCELED_REQUESTS.lock().await.insert(request_id);
     Ok(())
 }
 
@@ -1096,6 +1115,7 @@ pub async fn llm_chat_completion(request: LlmChatCompletionRequest) -> Result<St
     let max_tokens = request.max_tokens.unwrap_or(2048).clamp(1, 8192);
 
     let timeout_ms = request.timeout_ms.unwrap_or(60_000).clamp(1_000, 120_000);
+    let request_id = request.request_id.filter(|value| !value.trim().is_empty());
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(3))
         .timeout(Duration::from_millis(timeout_ms))
@@ -1123,11 +1143,25 @@ pub async fn llm_chat_completion(request: LlmChatCompletionRequest) -> Result<St
     })
     .to_string();
 
-    let response = builder
-        .body(payload)
-        .send()
-        .await
-        .map_err(|err| format!("model service request failed: {err}"))?;
+    let response = if let Some(request_id) = request_id.as_deref() {
+        let result = tokio::select! {
+            result = builder.body(payload).send() => result.map_err(|err| format!("model service request failed: {err}")),
+            _ = wait_for_request_canceled(request_id) => Err("model service request cancelled".to_string()),
+        };
+        match result {
+            Ok(response) => response,
+            Err(error) => {
+                CANCELED_REQUESTS.lock().await.remove(request_id);
+                return Err(error);
+            }
+        }
+    } else {
+        builder
+            .body(payload)
+            .send()
+            .await
+            .map_err(|err| format!("model service request failed: {err}"))?
+    };
 
     let status = response.status();
     let content_type = response
@@ -1136,10 +1170,27 @@ pub async fn llm_chat_completion(request: LlmChatCompletionRequest) -> Result<St
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let body = response
-        .text()
-        .await
-        .map_err(|err| format!("failed to read model response: {err}"))?;
+    let body = if let Some(request_id) = request_id.as_deref() {
+        let result = tokio::select! {
+            result = response.text() => result.map_err(|err| format!("failed to read model response: {err}")),
+            _ = wait_for_request_canceled(request_id) => Err("model service request cancelled".to_string()),
+        };
+        match result {
+            Ok(body) => body,
+            Err(error) => {
+                CANCELED_REQUESTS.lock().await.remove(request_id);
+                return Err(error);
+            }
+        }
+    } else {
+        response
+            .text()
+            .await
+            .map_err(|err| format!("failed to read model response: {err}"))?
+    };
+    if let Some(request_id) = request_id.as_deref() {
+        CANCELED_REQUESTS.lock().await.remove(request_id);
+    }
     if !status.is_success() {
         let details: String = body.chars().take(240).collect();
         return Err(format!(
@@ -1382,11 +1433,30 @@ pub async fn close_webview_tab(app: AppHandle, tab_id: String) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::{
-        ensure_allowed_binary_write_path, ensure_allowed_text_write_path,
-        ensure_importable_extension, ensure_markdown_extension, is_pdf_url, normalize_download_url,
-        sanitize_file_name,
+        cancel_llm_chat_completion, ensure_allowed_binary_write_path,
+        ensure_allowed_text_write_path, ensure_importable_extension, ensure_markdown_extension,
+        is_pdf_url, normalize_download_url, sanitize_file_name, wait_for_request_canceled,
+        CANCELED_REQUESTS,
     };
-    use std::path::Path;
+    use std::{path::Path, time::Duration};
+
+    #[tokio::test]
+    async fn llm_cancellation_is_visible_to_the_request_waiter() {
+        let request_id = "llm-test-cancel".to_string();
+        CANCELED_REQUESTS.lock().await.remove(&request_id);
+        let waiter_id = request_id.clone();
+        let waiter = tokio::spawn(async move {
+            wait_for_request_canceled(&waiter_id).await;
+        });
+        cancel_llm_chat_completion(request_id.clone())
+            .await
+            .expect("cancellation command should accept a valid id");
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("request waiter should observe cancellation")
+            .expect("request waiter should not panic");
+        CANCELED_REQUESTS.lock().await.remove(&request_id);
+    }
 
     #[test]
     fn detects_common_pdf_navigation_urls() {

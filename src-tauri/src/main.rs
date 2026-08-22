@@ -127,6 +127,7 @@ fn main() {
             r0nix::tauri_commands::cancel_pdf_reading_blocks,
             r0nix::tauri_commands::download_pdf_via_proxy,
             r0nix::tauri_commands::llm_chat_completion,
+            r0nix::tauri_commands::cancel_llm_chat_completion,
             r0nix::tauri_commands::create_or_show_webview_tab,
             r0nix::tauri_commands::navigate_webview_tab,
             r0nix::tauri_commands::navigate_webview_tab_history,
