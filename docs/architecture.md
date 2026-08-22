@@ -62,7 +62,7 @@ React UI
 P 级痛点、验收标准和推荐执行顺序统一记录在 [产品痛点与开发优先级](./product-priorities.md)。后续实现以该文档为主，避免在 PDF、Markdown、资源索引和模型能力之间无序扩张。
 
 - 浏览器端图像识别和图像导出仍依赖后端 HTTP API，桌面端 Rust/PyMuPDF 链路已有集成测试。
-- 1000 页后端分段提取已通过 fixture；GitHub Actions CI run `32549546089` 已在 macOS 和 Windows 上通过嵌入式 PDF runtime 测试；桌面端真实打开、滚动、缩放的 GUI 性能仍需在打包应用中测量。
+- 1000 页后端分段提取已通过 fixture；GitHub Actions CI run `32550535328` 已在 macOS 和 Windows 上通过嵌入式 PDF runtime 测试；桌面端真实打开、滚动、缩放的 GUI 性能仍需在打包应用中测量。
 - Tauri 开发构建已在当前 macOS 环境重新编译并启动，日志确认原生 runtime 和 39 页 PDF.js 加载成功；由于系统锁屏，未完成本轮桌面人工点击和截图回归。
 - Markdown 使用 `marked` GFM lexer，再由 `markdownBlocks.ts` 归一化为共享节点；HTML 以不可执行文本保留，脚注定义会恢复为 `auxiliary` 阅读块，普通引用链接定义保持原生引用语义。
 - 当前没有独立 unit-test runner 和 lint 脚本；Rust 单测中依赖嵌入 Python 的测试仍被显式忽略。
