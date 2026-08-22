@@ -36,6 +36,7 @@ PDF 阅读器、Markdown 编辑器、图片导出和模型服务都服务于这�
 - 当前证据：后端 1000 页分段测试、前端 E2E、macOS release `.app` 启动和 PDF.js 开发运行链路均已通过；GitHub Actions run `32553879761` 已完成 Windows 安装 smoke、macOS bundle/DMG 构建和 artifact 上传；真实 100/500/1000 页 GUI 帧率基准仍是发布前的测量项。
 - 打开失败边界：PDF.js 无法加载时会释放 Rust PDF handle 并显式失败，避免多个损坏或不兼容 PDF 叠加后持续占用资源。
 - 打开性能边界：`open_pdf` 只做文件元数据登记；PyMuPDF 页数由 `get_page_count` 按需解析并缓存，避免打开阶段重复扫描大 PDF。页数任务仍属于可取消队列的后续优化范围。
+- 页数失败边界：按需页数解析超过 30 秒会显式失败；底层 `spawn_blocking` 在 Rust/PyMuPDF 不提供协作取消前仍可能完成后台收尾，属于剩余资源生命周期风险。
 - 性能补充：首屏 tab 与 PDF.js 均按需加载，生产首屏主 chunk 已降至约 380 KB；嵌入 Python runtime 禁止在 Tauri 监视目录写入 `__pycache__`，避免首次解析 PDF 触发原生开发进程重编译；大文档真实 GUI 帧率仍需在桌面 runner 测量。
 
 ### P0-2 PDF 图片导出语义正确

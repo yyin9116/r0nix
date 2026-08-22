@@ -569,10 +569,13 @@ pub async fn get_page_count(file_id: String) -> Result<usize, String> {
         return Ok(known_page_count);
     }
 
-    let page_count = tokio::task::spawn_blocking(move || get_pdf_page_count(&path))
-        .await
-        .map_err(|err| format!("page count task failed: {err}"))?
-        .map_err(|err| format!("page count failed: {err}"))?;
+    let page_count_task = tokio::task::spawn_blocking(move || get_pdf_page_count(&path));
+    let page_count = match tokio::time::timeout(Duration::from_secs(30), page_count_task).await {
+        Ok(result) => result
+            .map_err(|err| format!("page count task failed: {err}"))?
+            .map_err(|err| format!("page count failed: {err}"))?,
+        Err(_) => return Err("page count timed out after 30 seconds".to_string()),
+    };
     let mut manager = PDF_MANAGER.lock().await;
     manager
         .set_page_count(&file_id, page_count)
