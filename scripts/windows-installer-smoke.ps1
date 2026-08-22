@@ -16,11 +16,24 @@ if ($install.ExitCode -ne 0) {
   throw "NSIS installer failed with exit code $($install.ExitCode)."
 }
 
-$installedBinaries = @(Get-ChildItem -Path $installDir -Filter "r0nix.exe" -File -Recurse -ErrorAction SilentlyContinue)
+$candidateRoots = @(
+  $installDir,
+  (Join-Path $env:ProgramFiles "r0nix"),
+  (Join-Path ${env:ProgramFiles(x86)} "r0nix"),
+  (Join-Path $env:LOCALAPPDATA "r0nix")
+) | Where-Object { $_ -and (Test-Path $_ -PathType Container) } | Select-Object -Unique
+
+$installedBinaries = @(
+  foreach ($root in $candidateRoots) {
+    Get-ChildItem -Path $root -Filter "r0nix.exe" -File -Recurse -ErrorAction SilentlyContinue
+  }
+) | Sort-Object -Property FullName -Unique
 if ($installedBinaries.Count -ne 1) {
-  $tree = Get-ChildItem -Path $installDir -Recurse -Force -ErrorAction SilentlyContinue |
-    Select-Object -ExpandProperty FullName
-  throw "Expected exactly one installed r0nix.exe, found $($installedBinaries.Count). Installation tree:`n$($tree -join "`n")"
+  $tree = foreach ($root in $candidateRoots) {
+    Get-ChildItem -Path $root -Recurse -Force -ErrorAction SilentlyContinue |
+      Select-Object -ExpandProperty FullName
+  }
+  throw "Expected exactly one installed r0nix.exe under $($candidateRoots -join ", "), found $($installedBinaries.Count). Installation tree:`n$($tree -join "`n")"
 }
 
 $binary = $installedBinaries[0].FullName
