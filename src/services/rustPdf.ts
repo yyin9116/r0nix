@@ -126,9 +126,14 @@ export async function exportPageSvgCrop(
 
 export async function getPageImages(
   fileId: string,
-  pageNo: number
+  pageNo: number,
+  requestId?: string,
 ): Promise<string> {
-  return await invoke<string>("get_page_images", { fileId, pageNo });
+  return await invoke<string>("get_page_images", { fileId, pageNo, requestId });
+}
+
+export async function cancelPdfImageScan(requestId: string): Promise<void> {
+  await invoke("cancel_pdf_image_scan", { requestId });
 }
 
 export async function getPdfReadingBlocks(

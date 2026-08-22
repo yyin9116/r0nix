@@ -26,6 +26,8 @@ static CANCELED_REQUESTS: once_cell::sync::Lazy<Mutex<HashSet<String>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashSet::new()));
 static PDF_BLOCK_CANCEL_FLAGS: once_cell::sync::Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
+static PDF_IMAGE_CANCEL_FLAGS: once_cell::sync::Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 static WEBVIEW_TABS: once_cell::sync::Lazy<Mutex<HashMap<String, String>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 const DEFAULT_NATIVE_WEBVIEW_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 Edg/132.0.0.0";
@@ -788,14 +790,58 @@ pub async fn export_page_svg_crop(
 }
 
 #[tauri::command]
-pub async fn get_page_images(file_id: String, page_no: usize) -> Result<String, String> {
-    eprintln!("[get_page_images] file_id={} page={}", file_id, page_no);
+pub async fn get_page_images(
+    file_id: String,
+    page_no: usize,
+    request_id: Option<String>,
+) -> Result<String, String> {
+    eprintln!(
+        "[get_page_images] file_id={} page={} request_id={:?}",
+        file_id, page_no, request_id
+    );
     let path = resolve_file_path(&file_id).await?;
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    if let Some(request_id) = request_id.as_deref() {
+        if request_id.trim().is_empty() {
+            return Err("image scan request id cannot be empty".to_string());
+        }
+        PDF_IMAGE_CANCEL_FLAGS
+            .lock()
+            .await
+            .insert(request_id.to_string(), cancel_flag.clone());
+    }
 
-    run_pdf_blocking("get page images", move || {
-        get_page_images_json(&path, page_no)
-    })
-    .await
+    let cancel_flag_for_task = cancel_flag.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        get_page_images_json(&path, page_no, Some(cancel_flag_for_task))
+    });
+    let result = match tokio::time::timeout(PDF_OPERATION_TIMEOUT, task).await {
+        Ok(Ok(result)) => result.map_err(|err| format!("get page images failed: {err}")),
+        Ok(Err(err)) => Err(format!("get page images task failed: {err}")),
+        Err(_) => {
+            cancel_flag.store(true, Ordering::Release);
+            Err(format!(
+                "get page images timed out after {} seconds",
+                PDF_OPERATION_TIMEOUT.as_secs()
+            ))
+        }
+    };
+    if let Some(request_id) = request_id {
+        PDF_IMAGE_CANCEL_FLAGS.lock().await.remove(&request_id);
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn cancel_pdf_image_scan(request_id: String) -> Result<(), String> {
+    if request_id.trim().is_empty() {
+        return Err("image scan request id cannot be empty".to_string());
+    }
+    if let Some(flag) = PDF_IMAGE_CANCEL_FLAGS.lock().await.get(&request_id) {
+        flag.store(true, Ordering::Release);
+    }
+    eprintln!("[cancel_pdf_image_scan] request_id={}", request_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1375,7 +1421,7 @@ mod tests {
             .expect("create PDF fixture");
 
         let listed: serde_json::Value = serde_json::from_str(
-            &get_page_images_json(path.to_str().expect("fixture path"), 1)
+            &get_page_images_json(path.to_str().expect("fixture path"), 1, None)
                 .expect("list PDF images"),
         )
         .expect("valid image list JSON");
@@ -1454,6 +1500,36 @@ mod tests {
             svg.len() < 50_000,
             "crop unexpectedly expanded to page-sized SVG"
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[ignore = "requires the embedded Python/PyMuPDF runtime"]
+    fn image_scan_honors_cancellation_probe() {
+        use crate::py_render::{ensure_test_pdf_with_image, get_page_images_json};
+        use base64::Engine as _;
+        use std::sync::{atomic::AtomicBool, Arc};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let path = std::env::temp_dir().join(format!(
+            "r0nix-image-cancel-fixture-{}.pdf",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        let image_bytes = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+            .expect("fixture PNG");
+        ensure_test_pdf_with_image(&path, &image_bytes).expect("create image fixture");
+        let result = get_page_images_json(
+            path.to_str().expect("fixture path"),
+            1,
+            Some(Arc::new(AtomicBool::new(true))),
+        );
+        assert!(result
+            .expect_err("cancelled image scan must fail")
+            .contains("r0nix-cancelled"));
         let _ = std::fs::remove_file(path);
     }
 

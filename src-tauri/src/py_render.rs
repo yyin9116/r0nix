@@ -267,7 +267,11 @@ result = svg
     .map_err(|err| format!("pymupdf svg crop export failed: {err}"))
 }
 
-pub fn get_page_images_json(path: &str, page_no: usize) -> Result<String, String> {
+pub fn get_page_images_json(
+    path: &str,
+    page_no: usize,
+    cancel_flag: Option<Arc<AtomicBool>>,
+) -> Result<String, String> {
     ensure_python_runtime();
     let path_owned = path.to_string();
 
@@ -275,11 +279,20 @@ pub fn get_page_images_json(path: &str, page_no: usize) -> Result<String, String
         let locals = PyDict::new_bound(py);
         locals.set_item("path", path_owned.as_str())?;
         locals.set_item("page_no", page_no as i32)?;
+        if let Some(flag) = cancel_flag {
+            locals.set_item("cancel_probe", Py::new(py, CancellationProbe { flag })?)?;
+        } else {
+            locals.set_item("cancel_probe", py.None())?;
+        }
 
         py.run_bound(
             r#"
 import fitz
 import json
+
+def check_cancelled():
+    if cancel_probe is not None and cancel_probe.is_cancelled():
+        raise RuntimeError("r0nix-cancelled")
 
 doc = fitz.open(path)
 try:
@@ -329,6 +342,7 @@ try:
         return merged_rects
 
     for image in page.get_images(full=True):
+        check_cancelled()
         xref = int(image[0])
         width = int(image[2]) if len(image) > 2 else 0
         height = int(image[3]) if len(image) > 3 else 0
@@ -350,6 +364,7 @@ try:
 
         normalized_rects = []
         for rect in rects:
+            check_cancelled()
             left = float(min(rect.x0, rect.x1))
             right = float(max(rect.x0, rect.x1))
             top = float(min(rect.y0, rect.y1))
@@ -378,6 +393,7 @@ try:
         drawings = []
 
     for drawing in drawings:
+        check_cancelled()
         rect = drawing.get("rect")
         if rect is None:
             continue

@@ -2591,13 +2591,13 @@ export function PDFViewer({
   }, [fileId, storeReadingBlocks, totalPages]);
 
   const detectPageImages = useCallback(
-    async (pageNo: number) => {
+    async (pageNo: number, signal?: AbortSignal) => {
       if (!fileId) return;
       const target = clampPage(pageNo, totalPages);
       if (pdfImagesByPageRef.current[target] !== undefined || imageDetectionInFlightRef.current.has(target)) return;
       imageDetectionInFlightRef.current.add(target);
       try {
-        const { images } = await api.getPDFImages(fileId, target);
+        const { images } = await api.getPDFImages(fileId, target, signal);
         setPdfImagesByPage((prev) => {
           const nextImages = images.map((image, index) => ({
             ...image,
@@ -2610,6 +2610,9 @@ export function PDFViewer({
         });
         return images;
       } catch (error) {
+        if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+          return;
+        }
         const message = error instanceof Error ? error.message : String(error);
         setImageLabelStatus({ kind: "error", message: t.imageLabelFailed.replace("{message}", message) });
         throw error;
@@ -2891,7 +2894,9 @@ export function PDFViewer({
       prefetchImageLabelsAround(page);
       return;
     }
-    void detectPageImages(page);
+    const controller = new AbortController();
+    void detectPageImages(page, controller.signal);
+    return () => controller.abort();
   }, [detectPageImages, fileId, isImageLabelReader, page, pdfDoc, prefetchImageLabelsAround]);
 
   useEffect(() => {
@@ -2946,7 +2951,7 @@ export function PDFViewer({
             resourceTextByPageRef.current = next;
             return next;
           });
-          await detectPageImages(pageNo);
+          await detectPageImages(pageNo, controller.signal);
         } catch {
           if (!controller.signal.aborted && resourcesScanRef.current === scanId) failedPages.push(pageNo);
         } finally {

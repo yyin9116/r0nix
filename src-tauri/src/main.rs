@@ -121,6 +121,7 @@ fn main() {
             r0nix::tauri_commands::export_page_svg,
             r0nix::tauri_commands::export_page_svg_crop,
             r0nix::tauri_commands::get_page_images,
+            r0nix::tauri_commands::cancel_pdf_image_scan,
             r0nix::tauri_commands::get_pdf_reading_blocks,
             r0nix::tauri_commands::cancel_pdf_reading_blocks,
             r0nix::tauri_commands::download_pdf_via_proxy,

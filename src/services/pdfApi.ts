@@ -574,14 +574,37 @@ export async function getPDFInfo(fileId: string): Promise<{
 
 export async function getPDFImages(
   fileId: string,
-  pageNumber?: number
+  pageNumber?: number,
+  signal?: AbortSignal,
 ): Promise<{ images: PDFImageInfo[] }> {
-  if (isTauri) {
-    if (!pageNumber || pageNumber < 1) return { images: [] };
-    const json = await rustPdf.getPageImages(fileId, pageNumber);
-    const raw = JSON.parse(json) as unknown;
-    const images = Array.isArray(raw)
-      ? raw
+  const throwIfAborted = () => {
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError");
+    }
+  };
+  throwIfAborted();
+  const requestId = isTauri ? generateRuntimeId("pdf-images") : undefined;
+  const cancelNativeTask = () => {
+    if (!requestId) return;
+    void rustPdf.cancelPdfImageScan(requestId).catch((error) => {
+      debugWarn("api.getPDFImages", "failed to cancel native image scan", error);
+    });
+  };
+  signal?.addEventListener("abort", cancelNativeTask, { once: true });
+  try {
+    if (isTauri) {
+      if (!pageNumber || pageNumber < 1) return { images: [] };
+      let json: string;
+      try {
+        json = await rustPdf.getPageImages(fileId, pageNumber, requestId);
+      } catch (error) {
+        throwIfAborted();
+        throw error;
+      }
+      throwIfAborted();
+      const raw = JSON.parse(json) as unknown;
+      const images = Array.isArray(raw)
+        ? raw
           .map((item): PDFImageInfo | null => {
             if (!item || typeof item !== 'object') return null;
             const obj = item as Record<string, unknown>;
@@ -601,21 +624,24 @@ export async function getPDFImages(
             };
           })
           .filter((item): item is PDFImageInfo => Boolean(item))
-      : [];
-    return { images };
-  }
+        : [];
+      return { images };
+    }
 
-  const response = await fetch(`http://localhost:8000/api/pdf/${fileId}/images`);
-  if (!response.ok) {
-    throw new Error(`Failed to get PDF images: ${response.statusText}`);
-  }
+    const response = await fetch(`http://localhost:8000/api/pdf/${fileId}/images`, { signal });
+    if (!response.ok) {
+      throw new Error(`Failed to get PDF images: ${response.statusText}`);
+    }
 
-  const payload = (await response.json()) as { images?: PDFImageInfo[] };
-  const images = Array.isArray(payload.images) ? payload.images : [];
-  if (!pageNumber) return { images };
-  return {
-    images: images.filter((img) => Number(img.pageNumber) === pageNumber),
-  };
+    const payload = (await response.json()) as { images?: PDFImageInfo[] };
+    const images = Array.isArray(payload.images) ? payload.images : [];
+    if (!pageNumber) return { images };
+    return {
+      images: images.filter((img) => Number(img.pageNumber) === pageNumber),
+    };
+  } finally {
+    signal?.removeEventListener("abort", cancelNativeTask);
+  }
 }
 
 export async function getPDFReadingBlocks(
