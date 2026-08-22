@@ -1518,6 +1518,7 @@ export function PDFViewer({
   }>({ status: "", completed: 0, total: 0, results: [], isLoading: false });
   const [sidePanelView, setSidePanelView] = useState<"notes" | "translation" | "resources">("notes");
   const [linksByPage, setLinksByPage] = useState<Record<number, DocumentLinkResource[]>>({});
+  const [resourceTextByPage, setResourceTextByPage] = useState<Record<number, string>>({});
   const [resourceScan, setResourceScan] = useState<ResourceScanState>({ status: "idle", completed: 0, total: 0, failedPages: [] });
   const [resourceScanAttempt, setResourceScanAttempt] = useState(0);
   const t = I18N[language];
@@ -1563,6 +1564,7 @@ export function PDFViewer({
   const resourceScanAbortRef = useRef<AbortController | null>(null);
   const resourceCacheLoadedRef = useRef(false);
   const linksByPageRef = useRef<Record<number, DocumentLinkResource[]>>({});
+  const resourceTextByPageRef = useRef<Record<number, string>>({});
   const imageTargetAtPointRef = useRef<(pageNo: number, clientX: number, clientY: number) => ImageContextTarget | null>(() => null);
 
   const hasDoc = Boolean(fileId && pdfDoc);
@@ -1655,6 +1657,8 @@ export function PDFViewer({
     setIsNotesOpen(false);
     setLinksByPage({});
     linksByPageRef.current = {};
+    setResourceTextByPage({});
+    resourceTextByPageRef.current = {};
     setResourceScan({ status: "idle", completed: 0, total: 0, failedPages: [] });
     setResourceScanAttempt(0);
     setPdfImagesByPage({});
@@ -2866,18 +2870,28 @@ export function PDFViewer({
     resourceScanAbortRef.current?.abort();
     resourceScanAbortRef.current = controller;
     setResourceScan({ status: "scanning", completed: 0, total: totalPages, failedPages: [] });
-    void ensureReadingBlocksLoaded(controller.signal).catch(() => undefined);
     void (async () => {
       const failedPages: number[] = [];
-      for (let pageNo = 1; pageNo <= totalPages; pageNo += 1) {
+      let completed = 0;
+      let nextPage = 1;
+      const scanPage = async (pageNo: number) => {
         if (controller.signal.aborted || resourcesScanRef.current !== scanId) return;
-        if (pdfImagesByPageRef.current[pageNo] !== undefined && Object.prototype.hasOwnProperty.call(linksByPageRef.current, pageNo)) {
-          setResourceScan((previous) => ({ ...previous, completed: pageNo }));
-          continue;
+        if (
+          pdfImagesByPageRef.current[pageNo] !== undefined &&
+          Object.prototype.hasOwnProperty.call(linksByPageRef.current, pageNo) &&
+          Object.prototype.hasOwnProperty.call(resourceTextByPageRef.current, pageNo)
+        ) {
+          completed += 1;
+          setResourceScan((previous) => ({ ...previous, completed, failedPages: [...failedPages] }));
+          return;
         }
         try {
           const pageProxy = await pdfDoc.getPage(pageNo);
-          const annotations = await pageProxy.getAnnotations();
+          const [annotations, textContent] = await Promise.all([
+            pageProxy.getAnnotations(),
+            pageProxy.getTextContent(),
+          ]);
+          if (controller.signal.aborted || resourcesScanRef.current !== scanId) return;
           const links = (annotations as Array<Record<string, unknown>>)
             .filter((item) => item.subtype === "Link" && typeof item.url === "string" && item.url)
             .map((item, index) => ({
@@ -2886,21 +2900,39 @@ export function PDFViewer({
               documentId,
               resourceId: `${documentId || fileId}:link:${pageNo}:${index}:${item.url as string}`,
             }));
+          const text = (textContent.items as Array<Record<string, unknown>>)
+            .map((item) => (typeof item.str === "string" ? item.str : ""))
+            .join(" ")
+            .replace(/\s+/g, " ")
+            .trim();
           setLinksByPage((previous) => {
             const next = { ...previous, [pageNo]: links };
             linksByPageRef.current = next;
             return next;
           });
+          setResourceTextByPage((previous) => {
+            const next = { ...previous, [pageNo]: text };
+            resourceTextByPageRef.current = next;
+            return next;
+          });
           await detectPageImages(pageNo);
         } catch {
-          failedPages.push(pageNo);
+          if (!controller.signal.aborted && resourcesScanRef.current === scanId) failedPages.push(pageNo);
+        } finally {
+          if (!controller.signal.aborted && resourcesScanRef.current === scanId) {
+            completed += 1;
+            setResourceScan((previous) => ({ ...previous, completed, failedPages: [...failedPages] }));
+          }
         }
-        setResourceScan((previous) => ({
-          ...previous,
-          completed: pageNo,
-          failedPages: [...failedPages],
-        }));
-      }
+      };
+      const worker = async () => {
+        while (!controller.signal.aborted && resourcesScanRef.current === scanId) {
+          const pageNo = nextPage++;
+          if (pageNo > totalPages) return;
+          await scanPage(pageNo);
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(3, totalPages) }, () => worker()));
       if (!controller.signal.aborted && resourcesScanRef.current === scanId) {
         setResourceScan({ status: "ready", completed: totalPages, total: totalPages, failedPages });
       }
@@ -2910,7 +2942,7 @@ export function PDFViewer({
       if (resourceScanAbortRef.current === controller) resourceScanAbortRef.current = null;
       setResourceScan((previous) => previous.status === "scanning" ? { ...previous, status: "cancelled" } : previous);
     };
-  }, [detectPageImages, ensureReadingBlocksLoaded, fileId, pdfDoc, resourceScanAttempt, sidePanelView, totalPages]);
+  }, [detectPageImages, documentId, fileId, pdfDoc, resourceScanAttempt, sidePanelView, totalPages]);
 
   const documentLinks = useMemo(
     () => Object.values(linksByPage).flat().filter((item, index, all) => all.findIndex((candidate) => candidate.url === item.url) === index),
@@ -2930,12 +2962,15 @@ export function PDFViewer({
     [getVisibleImagesForPage, pdfImagesByPage, readingBlocksVersion, totalPages]
   );
   const documentDois = useMemo<DocumentDoiResource[]>(() => {
-    const source = Array.from(readingBlocksByPageRef.current.values()).flat().map((block) => block.text).join("\n");
+    const source = [
+      ...Array.from(readingBlocksByPageRef.current.values()).flat().map((block) => block.text),
+      ...Object.values(resourceTextByPage),
+    ].join("\n");
     return Array.from(new Set(source.match(/\b10\.\d{4,9}\/[\-._;()/:A-Z0-9]+/gi) || []))
       .map((doi) => doi.replace(/[.,;:)]+$/, ""))
       .filter(Boolean)
       .map((doi) => ({ doi, documentId, resourceId: `${documentId || fileId}:doi:${doi}` }));
-  }, [documentId, fileId, readingBlocksVersion]);
+  }, [documentId, fileId, readingBlocksVersion, resourceTextByPage]);
 
   const renderAnnotationCard = (annotation: ReaderAnnotation) => (
     <div
