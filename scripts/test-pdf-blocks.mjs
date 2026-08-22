@@ -57,6 +57,16 @@ assert.equal(twoColumnBlocks.length, 2, "double-column text must produce two par
 assert.ok(twoColumnBlocks.every((block) => !block.text.includes("Right column") || !block.text.includes("Left column")));
 assert.ok(twoColumnBlocks.every((block) => block.rect && block.rect.width < 0.55), "block rect must stay within one column");
 
+const singleColumnSpans = [
+  new TestSpan("Single column left edge", rect(24, 30, 220, 12)),
+  new TestSpan("Single column right edge", rect(270, 30, 246, 12)),
+  new TestSpan("Single column continuation", rect(24, 48, 492, 12)),
+];
+const singleColumnBlocks = buildDomPdfReadingBlocks(new TestLayer(singleColumnSpans, rect(0, 0, 540, 700)), 8);
+assert.equal(singleColumnBlocks.length, 1, "wide single-column text must remain one reading block");
+assert.ok(singleColumnBlocks[0].text.includes("right edge"), "wide single-column block must retain its right edge");
+assert.ok(singleColumnBlocks[0].rect && singleColumnBlocks[0].rect.width > 0.8, "wide single-column bbox must retain its full width");
+
 const highlightRects = groupPdfTextHighlightRects([
   { left: 20, top: 20, right: 100, bottom: 32 },
   { left: 104, top: 20, right: 180, bottom: 32 },

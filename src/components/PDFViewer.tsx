@@ -758,21 +758,18 @@ function collectPdfParagraphSpansFromTarget(target: HTMLElement, cachedSpans?: P
   // line span both columns and produces a partial/oversized hover rectangle.
   const targetLineSpans = [...targetLine.spans].sort((left, right) => left.rect.left - right.rect.left);
   const medianHeight = targetLineSpans[Math.floor(targetLineSpans.length / 2)]?.rect.height || targetSpan.rect.height;
-  const targetIndex = targetLineSpans.findIndex((item) => item.node === targetSpan.node);
-  let segmentStart = 0;
-  let segmentEnd = targetLineSpans.length;
-  for (let index = 1; index <= targetLineSpans.length; index += 1) {
-    const previous = targetLineSpans[index - 1];
-    const current = targetLineSpans[index];
-    if (!current || current.rect.left - previous.rect.right > Math.max(18, medianHeight * 2.4)) {
-      if (targetIndex >= segmentStart && targetIndex < index) {
-        segmentEnd = index;
-        break;
-      }
-      segmentStart = index;
+  const lineSegments: PdfTextSpan[][] = [];
+  for (const span of targetLineSpans) {
+    const current = lineSegments[lineSegments.length - 1];
+    const previous = current?.[current.length - 1];
+    if (!previous || span.rect.left - previous.rect.right <= Math.max(18, medianHeight * 2.4)) {
+      if (current) current.push(span);
+      else lineSegments.push([span]);
+    } else {
+      lineSegments.push([span]);
     }
   }
-  const columnLine = targetLineSpans.slice(segmentStart, segmentEnd);
+  const columnLine = lineSegments.find((segment) => segment.some((item) => item.node === targetSpan.node)) || [targetSpan];
   const targetColumnCenter = (
     Math.min(...columnLine.map((item) => item.rect.left)) +
     Math.max(...columnLine.map((item) => item.rect.right))
@@ -780,7 +777,14 @@ function collectPdfParagraphSpansFromTarget(target: HTMLElement, cachedSpans?: P
   const columnSpans = spans.filter((item) =>
     Math.abs(item.rect.left + item.rect.width / 2 - targetColumnCenter) <= layerRect.width * 0.28
   );
-  const scopedColumnSpans = columnSpans.length > 0 ? columnSpans : columnLine;
+  // A single-column line can legitimately span most of the page. The fixed
+  // center-radius heuristic is only valid after a real column split; using it
+  // for a wide line drops the paragraph's left and right text spans.
+  const scopedColumnSpans = lineSegments.length === 1
+    ? spans
+    : columnSpans.length > 0
+      ? columnSpans
+      : columnLine;
   const columnLeft = Math.min(...scopedColumnSpans.map((item) => item.rect.left));
   const columnRight = Math.max(...scopedColumnSpans.map((item) => item.rect.right));
   const columnPadding = Math.max(8, medianHeight * 1.8);

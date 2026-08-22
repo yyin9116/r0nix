@@ -40,6 +40,7 @@ PDF 阅读器、Markdown 编辑器、图片导出和模型服务都服务于这�
 - 方案：页面占位高度 + 可见页虚拟化；前后各保留有限 overscan；资源和块提取使用可取消队列。
 - 验收：100、500、1000 页样本均可打开；滚动不创建全量 canvas；缩放期间不跳页、不出现空白页；任务可取消。
 - 当前证据：后端 1000 页分段测试、前端 E2E、macOS release `.app` 启动和 PDF.js 开发运行链路均已通过；GitHub Actions run `32553879761` 已完成 Windows 安装 smoke、macOS bundle/DMG 构建和 artifact 上传；真实 100/500/1000 页 GUI 帧率基准仍是发布前的测量项。
+- 选择与块几何补强：单栏宽段落不再使用双栏中心过滤；macOS WebKit selectable text layer 明确允许跨 span 原生选择，相关真实桌面拖选仍需人工回归。
 - 打开失败边界：PDF.js 无法加载时会释放 Rust PDF handle 并显式失败，避免多个损坏或不兼容 PDF 叠加后持续占用资源。
 - 打开性能边界：`open_pdf` 只做文件元数据登记；PyMuPDF 页数由 `get_page_count` 按需解析并缓存，避免打开阶段重复扫描大 PDF。页数任务仍属于可取消队列的后续优化范围。
 - 首屏绘制边界：PDF.js canvas 不等待链接注释解析；链接命中层异步补齐，注释解析异常不会阻塞正文显示。

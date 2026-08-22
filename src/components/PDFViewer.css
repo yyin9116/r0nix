@@ -318,6 +318,21 @@
   -webkit-user-select: text;
 }
 
+/* WebKit can otherwise treat each absolutely positioned PDF.js span as an
+ * isolated selection island. Keep the native text layer selectable as one DOM
+ * tree; the page shell still clips visual overflow at its boundary. */
+.page-text-overlay.is-selectable .textLayer {
+  overflow: visible;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.page-text-overlay.is-selectable .textLayer span,
+.page-text-overlay.is-selectable .textLayer br {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 .page-text-overlay.is-assist,
 .page-text-overlay.is-assist .textLayer,
 .page-text-overlay.is-assist .textLayer span,
