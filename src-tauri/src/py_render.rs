@@ -478,6 +478,7 @@ page.insert_image(fitz.Rect(20, 20, 100, 100), stream=image_bytes)
 # used to hide banners and figure labels from the export list.
 page.insert_image(fitz.Rect(110, 160, 195, 168), stream=image_bytes)
 page.draw_rect(fitz.Rect(120, 120, 180, 180), color=(0.1, 0.3, 0.8), width=2)
+page.draw_rect(fitz.Rect(183, 120, 197, 180), color=(0.8, 0.2, 0.2), width=2)
 doc.save(path)
 doc.close()
 "#,

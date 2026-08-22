@@ -1337,6 +1337,29 @@ mod tests {
             listed.as_array().is_some_and(|items| items.len() >= 2),
             "wide raster resources must remain discoverable"
         );
+        let vector_items = listed
+            .as_array()
+            .expect("image list array")
+            .iter()
+            .filter(|item| item["source"] == "vector")
+            .collect::<Vec<_>>();
+        assert!(
+            vector_items.len() >= 2,
+            "separate vector paths must remain separate resources"
+        );
+        assert!(
+            vector_items.iter().all(|item| {
+                let bbox = item["bbox"].as_array();
+                bbox.and_then(|values| values.get(2))
+                    .and_then(serde_json::Value::as_f64)
+                    .zip(
+                        bbox.and_then(|values| values.get(0))
+                            .and_then(serde_json::Value::as_f64),
+                    )
+                    .is_some_and(|(right, left)| right - left < 70.0)
+            }),
+            "nearby vector paths must not be merged into a large candidate"
+        );
         let xref = image["xref"].as_u64().expect("image xref") as usize;
         assert_eq!(image["extension"], "png");
         assert_eq!(image["width"], 1);
