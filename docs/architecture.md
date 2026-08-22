@@ -70,6 +70,7 @@ React UI
 - PDF 全文搜索按页检查取消状态，切换文档或卸载阅读器时会中止旧搜索；缓存文档缺失会显式报错，不再静默返回空阅读块。
 - SVG 局部导出不依赖当前 PyMuPDF 不支持的 `clip` 参数，改用 SVG viewport 裁剪，并通过嵌入 Python fixture 验证。
 - xref 图片识别保留宽幅/条带型 raster 资源；PDF.js hover 几何按行和连续文字片段拆分，相关双栏与断行规则由纯服务 fixture 覆盖。
+- PDF 页面 canvas 绘制不再等待可选链接注释解析；链接命中层在页面显示后异步补齐，慢或损坏的注释不会阻塞正文首屏。
 - 矢量资源识别只合并几乎重合的重复路径，不再按邻近距离把相邻图表、边框或文字路径拼成大块；复杂矢量页仍以多个局部候选交给资源面板筛选。
 - Markdown block parser 使用内容稳定 ID，节点结构包含 `kind/depth/tableAlign/sourcePath`，预览、翻译和阅读辅助共享同一节点序列。
 

@@ -1105,9 +1105,10 @@ function PageCanvas({
 
       if (active && (linksEnabled || onPageLinks) && linkHost) {
         const tokenLinks = ++linkTokenRef.current;
-        try {
-          const annotations = await page.getAnnotations();
-          if (tokenLinks === linkTokenRef.current) {
+        void (async () => {
+          try {
+            const annotations = await page.getAnnotations();
+            if (cancelled || token !== tokenRef.current || tokenLinks !== linkTokenRef.current) return;
             const links: Array<{ url: string }> = [];
             const overlay = linksEnabled && onOpenExternal ? document.createElement("div") : null;
             if (overlay) {
@@ -1158,10 +1159,10 @@ function PageCanvas({
 
             onPageLinks?.(pageNo, links);
             linkHost.replaceChildren(...(overlay ? [overlay] : []));
+          } catch {
+            // Link overlays are optional; a slow or malformed annotation must not block page paint.
           }
-        } catch {
-          // ignore link overlay failures
-        }
+        })();
       }
 
       const canvas = canvasRef.current;
