@@ -1800,34 +1800,6 @@ export function PDFViewer({
   const isTranslationReader = readerMode === "translation";
   const isImageLabelReader = readerMode === "image-label";
 
-  const scrollPageToAnchor = useCallback(
-    (targetPage: number, options?: { vertical?: "top" | "center"; emit?: boolean }) => {
-      const root = scrollRef.current;
-      const node = pageRefs.current.get(clampPage(targetPage, totalPages));
-      if (!root || !node) return false;
-      const rootRect = root.getBoundingClientRect();
-      const nodeRect = node.getBoundingClientRect();
-      const verticalOffset =
-        options?.vertical === "top"
-          ? 12
-          : Math.max(12, (root.clientHeight - node.clientHeight) / 2);
-      const nextTop = Math.max(0, root.scrollTop + (nodeRect.top - rootRect.top) - verticalOffset);
-      const nextLeft = Math.max(0, root.scrollLeft + (nodeRect.left - rootRect.left) - Math.max(0, (root.clientWidth - node.clientWidth) / 2));
-      root.scrollTo({ top: nextTop, left: nextLeft, behavior: "auto" });
-      if (options?.emit !== false) {
-        emitViewState({
-          page: clampPage(targetPage, totalPages),
-          totalPages,
-          zoom,
-          scrollTop: nextTop,
-          scrollLeft: nextLeft,
-        });
-      }
-      return true;
-    },
-    [emitViewState, totalPages, zoom]
-  );
-
   useEffect(() => {
     return () => {
       if (viewStateTimerRef.current !== null) {
@@ -1979,13 +1951,31 @@ export function PDFViewer({
     scheduleSync();
   }, [isGestureRightDown, scheduleSync, totalPages, zoom, pageSizes]);
 
-  const recenterVisiblePageSoon = useCallback(() => {
+  const preserveVisiblePagePositionSoon = useCallback(() => {
     if (!fileId) return;
+    const root = scrollRef.current;
     const targetPage = clampPage(lockedZoomPageRef.current ?? pageRef.current, totalPages);
+    const node = pageRefs.current.get(targetPage);
+    if (!root || !node) return;
+    const rootRect = root.getBoundingClientRect();
+    const nodeRect = node.getBoundingClientRect();
+    const viewportOffset = {
+      top: nodeRect.top - rootRect.top,
+      left: nodeRect.left - rootRect.left,
+    };
     window.requestAnimationFrame(() => {
-      scrollPageToAnchor(targetPage, { vertical: "center", emit: false });
+      const nextRoot = scrollRef.current;
+      const nextNode = pageRefs.current.get(targetPage);
+      if (!nextRoot || !nextNode) return;
+      const nextRootRect = nextRoot.getBoundingClientRect();
+      const nextNodeRect = nextNode.getBoundingClientRect();
+      nextRoot.scrollBy({
+        top: (nextNodeRect.top - nextRootRect.top) - viewportOffset.top,
+        left: (nextNodeRect.left - nextRootRect.left) - viewportOffset.left,
+        behavior: "auto",
+      });
     });
-  }, [fileId, scrollPageToAnchor, totalPages]);
+  }, [fileId, totalPages]);
 
 
   useLayoutEffect(() => {
@@ -3117,7 +3107,7 @@ export function PDFViewer({
               className="p-1.5 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors"
               onClick={() => {
                 setIsLeftSidebarOpen((value) => !value);
-                recenterVisiblePageSoon();
+                preserveVisiblePagePositionSoon();
               }}
               title={isLeftSidebarOpen ? t.hideLeftSidebar : t.showLeftSidebar}
             >
@@ -3266,7 +3256,7 @@ export function PDFViewer({
                 onClick={() => {
                   setReaderMode("reader");
                   setActiveTool("select");
-                  recenterVisiblePageSoon();
+                  preserveVisiblePagePositionSoon();
                 }}
                 title={t.readerView}
                 aria-label={t.readerView}
@@ -3285,7 +3275,7 @@ export function PDFViewer({
                   setActiveTool("select");
                   setIsNotesOpen(true);
                   setSidePanelView("translation");
-                  recenterVisiblePageSoon();
+                  preserveVisiblePagePositionSoon();
                 }}
                 title={t.translationView}
                 aria-label={t.translationView}
@@ -3303,7 +3293,7 @@ export function PDFViewer({
                   setReaderMode("image-label");
                   setActiveTool("hand");
                   prefetchImageLabelsAround(pageRef.current);
-                  recenterVisiblePageSoon();
+                  preserveVisiblePagePositionSoon();
                 }}
                 title={t.imageLabelView}
                 aria-label={t.imageLabelView}
@@ -3313,7 +3303,7 @@ export function PDFViewer({
             </div>
             <button className={`p-1.5 rounded-md transition-colors ${isNotesOpen ? "text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-800" : "text-zinc-400 dark:text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-800"}`} onClick={() => {
               setIsNotesOpen((value) => !value);
-              recenterVisiblePageSoon();
+              preserveVisiblePagePositionSoon();
             }} title={t.toggleNotes}>
               {isNotesOpen ? <ChevronRight size={18} /> : <ChevronLeft size={18} />}
             </button>
