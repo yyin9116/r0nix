@@ -12,6 +12,8 @@ assert(viewer.includes("activePages.has(pageNo)"), "PDF rendering must be gated 
 assert(viewer.includes("{active ? ("), "Canvas and text-layer subtree must be mounted only for active pages.");
 assert(viewer.includes("hasPaintedRef.current"), "Text-layer visibility must survive same-document canvas redraws.");
 assert(viewer.includes("active ? getVisibleImagesForPage(pageNo) : []"), "Image overlays must not scan or mount for inactive pages.");
+assert(viewer.includes("thumbnailObserverRef"), "Thumbnails must share one IntersectionObserver instead of creating one per page.");
+assert(viewer.includes("onRegisterThumbnailVisibility"), "Thumbnails must register visibility callbacks with the shared observer.");
 assert(styles.includes("content-visibility: auto"), "Inactive PDF pages must use content-visibility.");
 assert(styles.includes("contain-intrinsic-size"), "Inactive PDF pages must have intrinsic placeholder dimensions.");
 

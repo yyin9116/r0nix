@@ -1314,14 +1314,15 @@ interface PageThumbnailProps {
   fileId?: string;
   pageNo: number;
   active: boolean;
-  scrollRootRef: RefObject<HTMLDivElement | null>;
   onClick: (pageNo: number) => void;
   onItemRef: (pageNo: number, node: HTMLButtonElement | null) => void;
   pageLabel: string;
   onContextMenu?: (pageNo: number, event: React.MouseEvent<HTMLButtonElement>) => void;
+  thumbnailObserverRef: RefObject<IntersectionObserver | null>;
+  onRegisterThumbnailVisibility: (pageNo: number, onEnter: (() => void) | null) => void;
 }
 
-function PageThumbnail({ doc, fileId, pageNo, active, scrollRootRef, onClick, onItemRef, pageLabel, onContextMenu }: PageThumbnailProps) {
+function PageThumbnail({ doc, fileId, pageNo, active, onClick, onItemRef, pageLabel, onContextMenu, thumbnailObserverRef, onRegisterThumbnailVisibility }: PageThumbnailProps) {
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [inView, setInView] = useState(pageNo <= 8 || active);
@@ -1336,27 +1337,20 @@ function PageThumbnail({ doc, fileId, pageNo, active, scrollRootRef, onClick, on
   }, [onItemRef, pageNo]);
 
   useEffect(() => {
-    if (inView || active) return;
     const node = buttonRef.current;
-    const root = scrollRootRef.current;
-    if (!node || !root || typeof IntersectionObserver === "undefined") return;
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            setInView(true);
-            observer.disconnect();
-            break;
-          }
-        }
-      },
-      { root, rootMargin: "240px" }
-    );
-
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [active, inView, scrollRootRef]);
+    const observer = thumbnailObserverRef.current;
+    if (!node || typeof IntersectionObserver === "undefined") {
+      if (typeof IntersectionObserver === "undefined") setInView(true);
+      return;
+    }
+    const onEnter = () => setInView(true);
+    onRegisterThumbnailVisibility(pageNo, onEnter);
+    observer?.observe(node);
+    return () => {
+      observer?.unobserve(node);
+      onRegisterThumbnailVisibility(pageNo, null);
+    };
+  }, [onRegisterThumbnailVisibility, pageNo, thumbnailObserverRef]);
 
   useEffect(() => {
     const shouldRender = inView || active;
@@ -1454,6 +1448,7 @@ function PageThumbnail({ doc, fileId, pageNo, active, scrollRootRef, onClick, on
   return (
     <button
       ref={buttonRef}
+      data-thumbnail-page={pageNo}
       className={`mx-auto flex w-full flex-col items-center gap-2 p-2 rounded-lg transition-all border ${
         active
           ? "border-zinc-900/75 dark:border-zinc-100 bg-zinc-100 dark:bg-zinc-800/80 shadow-sm"
@@ -1576,6 +1571,8 @@ export function PDFViewer({
   const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const thumbListRef = useRef<HTMLDivElement | null>(null);
   const thumbItemRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
+  const thumbnailObserverRef = useRef<IntersectionObserver | null>(null);
+  const thumbnailVisibilityHandlersRef = useRef<Map<number, () => void>>(new Map());
   const rafRef = useRef<number | null>(null);
   const zoomAnimationRef = useRef<number | null>(null);
   const zoomRenderCommitTimerRef = useRef<number | null>(null);
@@ -1615,6 +1612,33 @@ export function PDFViewer({
   const zoomScale = useMemo(() => Math.max(0.5, zoom / 100), [zoom]);
   const renderZoomScale = useMemo(() => Math.max(0.5, renderZoom / 100), [renderZoom]);
   const visiblePage = lockedZoomPage ?? page;
+
+  const registerThumbnailVisibility = useCallback((pageNo: number, onEnter: (() => void) | null) => {
+    if (onEnter) thumbnailVisibilityHandlersRef.current.set(pageNo, onEnter);
+    else thumbnailVisibilityHandlersRef.current.delete(pageNo);
+  }, []);
+
+  useEffect(() => {
+    const root = thumbListRef.current;
+    if (!root || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          if (!entry.isIntersecting) continue;
+          const pageNo = Number((entry.target as HTMLElement).dataset.thumbnailPage);
+          if (Number.isInteger(pageNo)) thumbnailVisibilityHandlersRef.current.get(pageNo)?.();
+        }
+      },
+      { root, rootMargin: "240px" },
+    );
+    thumbnailObserverRef.current = observer;
+    root.querySelectorAll<HTMLElement>("[data-thumbnail-page]").forEach((node) => observer.observe(node));
+    return () => {
+      observer.disconnect();
+      thumbnailObserverRef.current = null;
+      thumbnailVisibilityHandlersRef.current.clear();
+    };
+  }, [fileId]);
 
   useEffect(() => {
     pageRef.current = page;
@@ -3234,12 +3258,13 @@ export function PDFViewer({
                   fileId={fileId}
                   pageNo={pageNo}
                   active={visiblePage === pageNo}
-                  scrollRootRef={thumbListRef}
                   onClick={(targetPage) => goToPage(targetPage, "auto", { source: "thumb" })}
                   onItemRef={(targetPage, node) => {
                     if (node) thumbItemRefs.current.set(targetPage, node);
                     else thumbItemRefs.current.delete(targetPage);
                   }}
+                  thumbnailObserverRef={thumbnailObserverRef}
+                  onRegisterThumbnailVisibility={registerThumbnailVisibility}
                   pageLabel={t.page}
                   onContextMenu={(targetPage, event) => {
                     setPage(clampPage(targetPage, totalPages));
