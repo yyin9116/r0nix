@@ -66,6 +66,22 @@ def patch_macos_runtime(runtime_dir: Path) -> None:
                 )
 
 
+def copy_stdlib_extensions(runtime_dir: Path, python_home: Path, stdlib: Path) -> int:
+    """Copy platform extension modules omitted from the stdlib zip."""
+    py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
+    source = python_home / "DLLs" if sys.platform == "win32" else stdlib / "lib-dynload"
+    target = runtime_dir / "DLLs" if sys.platform == "win32" else runtime_dir / "lib" / f"python{py_ver}" / "lib-dynload"
+    if not source.exists():
+        return 0
+
+    copied = 0
+    for extension in source.iterdir():
+        if extension.is_file() and extension.suffix.lower() in {".so", ".pyd", ".dylib"}:
+            copy_file(extension, target / extension.name)
+            copied += 1
+    return copied
+
+
 def find_site_packages() -> Path:
     candidates = []
     for p in site.getsitepackages():
@@ -148,6 +164,8 @@ def prepare_runtime(runtime_dir: Path) -> None:
                     arcname = src_file.relative_to(stdlib).as_posix()
                     zf.write(src_file, arcname)
 
+    extension_count = copy_stdlib_extensions(runtime_dir, python_home, stdlib)
+
     import fitz  # noqa: WPS433
     import pymupdf  # noqa: WPS433
 
@@ -167,6 +185,7 @@ def prepare_runtime(runtime_dir: Path) -> None:
     print(f"[prepare-runtime] python: {Path(sys.executable)}")
     print(f"[prepare-runtime] home: {python_home}")
     print(f"[prepare-runtime] stdlib zip: {zip_path} ({zip_path.stat().st_size} bytes)")
+    print(f"[prepare-runtime] stdlib extensions: {extension_count}")
     print(f"[prepare-runtime] fitz from: {fitz_src}")
     print(f"[prepare-runtime] pymupdf from: {pymupdf_src}")
 

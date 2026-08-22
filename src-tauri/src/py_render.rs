@@ -90,6 +90,21 @@ fn ensure_python_runtime() {
                 }
             }
             python_paths.push(runtime_str.clone());
+            let dynload_dir = if cfg!(windows) {
+                Some(runtime_home.join("DLLs"))
+            } else {
+                linked_tag.as_deref().and_then(|tag| {
+                    tag.strip_prefix("python").map(|version| {
+                        runtime_home
+                            .join("lib")
+                            .join(format!("python{version}"))
+                            .join("lib-dynload")
+                    })
+                })
+            };
+            if let Some(dynload_dir) = dynload_dir.filter(|path| path.exists()) {
+                python_paths.push(dynload_dir.to_string_lossy().into_owned());
+            }
             if site_packages.exists() {
                 python_paths.push(site_packages.to_string_lossy().into_owned());
             }
