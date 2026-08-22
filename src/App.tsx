@@ -1219,6 +1219,15 @@ export default function App() {
         if (closing.type === "web") {
           closeWebTabNative(closing.id);
         }
+        if ((closing.type === "pdf" || closing.type === "markdown") && closing.fileId) {
+          void api.closeFile(closing.fileId).catch((error) => {
+            debugWarn("tab.close", "failed to release document handle", {
+              tabId: closing.id,
+              fileId: closing.fileId,
+              error,
+            });
+          });
+        }
 
         const nextTabs = prev.filter((item) => item.id !== id);
         if (nextTabs.length === 0) {

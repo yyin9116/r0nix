@@ -44,6 +44,7 @@ React UI
 - 代理下载增加 HTTP(S) 校验、30 秒超时和 64 MiB 上限。
 - 目录扫描避免软链接循环；关闭 PDF 使用 `finally` 释放原生句柄。
 - Tauri 打开 PDF 时若 PDF.js 加载失败，会释放已打开的 Rust handle 并返回显式错误，不再以只有页数、没有可渲染文档的假成功状态继续运行。
+- 关闭 PDF/Markdown tab 会调用统一 `api.closeFile`，同时释放 PDF.js 文档缓存和 Rust/PyMuPDF 句柄，避免多次打开文档后句柄累积。
 - Tauri 打开 PDF 只登记文件元数据，不再首屏等待 PyMuPDF 页数扫描；原生分页任务首次需要时才解析页数并回写句柄，避免大 PDF 打开阶段重复解析和 8 秒超时假成功。
 - 按需原生页数解析受 30 秒超时保护，超时以显式错误返回，不再让损坏或极端 PDF 无限占用调用方。
 - Tauri 阅读块提取使用请求 ID 和原子取消探针；AbortSignal 可通过 IPC 通知原生任务，PyMuPDF 在页/block 边界停止遍历并释放任务记录。
