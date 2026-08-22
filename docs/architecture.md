@@ -55,6 +55,7 @@ React UI
 - 资源索引扫描通过独立缓存适配器管理版本、字段校验和容量上限；扫描任务使用稳定引用避免每页状态更新导致任务重启。
 - PDF 笔记和标注点击回跳使用 `page + sourceRect`，不再只定位到页码。
 - PDF 长文档块提取按 24 页分段，调用方取消时不再启动后续分段；1000 页 fixture 已通过分段完整性测试。
+- PDF 全文搜索按页检查取消状态，切换文档或卸载阅读器时会中止旧搜索；缓存文档缺失会显式报错，不再静默返回空阅读块。
 - SVG 局部导出不依赖当前 PyMuPDF 不支持的 `clip` 参数，改用 SVG viewport 裁剪，并通过嵌入 Python fixture 验证。
 - xref 图片识别保留宽幅/条带型 raster 资源；PDF.js hover 几何按行和连续文字片段拆分，相关双栏与断行规则由纯服务 fixture 覆盖。
 - Markdown block parser 使用内容稳定 ID，节点结构包含 `kind/depth/tableAlign/sourcePath`，预览、翻译和阅读辅助共享同一节点序列。

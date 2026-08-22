@@ -1555,6 +1555,7 @@ export function PDFViewer({
   const readingBlocksLoadRef = useRef<Promise<PdfReadingBlock[]> | null>(null);
   const readingBlocksLoadedFileRef = useRef<string | null>(null);
   const fullTranslationAbortRef = useRef<AbortController | null>(null);
+  const searchAbortRef = useRef<AbortController | null>(null);
   const resourcesScanRef = useRef(0);
   const resourceScanAbortRef = useRef<AbortController | null>(null);
   const resourceCacheLoadedRef = useRef(false);
@@ -1666,6 +1667,9 @@ export function PDFViewer({
     readingBlocksLoadRef.current = null;
     fullTranslationAbortRef.current?.abort();
     fullTranslationAbortRef.current = null;
+    searchAbortRef.current?.abort();
+    searchAbortRef.current = null;
+    setIsSearching(false);
     setTranslationPanel(null);
     setFullTranslation({ status: "", completed: 0, total: 0, results: [], isLoading: false });
 
@@ -1824,6 +1828,7 @@ export function PDFViewer({
       if (zoomRenderCommitTimerRef.current !== null) {
         window.clearTimeout(zoomRenderCommitTimerRef.current);
       }
+      searchAbortRef.current?.abort();
     };
   }, []);
 
@@ -2187,13 +2192,18 @@ export function PDFViewer({
       return;
     }
 
+    searchAbortRef.current?.abort();
+    const controller = new AbortController();
+    searchAbortRef.current = controller;
     setRenderError("");
     setIsSearching(true);
     try {
       const needle = trimmed.toLowerCase();
       for (let pageNo = 1; pageNo <= pdfDoc.numPages; pageNo += 1) {
+        if (controller.signal.aborted) return;
         const pdfPage = await pdfDoc.getPage(pageNo);
         const textContent = await pdfPage.getTextContent();
+        if (controller.signal.aborted) return;
         const text = textContent.items
           .map((item) => ("str" in item && typeof item.str === "string" ? item.str : ""))
           .join(" ")
@@ -2207,10 +2217,14 @@ export function PDFViewer({
       }
       showActionHint(t.noMatches.replace("{query}", trimmed));
     } catch (error) {
+      if (controller.signal.aborted) return;
       const message = error instanceof Error ? error.message : String(error);
       setRenderError(`Search failed: ${message}`);
     } finally {
-      setIsSearching(false);
+      if (searchAbortRef.current === controller) {
+        searchAbortRef.current = null;
+        setIsSearching(false);
+      }
     }
   };
 

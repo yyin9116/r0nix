@@ -643,7 +643,7 @@ export async function getPDFReadingBlocks(
   }
 
   const doc = getCachedDocument(fileId);
-  if (!doc) return [];
+  if (!doc) throw new Error(`PDF document is not loaded: ${fileId}`);
   const blocks: PdfReadingBlock[] = [];
   const firstPage = Math.max(1, Math.min(doc.numPages, Math.round(range?.startPage ?? 1)));
   const lastPage = Math.max(firstPage, Math.min(doc.numPages, Math.round(range?.endPage ?? doc.numPages)));
