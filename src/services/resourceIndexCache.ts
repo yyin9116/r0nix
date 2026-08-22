@@ -10,15 +10,16 @@ export type CachedResourceLink = {
 export type ResourceIndexSnapshot = {
   images: Record<number, PDFImageInfo[]>;
   links: Record<number, CachedResourceLink[]>;
+  scannedPages: number[];
 };
 
 type ResourceIndexEnvelope = ResourceIndexSnapshot & {
-  version: 1;
+  version: 2;
   updatedAt: string;
 };
 
 const CACHE_PREFIX = "r0nix:resource-index:";
-const CACHE_VERSION = 1 as const;
+const CACHE_VERSION = 2 as const;
 const MAX_CACHED_PAGES = 2000;
 const MAX_CACHE_BYTES = 2_000_000;
 
@@ -90,12 +91,22 @@ function trimPages(snapshot: ResourceIndexSnapshot): ResourceIndexSnapshot {
   const pages = Array.from(new Set([
     ...Object.keys(snapshot.images).map(Number),
     ...Object.keys(snapshot.links).map(Number),
+    ...snapshot.scannedPages,
   ])).filter((page) => Number.isInteger(page) && page > 0).sort((a, b) => a - b);
   const keep = new Set(pages.slice(-MAX_CACHED_PAGES));
   return {
     images: Object.fromEntries(Object.entries(snapshot.images).filter(([page]) => keep.has(Number(page)))),
     links: Object.fromEntries(Object.entries(snapshot.links).filter(([page]) => keep.has(Number(page)))),
+    scannedPages: pages.filter((page) => keep.has(page)),
   };
+}
+
+function sanitizeScannedPages(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value
+    .map((page) => Number(page))
+    .filter((page) => Number.isInteger(page) && page > 0)))
+    .sort((left, right) => left - right);
 }
 
 export function loadResourceIndex(key: string): ResourceIndexSnapshot | null {
@@ -105,7 +116,11 @@ export function loadResourceIndex(key: string): ResourceIndexSnapshot | null {
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Partial<ResourceIndexEnvelope>;
     if (parsed.version !== CACHE_VERSION) return null;
-    return trimPages({ images: sanitizeImages(parsed.images), links: sanitizeLinks(parsed.links) });
+    return trimPages({
+      images: sanitizeImages(parsed.images),
+      links: sanitizeLinks(parsed.links),
+      scannedPages: sanitizeScannedPages(parsed.scannedPages),
+    });
   } catch {
     return null;
   }

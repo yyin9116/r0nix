@@ -1777,6 +1777,9 @@ export function PDFViewer({
       pdfImagesByPageRef.current = cached.images;
       setLinksByPage(cached.links);
       linksByPageRef.current = cached.links;
+      const cachedResourceText = Object.fromEntries(cached.scannedPages.map((page) => [page, ""]));
+      setResourceTextByPage(cachedResourceText);
+      resourceTextByPageRef.current = cachedResourceText;
     }
     queueMicrotask(() => {
       resourceCacheLoadedRef.current = true;
@@ -1785,8 +1788,12 @@ export function PDFViewer({
 
   useEffect(() => {
     if (!resourceCacheKey || !resourceCacheLoadedRef.current || typeof window === "undefined") return;
-    saveResourceIndex(resourceCacheKey, { images: pdfImagesByPage, links: linksByPage });
-  }, [linksByPage, pdfImagesByPage, resourceCacheKey]);
+    saveResourceIndex(resourceCacheKey, {
+      images: pdfImagesByPage,
+      links: linksByPage,
+      scannedPages: Object.keys(resourceTextByPage).map(Number),
+    });
+  }, [linksByPage, pdfImagesByPage, resourceCacheKey, resourceTextByPage]);
 
   useEffect(() => {
     setPage((prev) => clampPage(prev, totalPages));
