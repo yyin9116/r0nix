@@ -54,6 +54,7 @@ PDF 阅读器、Markdown 编辑器、图片导出和模型服务都服务于这�
 - 方案：text layer 作为显示和选择的几何事实来源；后端块只提供稳定 ID、类型和 fallback；双栏、表格、标题分别建模。
 - 验收：双栏论文、表格、标题、脚注各有 golden fixture；hover 矩形覆盖完整段落；点击后的文本与可见段落一致。
 - 当前证据：普通视图已回归 PDF.js 原生 text layer，全文辅助块使用可见 text layer 聚合；双栏、跨行和间距分段几何 fixture 已加入 `test:pdf-blocks`，桌面端真实 PDF 的人工回归仍需在解锁的 macOS/Windows runner 上补齐，不能仅以 smoke test 代替。
+- hover 性能边界：Full translation 命中优先消费 PDF.js 原生事件 target，几何扫描仅作为空白间隙 fallback；真实桌面论文 hover 帧率仍需 runner 测量。
 
 ## P1：核心体验必须补齐
 

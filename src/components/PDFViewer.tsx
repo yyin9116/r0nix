@@ -977,12 +977,22 @@ function PageCanvas({
       assistHighlightsRef.current = [];
     };
 
-    const setActiveFromPoint = (clientX: number, clientY: number): { text: string; block: PdfReadingBlock | null } => {
+    const setActiveFromPoint = (
+      clientX: number,
+      clientY: number,
+      eventTarget?: EventTarget | null,
+    ): { text: string; block: PdfReadingBlock | null } => {
       const textLayer = host.querySelector(".textLayer");
       if (!(textLayer instanceof HTMLElement)) return { text: "", block: null };
       const spans = textSpanCacheRef.current || getPdfTextSpans(textLayer);
       textSpanCacheRef.current = spans;
-      const span = getPdfSpanAtPoint(textLayer, clientX, clientY, spans);
+      // PDF.js already dispatches pointer events from the real text span. Use
+      // that target on the hot path; geometry lookup is only needed over the
+      // small gaps between transparent text spans.
+      const targetSpan = eventTarget instanceof HTMLElement ? eventTarget.closest("span") : null;
+      const span = targetSpan && textLayer.contains(targetSpan)
+        ? targetSpan
+        : getPdfSpanAtPoint(textLayer, clientX, clientY, spans);
       if (!(span instanceof HTMLElement)) return { text: "", block: null };
       const block = getBlockHit(span, readingBlocksRef.current, textLayer) || null;
       const group = paragraphCacheRef.current.get(span) || collectPdfParagraphSpansFromTarget(span, spans);
@@ -1001,24 +1011,29 @@ function PageCanvas({
 
     let moveFrame: number | null = null;
     let pendingPoint: { x: number; y: number } | null = null;
+    let pendingTarget: EventTarget | null = null;
     const onPointerMove = (event: PointerEvent) => {
       pendingPoint = { x: event.clientX, y: event.clientY };
+      pendingTarget = event.target;
       if (moveFrame !== null) return;
       moveFrame = window.requestAnimationFrame(() => {
         moveFrame = null;
         const point = pendingPoint;
+        const target = pendingTarget;
         pendingPoint = null;
-        if (point) setActiveFromPoint(point.x, point.y);
+        pendingTarget = null;
+        if (point) setActiveFromPoint(point.x, point.y, target);
       });
     };
     const onPointerLeave = () => {
       pendingPoint = null;
+      pendingTarget = null;
       if (moveFrame !== null) window.cancelAnimationFrame(moveFrame);
       moveFrame = null;
       clearActive();
     };
     const onClick = (event: MouseEvent) => {
-      const hit = setActiveFromPoint(event.clientX, event.clientY);
+      const hit = setActiveFromPoint(event.clientX, event.clientY, event.target);
       const text = hit.text;
       if (!text) return;
       event.preventDefault();
