@@ -529,39 +529,14 @@ async fn resolve_file_path(file_id: &str) -> Result<String, String> {
 pub async fn open_pdf(file_id: String, path: String) -> Result<PdfInfo, String> {
     eprintln!("[open_pdf] file_id={} path={}", file_id, path);
     let mut manager = PDF_MANAGER.lock().await;
-    let mut info = manager
+    let info = manager
         .open_document(file_id, &path)
         .map_err(|err| err.to_string())?;
     drop(manager);
-
-    let page_count_task_path = path.clone();
-    let page_count_task =
-        tokio::task::spawn_blocking(move || get_pdf_page_count(&page_count_task_path));
-
-    match tokio::time::timeout(Duration::from_secs(8), page_count_task).await {
-        Ok(Ok(Ok(page_count))) => {
-            let mut manager = PDF_MANAGER.lock().await;
-            if let Err(err) = manager.set_page_count(&info.file_id, page_count) {
-                eprintln!("[open_pdf] set page count failed: {}", err);
-            } else {
-                info.page_count = page_count;
-                eprintln!(
-                    "[open_pdf] success file_id={} page_count={}",
-                    info.file_id, info.page_count
-                );
-            }
-        }
-        Ok(Ok(Err(err))) => {
-            eprintln!("[open_pdf] page count failed: {}", err);
-        }
-        Ok(Err(err)) => {
-            eprintln!("[open_pdf] page count task failed: {}", err);
-        }
-        Err(_) => {
-            eprintln!("[open_pdf] page count timed out, fallback to lazy loading");
-        }
-    }
-
+    eprintln!(
+        "[open_pdf] metadata ready file_id={} page_count=deferred",
+        info.file_id
+    );
     Ok(info)
 }
 
@@ -583,11 +558,30 @@ pub async fn get_pdf_info(file_id: String) -> Result<PdfInfo, String> {
 
 #[tauri::command]
 pub async fn get_page_count(file_id: String) -> Result<usize, String> {
-    let manager = PDF_MANAGER.lock().await;
+    let (known_page_count, path) = {
+        let manager = PDF_MANAGER.lock().await;
+        let info = manager
+            .get_document_info(&file_id)
+            .map_err(|err| err.to_string())?;
+        (info.page_count, info.path)
+    };
+    if known_page_count > 0 {
+        return Ok(known_page_count);
+    }
+
+    let page_count = tokio::task::spawn_blocking(move || get_pdf_page_count(&path))
+        .await
+        .map_err(|err| format!("page count task failed: {err}"))?
+        .map_err(|err| format!("page count failed: {err}"))?;
+    let mut manager = PDF_MANAGER.lock().await;
     manager
-        .get_document_info(&file_id)
-        .map(|info| info.page_count)
-        .map_err(|err| err.to_string())
+        .set_page_count(&file_id, page_count)
+        .map_err(|err| err.to_string())?;
+    eprintln!(
+        "[get_page_count] resolved file_id={} pages={page_count}",
+        file_id
+    );
+    Ok(page_count)
 }
 
 #[tauri::command]
