@@ -932,7 +932,6 @@ function PageCanvas({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const textHostRef = useRef<HTMLDivElement | null>(null);
   const linkHostRef = useRef<HTMLDivElement | null>(null);
-  const assistHitRef = useRef<HTMLDivElement | null>(null);
   const assistHighlightsRef = useRef<HTMLDivElement[]>([]);
   const linkTokenRef = useRef(0);
   const activeAssistSpansRef = useRef<HTMLElement[]>([]);
@@ -955,8 +954,7 @@ function PageCanvas({
 
   useEffect(() => {
     const host = textHostRef.current;
-    const hitLayer = assistHitRef.current;
-    if (!host || !hitLayer || !enableTextLayer || !enableAssistBlocks || !onAssistSelection || status !== "ready") return;
+    if (!host || !enableTextLayer || !enableAssistBlocks || !onAssistSelection || status !== "ready") return;
 
     const clearActive = () => {
       for (const node of activeAssistSpansRef.current) {
@@ -1023,13 +1021,13 @@ function PageCanvas({
       });
     };
 
-    hitLayer.addEventListener("pointermove", onPointerMove);
-    hitLayer.addEventListener("pointerleave", onPointerLeave);
-    hitLayer.addEventListener("click", onClick, true);
+    host.addEventListener("pointermove", onPointerMove);
+    host.addEventListener("pointerleave", onPointerLeave);
+    host.addEventListener("click", onClick, true);
     return () => {
-      hitLayer.removeEventListener("pointermove", onPointerMove);
-      hitLayer.removeEventListener("pointerleave", onPointerLeave);
-      hitLayer.removeEventListener("click", onClick, true);
+      host.removeEventListener("pointermove", onPointerMove);
+      host.removeEventListener("pointerleave", onPointerLeave);
+      host.removeEventListener("click", onClick, true);
       if (moveFrame !== null) window.cancelAnimationFrame(moveFrame);
       clearActive();
     };
@@ -1266,9 +1264,6 @@ function PageCanvas({
           enableTextLayer && enableAssistBlocks && status === "ready" ? "is-assist" : ""
         }`}
       />
-      {enableTextLayer && enableAssistBlocks && status === "ready" ? (
-        <div ref={assistHitRef} className="pdf-assist-hit-layer" aria-hidden="true" />
-      ) : null}
       <div ref={linkHostRef} className="absolute inset-0 pointer-events-none" />
       {active && status === "rendering" && !hasPaintedRef.current ? (
         <div className="absolute inset-0 flex items-center justify-center bg-white/65 text-zinc-500 text-xs">

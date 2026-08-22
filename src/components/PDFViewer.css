@@ -322,6 +322,7 @@
 .page-text-overlay.is-assist .textLayer,
 .page-text-overlay.is-assist .textLayer span,
 .page-text-overlay.is-assist .textLayer br {
+  pointer-events: auto;
   user-select: none;
   -webkit-user-select: none;
 }
@@ -329,19 +330,6 @@
 .page-text-overlay.is-assist .textLayer span,
 .page-text-overlay.is-assist .textLayer br {
   cursor: pointer;
-}
-
-.pdf-assist-hit-layer {
-  position: absolute;
-  inset: 0;
-  z-index: 10;
-  pointer-events: auto;
-  background: transparent;
-  cursor: pointer;
-  touch-action: none;
-  user-select: none;
-  -webkit-user-select: none;
-  -webkit-user-drag: none;
 }
 
 .textLayer {
