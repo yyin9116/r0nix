@@ -3467,6 +3467,7 @@ export function PDFViewer({
                         height,
                         contentVisibility: active ? "visible" : "auto",
                         containIntrinsicSize: `${height}px ${width}px`,
+                        visibility: isGestureRightDown && lockedZoomPage !== null && pageNo !== lockedZoomPage ? "hidden" : undefined,
                         transform: visualScale === 1 ? undefined : `scale(${visualScale})`,
                         transformOrigin: "top center",
                         zIndex: visualScale === 1 ? undefined : 3,
