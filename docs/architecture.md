@@ -61,12 +61,12 @@ React UI
 P 级痛点、验收标准和推荐执行顺序统一记录在 [产品痛点与开发优先级](./product-priorities.md)。后续实现以该文档为主，避免在 PDF、Markdown、资源索引和模型能力之间无序扩张。
 
 - 浏览器端图像识别和图像导出仍依赖后端 HTTP API，桌面端 Rust/PyMuPDF 链路已有集成测试。
-- 1000 页后端分段提取已通过 fixture；桌面端真实打开、滚动、缩放的 GUI 性能仍需在打包应用中测量。
+- 1000 页后端分段提取已通过 fixture；GitHub Actions CI run `32549546089` 已在 macOS 和 Windows 上通过嵌入式 PDF runtime 测试；桌面端真实打开、滚动、缩放的 GUI 性能仍需在打包应用中测量。
 - Markdown 使用 `marked` GFM lexer，再由 `markdownBlocks.ts` 归一化为共享节点；HTML 以不可执行文本保留，脚注定义会恢复为 `auxiliary` 阅读块，普通引用链接定义保持原生引用语义。
 - 当前没有独立 unit-test runner 和 lint 脚本；Rust 单测中依赖嵌入 Python 的测试仍被显式忽略。
 - 桌面端打包需要在实际 macOS/Windows 环境分别验证原生 WebView、托盘和安装器行为。
 - 当前尚未在 CI 中启动打包后的 macOS/Windows 应用做 GUI 集成测试；需要对应 runner 和签名/系统 WebView 环境。
 - Tauri 开发运行链路已在当前 macOS 环境验证：原生 runtime、Rust `open_pdf`、PDF.js 文档加载和页面缩略图渲染成功；仍缺少打包产物安装后的同等 GUI 证据。
-- macOS release `.app` 已在当前机器实际启动验证；内嵌 Python/PyMuPDF 动态库使用 bundle 相对 rpath，release workflow 会在 bundle 后重新签名，签名版再执行公证和 stapling。Windows release workflow 已加入 NSIS 安装、runtime 文件和启动 smoke，仍需实际 CI runner 结果作为发布证据。
+- macOS release `.app` 已在当前机器实际启动验证；内嵌 Python/PyMuPDF 动态库使用 bundle 相对 rpath，release workflow 会在 bundle 后重新签名，签名版再执行公证和 stapling。Windows release workflow 已加入 NSIS 安装、runtime 文件和启动 smoke；安装后的 GUI smoke 和打包应用端到端行为仍需 release runner 结果作为发布证据。
 - 首屏按 tab 懒加载 PDF、Markdown、网页、设置和画布；PDF.js 文档模块也延迟到首次打开 PDF 时加载，生产首屏主 chunk 已从约 1.1 MB 降至约 380 KB，PDF.js 独立 chunk 约 445 KB。
 - `check:pdf-virtualization` 会锁定页面占位、active page gating、有限 overlay 和 `content-visibility` 约束，避免性能优化在后续迭代中回退。
