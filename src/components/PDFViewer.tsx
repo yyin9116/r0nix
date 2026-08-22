@@ -1450,6 +1450,10 @@ function PageThumbnail({ doc, fileId, pageNo, active, scrollRootRef, onClick, on
           ? "border-zinc-900/75 dark:border-zinc-100 bg-zinc-100 dark:bg-zinc-800/80 shadow-sm"
           : "border-zinc-200 dark:border-zinc-700 hover:border-zinc-400 dark:hover:border-zinc-500 bg-white dark:bg-zinc-900"
       }`}
+      style={{
+        contentVisibility: active || inView ? "visible" : "auto",
+        containIntrinsicSize: "182px 150px",
+      }}
       onClick={() => onClick(pageNo)}
       title={`${pageLabel} ${pageNo}`}
       type="button"
@@ -3405,6 +3409,8 @@ export function PDFViewer({
                       style={{
                         width,
                         height,
+                        contentVisibility: active ? "visible" : "auto",
+                        containIntrinsicSize: `${height}px ${width}px`,
                         transform: visualScale === 1 ? undefined : `scale(${visualScale})`,
                         transformOrigin: "top center",
                         zIndex: visualScale === 1 ? undefined : 3,
