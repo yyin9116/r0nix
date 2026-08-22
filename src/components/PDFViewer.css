@@ -399,6 +399,17 @@
   cursor: default;
 }
 
+/* Keep native PDF.js selection rendering scoped to the text layer. Without
+ * these rules WebKit falls back to a page-wide selection paint for transparent
+ * absolutely-positioned spans, which looks like a flashing full-page overlay. */
+.textLayer ::selection {
+  background: color-mix(in srgb, AccentColor, transparent 75%);
+}
+
+.textLayer br::selection {
+  background: transparent;
+}
+
 .textLayer .endOfContent {
   display: block;
   position: absolute;

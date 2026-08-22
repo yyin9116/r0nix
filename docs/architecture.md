@@ -42,6 +42,7 @@ React UI
 - 图片扫描共享任务使用内部 `AbortController`，调用方只取消自身等待；仍有其他消费者时底层扫描继续，最后一个消费者取消才中止任务并从 in-flight 表移除，避免资源侧栏关闭误伤当前页预取。
 - 普通文本选择移除自绘选择层，避免全屏闪烁。
 - selectable PDF.js text layer 明确保留 WebKit 的跨 span 原生选择能力，避免 macOS 桌面端退化为单字符选中。
+- 选择绘制规则沿用 PDF.js 的 text-layer scoped `::selection`/`br::selection`，避免 WebKit 将透明绝对定位 span 的选择反馈扩展成整页闪烁。
 - 全文翻译 hover 段落按整层 text spans 推断列边界，不再用当前短行的右边界截断后续长行。
 - E2E smoke 文案断言已与设置页同步。
 - 代理下载增加 HTTP(S) 校验、30 秒超时和 64 MiB 上限。
