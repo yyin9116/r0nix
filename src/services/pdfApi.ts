@@ -49,6 +49,26 @@ function generateRuntimeId(prefix: string) {
   return `${prefix}-${randomUuid || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`}`;
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return;
+  throw signal.reason instanceof Error ? signal.reason : new DOMException("The operation was aborted", "AbortError");
+}
+
+function createExportCancellation(signal?: AbortSignal) {
+  const requestId = isTauri ? generateRuntimeId("pdf-export") : undefined;
+  const cancelNativeTask = () => {
+    if (!requestId) return;
+    void rustPdf.cancelPdfExport(requestId).catch((error) => {
+      debugWarn("api.pdfExport", "failed to cancel native export", error);
+    });
+  };
+  signal?.addEventListener("abort", cancelNativeTask, { once: true });
+  return {
+    requestId,
+    cleanup: () => signal?.removeEventListener("abort", cancelNativeTask),
+  };
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => {
@@ -460,23 +480,42 @@ export async function cancelTileRequest(requestId: string): Promise<void> {
 export async function exportPagePNG(
   fileId: string,
   pageNo: number,
-  zoom = 2
+  zoom = 2,
+  signal?: AbortSignal,
 ): Promise<string> {
   if (!isTauri) {
     throw new Error('exportPagePNG is only available in Tauri mode');
   }
-  return rustPdf.exportPagePng(fileId, pageNo, zoom);
+  throwIfAborted(signal);
+  const task = createExportCancellation(signal);
+  try {
+    const result = await rustPdf.exportPagePng(fileId, pageNo, zoom, task.requestId);
+    throwIfAborted(signal);
+    return result;
+  } finally {
+    task.cleanup();
+  }
 }
 
 export async function extractPDFImage(
   fileId: string,
   pageNo: number,
-  xref: number
+  xref: number,
+  signal?: AbortSignal,
 ): Promise<ExtractedPdfImage> {
   if (!isTauri) {
     throw new Error('extractPDFImage is only available in Tauri mode');
   }
-  const parsed = JSON.parse(await rustPdf.extractPdfImage(fileId, pageNo, xref)) as Partial<ExtractedPdfImage>;
+  throwIfAborted(signal);
+  const task = createExportCancellation(signal);
+  let raw: string;
+  try {
+    raw = await rustPdf.extractPdfImage(fileId, pageNo, xref, task.requestId);
+    throwIfAborted(signal);
+  } finally {
+    task.cleanup();
+  }
+  const parsed = JSON.parse(raw) as Partial<ExtractedPdfImage>;
   if (
     parsed.xref !== xref ||
     parsed.pageNumber !== pageNo ||
@@ -488,22 +527,39 @@ export async function extractPDFImage(
   return parsed as ExtractedPdfImage;
 }
 
-export async function exportPageSVG(fileId: string, pageNo: number): Promise<string> {
+export async function exportPageSVG(fileId: string, pageNo: number, signal?: AbortSignal): Promise<string> {
   if (!isTauri) {
     throw new Error('exportPageSVG is only available in Tauri mode');
   }
-  return rustPdf.exportPageSvg(fileId, pageNo);
+  throwIfAborted(signal);
+  const task = createExportCancellation(signal);
+  try {
+    const result = await rustPdf.exportPageSvg(fileId, pageNo, task.requestId);
+    throwIfAborted(signal);
+    return result;
+  } finally {
+    task.cleanup();
+  }
 }
 
 export async function exportPageSVGCrop(
   fileId: string,
   pageNo: number,
-  rect: { left: number; top: number; width: number; height: number }
+  rect: { left: number; top: number; width: number; height: number },
+  signal?: AbortSignal,
 ): Promise<string> {
   if (!isTauri) {
     throw new Error('exportPageSVGCrop is only available in Tauri mode');
   }
-  return rustPdf.exportPageSvgCrop(fileId, pageNo, rect);
+  throwIfAborted(signal);
+  const task = createExportCancellation(signal);
+  try {
+    const result = await rustPdf.exportPageSvgCrop(fileId, pageNo, rect, task.requestId);
+    throwIfAborted(signal);
+    return result;
+  } finally {
+    task.cleanup();
+  }
 }
 
 export async function savePNGToFile(pngBase64: string, defaultFilename: string): Promise<void> {

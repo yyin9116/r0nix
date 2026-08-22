@@ -1586,6 +1586,7 @@ export function PDFViewer({
   const readingBlocksLoadedFileRef = useRef<string | null>(null);
   const fullTranslationAbortRef = useRef<AbortController | null>(null);
   const searchAbortRef = useRef<AbortController | null>(null);
+  const exportAbortRef = useRef<AbortController | null>(null);
   const resourcesScanRef = useRef(0);
   const resourceScanAbortRef = useRef<AbortController | null>(null);
   const resourceCacheLoadedRef = useRef(false);
@@ -1831,8 +1832,14 @@ export function PDFViewer({
         window.clearTimeout(zoomRenderCommitTimerRef.current);
       }
       searchAbortRef.current?.abort();
+      exportAbortRef.current?.abort();
     };
   }, []);
+
+  useEffect(() => {
+    exportAbortRef.current?.abort();
+    exportAbortRef.current = null;
+  }, [fileId]);
 
   const scheduleRenderZoomCommit = useCallback((targetZoom: number) => {
     if (zoomRenderCommitTimerRef.current !== null) {
@@ -2152,15 +2159,18 @@ export function PDFViewer({
   const exportPng = async (target?: { pageNo: number; imageTarget?: ImageContextTarget | null }) => {
     if (!fileId) return;
     const targetPage = clampPage(target?.pageNo ?? page, totalPages);
+    exportAbortRef.current?.abort();
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
     try {
       const pageSize = pageSizes[targetPage] || DEFAULT_PAGE_SIZE;
       const imageTarget = target?.imageTarget;
       const extracted = imageTarget?.image.source === "xref" && imageTarget.image.xref > 0
-        ? await api.extractPDFImage(fileId, targetPage, imageTarget.image.xref)
+        ? await api.extractPDFImage(fileId, targetPage, imageTarget.image.xref, controller.signal)
         : null;
       // Original xref resources do not need a full-page raster first. This is
       // faster and avoids making a large export part of a small image action.
-      const pagePngBase64 = extracted ? "" : await api.exportPagePNG(fileId, targetPage, 2);
+      const pagePngBase64 = extracted ? "" : await api.exportPagePNG(fileId, targetPage, 2, controller.signal);
       const pngBase64 = extracted?.dataBase64
         ?? (imageTarget ? await cropPngBase64(pagePngBase64, imageTarget.rect, pageSize) : pagePngBase64);
       const baseName = cleanBaseName(title || "document");
@@ -2175,18 +2185,24 @@ export function PDFViewer({
       }
       showActionHint(t.pngExported);
     } catch (error) {
+      if (controller.signal.aborted) return;
       const message = error instanceof Error ? error.message : String(error);
       setRenderError(`PNG export failed: ${message}`);
+    } finally {
+      if (exportAbortRef.current === controller) exportAbortRef.current = null;
     }
   };
   const exportSvg = async (target?: { pageNo: number; imageTarget?: ImageContextTarget | null }) => {
     if (!fileId) return;
     const targetPage = clampPage(target?.pageNo ?? page, totalPages);
+    exportAbortRef.current?.abort();
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
     try {
       const imageTarget = target?.imageTarget;
       const svg = imageTarget
-        ? await api.exportPageSVGCrop(fileId, targetPage, imageTarget.rect)
-        : await api.exportPageSVG(fileId, targetPage);
+        ? await api.exportPageSVGCrop(fileId, targetPage, imageTarget.rect, controller.signal)
+        : await api.exportPageSVG(fileId, targetPage, controller.signal);
       const baseName = cleanBaseName(title || "document");
       const defaultName = imageTarget
         ? `${baseName}-page-${targetPage}-image-${imageTarget.image.xref || "crop"}.svg`
@@ -2194,8 +2210,11 @@ export function PDFViewer({
       await api.saveSVGToFile(svg, onResolveDefaultPath?.(defaultName) || defaultName);
       showActionHint(t.svgExported);
     } catch (error) {
+      if (controller.signal.aborted) return;
       const message = error instanceof Error ? error.message : String(error);
       setRenderError(`SVG export failed: ${message}`);
+    } finally {
+      if (exportAbortRef.current === controller) exportAbortRef.current = null;
     }
   };
 

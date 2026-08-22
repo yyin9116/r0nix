@@ -88,30 +88,34 @@ export async function cancelTileRequest(requestId: string): Promise<void> {
 export async function exportPagePng(
   fileId: string,
   pageNo: number,
-  zoom = 2
+  zoom = 2,
+  requestId?: string,
 ): Promise<string> {
-  return await invoke<string>("export_page_png", { fileId, pageNo, zoom });
+  return await invoke<string>("export_page_png", { fileId, pageNo, zoom, requestId });
 }
 
 export async function extractPdfImage(
   fileId: string,
   pageNo: number,
-  xref: number
+  xref: number,
+  requestId?: string,
 ): Promise<string> {
-  return await invoke<string>("extract_pdf_image", { fileId, pageNo, xref });
+  return await invoke<string>("extract_pdf_image", { fileId, pageNo, xref, requestId });
 }
 
 export async function exportPageSvg(
   fileId: string,
-  pageNo: number
+  pageNo: number,
+  requestId?: string,
 ): Promise<string> {
-  return await invoke<string>("export_page_svg", { fileId, pageNo });
+  return await invoke<string>("export_page_svg", { fileId, pageNo, requestId });
 }
 
 export async function exportPageSvgCrop(
   fileId: string,
   pageNo: number,
   rect: { left: number; top: number; width: number; height: number }
+  , requestId?: string
 ): Promise<string> {
   return await invoke<string>("export_page_svg_crop", {
     fileId,
@@ -120,7 +124,12 @@ export async function exportPageSvgCrop(
     top: rect.top,
     width: rect.width,
     height: rect.height,
+    requestId,
   });
+}
+
+export async function cancelPdfExport(requestId: string): Promise<void> {
+  await invoke("cancel_pdf_export", { requestId });
 }
 
 

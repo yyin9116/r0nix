@@ -28,6 +28,8 @@ static PDF_BLOCK_CANCEL_FLAGS: once_cell::sync::Lazy<Mutex<HashMap<String, Arc<A
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 static PDF_IMAGE_CANCEL_FLAGS: once_cell::sync::Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
+static PDF_EXPORT_CANCEL_FLAGS: once_cell::sync::Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 static WEBVIEW_TABS: once_cell::sync::Lazy<Mutex<HashMap<String, String>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 const DEFAULT_NATIVE_WEBVIEW_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 Edg/132.0.0.0";
@@ -533,20 +535,53 @@ async fn resolve_file_path(file_id: &str) -> Result<String, String> {
     Ok(info.path)
 }
 
-async fn run_pdf_blocking<T, F>(label: &'static str, task: F) -> Result<T, String>
+async fn run_pdf_export_blocking<T, F>(
+    label: &'static str,
+    request_id: Option<String>,
+    task: F,
+) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {
-    let task = tokio::task::spawn_blocking(task);
-    match tokio::time::timeout(PDF_OPERATION_TIMEOUT, task).await {
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    if let Some(request_id) = request_id.as_deref() {
+        if request_id.trim().is_empty() {
+            return Err("export request id cannot be empty".to_string());
+        }
+        PDF_EXPORT_CANCEL_FLAGS
+            .lock()
+            .await
+            .insert(request_id.to_string(), cancel_flag.clone());
+    }
+
+    let task_flag = cancel_flag.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        if task_flag.load(Ordering::Acquire) {
+            return Err("r0nix-cancelled".to_string());
+        }
+        let result = task();
+        if task_flag.load(Ordering::Acquire) {
+            Err("r0nix-cancelled".to_string())
+        } else {
+            result
+        }
+    });
+    let result = match tokio::time::timeout(PDF_OPERATION_TIMEOUT, task).await {
         Ok(Ok(result)) => result.map_err(|err| format!("{label} failed: {err}")),
         Ok(Err(err)) => Err(format!("{label} task failed: {err}")),
-        Err(_) => Err(format!(
-            "{label} timed out after {} seconds",
-            PDF_OPERATION_TIMEOUT.as_secs()
-        )),
+        Err(_) => {
+            cancel_flag.store(true, Ordering::Release);
+            Err(format!(
+                "{label} timed out after {} seconds",
+                PDF_OPERATION_TIMEOUT.as_secs()
+            ))
+        }
+    };
+    if let Some(request_id) = request_id {
+        PDF_EXPORT_CANCEL_FLAGS.lock().await.remove(&request_id);
     }
+    result
 }
 
 #[tauri::command]
@@ -730,6 +765,7 @@ pub async fn export_page_png(
     file_id: String,
     page_no: usize,
     zoom: Option<f32>,
+    request_id: Option<String>,
 ) -> Result<String, String> {
     eprintln!(
         "[export_page_png] file_id={} page={} zoom={:?}",
@@ -738,7 +774,10 @@ pub async fn export_page_png(
     let path = resolve_file_path(&file_id).await?;
     let zoom = zoom.unwrap_or(2.0).max(0.1);
 
-    let png = run_pdf_blocking("png export", move || render_page_png(&path, page_no, zoom)).await?;
+    let png = run_pdf_export_blocking("png export", request_id, move || {
+        render_page_png(&path, page_no, zoom)
+    })
+    .await?;
 
     Ok(BASE64.encode(png))
 }
@@ -748,24 +787,32 @@ pub async fn extract_pdf_image(
     file_id: String,
     page_no: usize,
     xref: usize,
+    request_id: Option<String>,
 ) -> Result<String, String> {
     eprintln!(
         "[extract_pdf_image] file_id={} page={} xref={}",
         file_id, page_no, xref
     );
     let path = resolve_file_path(&file_id).await?;
-    run_pdf_blocking("pdf image extraction", move || {
+    run_pdf_export_blocking("pdf image extraction", request_id, move || {
         extract_pdf_image_json(&path, page_no, xref)
     })
     .await
 }
 
 #[tauri::command]
-pub async fn export_page_svg(file_id: String, page_no: usize) -> Result<String, String> {
+pub async fn export_page_svg(
+    file_id: String,
+    page_no: usize,
+    request_id: Option<String>,
+) -> Result<String, String> {
     eprintln!("[export_page_svg] file_id={} page={}", file_id, page_no);
     let path = resolve_file_path(&file_id).await?;
 
-    run_pdf_blocking("svg export", move || render_page_svg(&path, page_no)).await
+    run_pdf_export_blocking("svg export", request_id, move || {
+        render_page_svg(&path, page_no)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -776,6 +823,7 @@ pub async fn export_page_svg_crop(
     top: f64,
     width: f64,
     height: f64,
+    request_id: Option<String>,
 ) -> Result<String, String> {
     eprintln!(
         "[export_page_svg_crop] file_id={} page={} left={} top={} width={} height={}",
@@ -783,10 +831,22 @@ pub async fn export_page_svg_crop(
     );
     let path = resolve_file_path(&file_id).await?;
 
-    run_pdf_blocking("svg crop export", move || {
+    run_pdf_export_blocking("svg crop export", request_id, move || {
         render_page_svg_crop(&path, page_no, left, top, width, height)
     })
     .await
+}
+
+#[tauri::command]
+pub async fn cancel_pdf_export(request_id: String) -> Result<(), String> {
+    if request_id.trim().is_empty() {
+        return Err("export request id cannot be empty".to_string());
+    }
+    if let Some(flag) = PDF_EXPORT_CANCEL_FLAGS.lock().await.get(&request_id) {
+        flag.store(true, Ordering::Release);
+    }
+    eprintln!("[cancel_pdf_export] request_id={}", request_id);
+    Ok(())
 }
 
 #[tauri::command]
