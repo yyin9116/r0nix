@@ -30,6 +30,7 @@ static WEBVIEW_TABS: once_cell::sync::Lazy<Mutex<HashMap<String, String>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 const DEFAULT_NATIVE_WEBVIEW_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 Edg/132.0.0.0";
 const MAX_PROXY_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
+const PDF_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
 const NATIVE_WEBVIEW_NAV_PATCH_SCRIPT: &str = r#"(function () {
   if ((window).__r0nixNavPatchInstalled) return;
   (window).__r0nixNavPatchInstalled = true;
@@ -530,6 +531,22 @@ async fn resolve_file_path(file_id: &str) -> Result<String, String> {
     Ok(info.path)
 }
 
+async fn run_pdf_blocking<T, F>(label: &'static str, task: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let task = tokio::task::spawn_blocking(task);
+    match tokio::time::timeout(PDF_OPERATION_TIMEOUT, task).await {
+        Ok(Ok(result)) => result.map_err(|err| format!("{label} failed: {err}")),
+        Ok(Err(err)) => Err(format!("{label} task failed: {err}")),
+        Err(_) => Err(format!(
+            "{label} timed out after {} seconds",
+            PDF_OPERATION_TIMEOUT.as_secs()
+        )),
+    }
+}
+
 #[tauri::command]
 pub async fn open_pdf(file_id: String, path: String) -> Result<PdfInfo, String> {
     eprintln!("[open_pdf] file_id={} path={}", file_id, path);
@@ -719,9 +736,7 @@ pub async fn export_page_png(
     let path = resolve_file_path(&file_id).await?;
     let zoom = zoom.unwrap_or(2.0).max(0.1);
 
-    let png = tokio::task::spawn_blocking(move || render_page_png(&path, page_no, zoom))
-        .await
-        .map_err(|err| format!("png export task failed: {err}"))??;
+    let png = run_pdf_blocking("png export", move || render_page_png(&path, page_no, zoom)).await?;
 
     Ok(BASE64.encode(png))
 }
@@ -737,9 +752,10 @@ pub async fn extract_pdf_image(
         file_id, page_no, xref
     );
     let path = resolve_file_path(&file_id).await?;
-    tokio::task::spawn_blocking(move || extract_pdf_image_json(&path, page_no, xref))
-        .await
-        .map_err(|err| format!("pdf image extraction task failed: {err}"))?
+    run_pdf_blocking("pdf image extraction", move || {
+        extract_pdf_image_json(&path, page_no, xref)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -747,9 +763,7 @@ pub async fn export_page_svg(file_id: String, page_no: usize) -> Result<String, 
     eprintln!("[export_page_svg] file_id={} page={}", file_id, page_no);
     let path = resolve_file_path(&file_id).await?;
 
-    tokio::task::spawn_blocking(move || render_page_svg(&path, page_no))
-        .await
-        .map_err(|err| format!("svg export task failed: {err}"))?
+    run_pdf_blocking("svg export", move || render_page_svg(&path, page_no)).await
 }
 
 #[tauri::command]
@@ -767,11 +781,10 @@ pub async fn export_page_svg_crop(
     );
     let path = resolve_file_path(&file_id).await?;
 
-    tokio::task::spawn_blocking(move || {
+    run_pdf_blocking("svg crop export", move || {
         render_page_svg_crop(&path, page_no, left, top, width, height)
     })
     .await
-    .map_err(|err| format!("svg crop export task failed: {err}"))?
 }
 
 #[tauri::command]
@@ -779,9 +792,10 @@ pub async fn get_page_images(file_id: String, page_no: usize) -> Result<String, 
     eprintln!("[get_page_images] file_id={} page={}", file_id, page_no);
     let path = resolve_file_path(&file_id).await?;
 
-    tokio::task::spawn_blocking(move || get_page_images_json(&path, page_no))
-        .await
-        .map_err(|err| format!("get_page_images task failed: {err}"))?
+    run_pdf_blocking("get page images", move || {
+        get_page_images_json(&path, page_no)
+    })
+    .await
 }
 
 #[tauri::command]
