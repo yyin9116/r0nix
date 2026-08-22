@@ -10,8 +10,9 @@
     "test:pdf-blocks": "node --experimental-strip-types scripts/test-pdf-blocks.mjs",
     "test:e2e": "node scripts/smoke-e2e.mjs",
     "check:release": "node scripts/check-release-readiness.mjs",
+    "check:runtime-hygiene": "node scripts/check-python-runtime-hygiene.mjs",
     "check:pdf-virtualization": "node scripts/check-pdf-virtualization.mjs",
-    "verify": "npm run build && npm run check:release && npm run check:pdf-virtualization && npm run test:pdf-blocks && npm run test:e2e",
+    "verify": "npm run build && npm run check:release && npm run check:runtime-hygiene && npm run check:pdf-virtualization && npm run test:pdf-blocks && npm run test:e2e",
     "tauri": "tauri"
   },
   "dependencies": {

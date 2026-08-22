@@ -33,7 +33,10 @@ const ciWorkflow = existsSync(ciWorkflowPath) ? readFileSync(ciWorkflowPath, "ut
 const macosBundlePatchPath = path.join(root, "scripts/patch-macos-bundle.sh");
 const macosNotarizePath = path.join(root, "scripts/notarize-macos-artifact.sh");
 const windowsSmokePath = path.join(root, "scripts/windows-installer-smoke.ps1");
+const macosSmokePath = path.join(root, "scripts/macos-bundle-smoke.sh");
 const virtualizationCheckPath = path.join(root, "scripts/check-pdf-virtualization.mjs");
+const pdfApiPath = path.join(root, "src/services/pdfApi.ts");
+const pyRenderPath = path.join(root, "src-tauri/src/py_render.rs");
 
 assert(typeof csp === "string" && csp.trim().length > 0, "Tauri CSP must be explicit and non-empty.");
 assert(tauriConfig.build?.beforeBuildCommand === "npm run build", "Tauri release builds must compile the frontend from the current source.");
@@ -63,8 +66,16 @@ assert(existsSync(macosNotarizePath), "Signed macOS bundles must have an explici
 assert(releaseWorkflow.includes("notarize-macos-artifact.sh"), "Signed macOS release workflow must notarize patched artifacts.");
 assert(existsSync(windowsSmokePath), "Windows releases must have an installer smoke test.");
 assert(releaseWorkflow.includes("windows-installer-smoke.ps1"), "Windows release workflow must run the installed application smoke test.");
+assert(existsSync(macosSmokePath), "macOS releases must have a bundle smoke test.");
+assert(releaseWorkflow.includes("macos-bundle-smoke.sh"), "macOS release workflow must run the bundle smoke test.");
 assert(ciWorkflow.includes("cargo test --manifest-path src-tauri/Cargo.toml --lib -- --ignored"), "CI must exercise embedded PDF runtime regression tests.");
+assert(ciWorkflow.includes("check:runtime-hygiene"), "CI must validate embedded Python runtime hygiene.");
+assert(releaseWorkflow.includes("check:runtime-hygiene"), "Release workflow must validate embedded Python runtime hygiene.");
 assert(existsSync(virtualizationCheckPath), "PDF virtualization must have a source-level budget check.");
+const pdfApi = readFileSync(pdfApiPath, "utf8");
+assert(!pdfApi.includes("not implemented"), "PDF API must not expose unimplemented placeholder operations.");
+const pyRender = readFileSync(pyRenderPath, "utf8");
+assert(pyRender.includes('PYTHONDONTWRITEBYTECODE'), "Embedded Python must not write runtime bytecode into Tauri's watched tree.");
 
 for (const iconPath of bundle.icon || []) {
   assert(existsSync(path.join(root, "src-tauri", iconPath)), `Missing bundle icon: ${iconPath}`);

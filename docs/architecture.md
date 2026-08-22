@@ -28,6 +28,7 @@ React UI
 ## 已审阅并完成
 
 - 缩放视觉层与 PDF 重绘解耦，避免逐帧重排。
+- 嵌入 Python runtime 禁止写入 `__pycache__`，避免 PyMuPDF 首次调用改变 Tauri watcher 目录并触发重复原生重编译。
 - 右键手势不再释放时强制居中；激活页范围受控。
 - 离屏 PDF 页启用 `content-visibility`，减少大文档绘制开销。
 - 阅读块加载完成会刷新图像候选。
@@ -45,6 +46,7 @@ React UI
 - 翻译结果加入版本化本地缓存；失败块不会阻塞其它块，PDF/Markdown 均可单块重试。
 - Tauri 全文块提取按 24 页分段执行，每段独立受 30 秒超时保护，并向 UI 汇报页级进度。
 - 发布检查增加前端构建命令、嵌入 Python runtime、托盘退出入口和 Release workflow 门禁。
+- 发布检查增加跨平台 Python runtime hygiene 门禁，禁止 `__pycache__`/`.pyc` 进入嵌入目录；CI 和 Release workflow 均执行该检查。
 - PDF 原始图片导出已接入 Tauri/PyMuPDF，按真实资源扩展名写入；普通视图图片命中层不再阻断 PDF.js 文本选择。
 - 原始 xref 图片导出跳过整页 PNG 光栅；图片标注/导出菜单只按当前页或相邻页提取阅读块，避免长文档隐式全文扫描。
 - PDF 非活动页保留轻量尺寸占位，只有可见页和 overscan 页挂载 canvas、text layer、标注及图片交互子树。
@@ -62,7 +64,7 @@ React UI
 P 级痛点、验收标准和推荐执行顺序统一记录在 [产品痛点与开发优先级](./product-priorities.md)。后续实现以该文档为主，避免在 PDF、Markdown、资源索引和模型能力之间无序扩张。
 
 - 浏览器端图像识别和图像导出仍依赖后端 HTTP API，桌面端 Rust/PyMuPDF 链路已有集成测试。
-- 1000 页后端分段提取已通过 fixture；GitHub Actions CI run `32550535328` 已在 macOS 和 Windows 上通过嵌入式 PDF runtime 测试；桌面端真实打开、滚动、缩放的 GUI 性能仍需在打包应用中测量。
+- 1000 页后端分段提取已通过 fixture；GitHub Actions CI run `32550936770` 已在 macOS 和 Windows 上通过嵌入式 PDF runtime 测试；桌面端真实打开、滚动、缩放的 GUI 性能仍需在打包应用中测量。
 - Tauri 开发构建已在当前 macOS 环境重新编译并启动，日志确认原生 runtime 和 39 页 PDF.js 加载成功；由于系统锁屏，未完成本轮桌面人工点击和截图回归。
 - Markdown 使用 `marked` GFM lexer，再由 `markdownBlocks.ts` 归一化为共享节点；HTML 以不可执行文本保留，脚注定义会恢复为 `auxiliary` 阅读块，普通引用链接定义保持原生引用语义。
 - 当前没有独立 unit-test runner 和 lint 脚本；Rust 单测中依赖嵌入 Python 的测试仍被显式忽略。
@@ -70,5 +72,6 @@ P 级痛点、验收标准和推荐执行顺序统一记录在 [产品痛点与�
 - 当前尚未在 CI 中启动打包后的 macOS/Windows 应用做 GUI 集成测试；需要对应 runner 和签名/系统 WebView 环境。
 - Tauri 开发运行链路已在当前 macOS 环境验证：原生 runtime、Rust `open_pdf`、PDF.js 文档加载和页面缩略图渲染成功；仍缺少打包产物安装后的同等 GUI 证据。
 - macOS release `.app` 已在当前机器实际启动验证；内嵌 Python/PyMuPDF 动态库使用 bundle 相对 rpath，release workflow 会在 bundle 后重新签名，签名版再执行公证和 stapling。Windows release workflow 已加入 NSIS 安装、runtime 文件和启动 smoke；安装后的 GUI smoke 和打包应用端到端行为仍需 release runner 结果作为发布证据。
+- 本地 release `.app` 经 rpath 修补和 ad-hoc 重签名后通过 `codesign --verify --deep --strict`，生成的 DMG 通过 `hdiutil verify`；Release workflow 已加入同等 macOS bundle smoke，但锁屏环境仍未完成安装后 GUI 点击验证。
 - 首屏按 tab 懒加载 PDF、Markdown、网页、设置和画布；PDF.js 文档模块也延迟到首次打开 PDF 时加载，生产首屏主 chunk 已从约 1.1 MB 降至约 380 KB，PDF.js 独立 chunk 约 445 KB。
 - `check:pdf-virtualization` 会锁定页面占位、active page gating、有限 overlay 和 `content-visibility` 约束，避免性能优化在后续迭代中回退。

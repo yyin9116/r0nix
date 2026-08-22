@@ -31,8 +31,8 @@ PDF 阅读器、Markdown 编辑器、图片导出和模型服务都服务于这�
 - 代码边界：`PDFViewer.tsx` 页面挂载与 active page；`pdfJsService.ts` 文档缓存；`pdfApi.ts` 长任务适配。
 - 方案：页面占位高度 + 可见页虚拟化；前后各保留有限 overscan；资源和块提取使用可取消队列。
 - 验收：100、500、1000 页样本均可打开；滚动不创建全量 canvas；缩放期间不跳页、不出现空白页；任务可取消。
-- 当前证据：后端 1000 页分段测试、前端 E2E、macOS release `.app` 启动和 PDF.js 开发运行链路均已通过；GitHub Actions CI run `32550535328` 已在 macOS 和 Windows 上通过前端构建、Rust 检查、Rust 单测和嵌入式 PDF runtime 测试；真实 100/500/1000 页 GUI 帧率基准仍是发布前的测量项；Windows 安装 smoke 已接入 release workflow。
-- 性能补充：首屏 tab 与 PDF.js 均按需加载，生产首屏主 chunk 已降至约 380 KB；大文档真实 GUI 帧率仍需在桌面 runner 测量。
+- 当前证据：后端 1000 页分段测试、前端 E2E、macOS release `.app` 启动和 PDF.js 开发运行链路均已通过；GitHub Actions CI run `32550936770` 已在 macOS 和 Windows 上通过前端构建、Rust 检查、Rust 单测和嵌入式 PDF runtime 测试；真实 100/500/1000 页 GUI 帧率基准仍是发布前的测量项；Windows 安装 smoke 已接入 release workflow。
+- 性能补充：首屏 tab 与 PDF.js 均按需加载，生产首屏主 chunk 已降至约 380 KB；嵌入 Python runtime 禁止在 Tauri 监视目录写入 `__pycache__`，避免首次解析 PDF 触发原生开发进程重编译；大文档真实 GUI 帧率仍需在桌面 runner 测量。
 
 ### P0-2 PDF 图片导出语义正确
 

@@ -60,6 +60,9 @@ fn candidate_has_matching_stdlib(candidate: &std::path::Path) -> bool {
 
 fn ensure_python_runtime() {
     PYTHON_RUNTIME_ONCE.call_once(|| {
+        // The bundled runtime is read-only at application runtime. Prevent
+        // Python bytecode caches from changing Tauri's watched resource tree.
+        env::set_var("PYTHONDONTWRITEBYTECODE", "1");
         if let Some(runtime_home) = pick_runtime_home() {
             let runtime_str = runtime_home.to_string_lossy().into_owned();
             let site_packages = runtime_home.join("site-packages");

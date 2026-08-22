@@ -9,7 +9,7 @@
 import * as rustPdf from './rustPdf';
 import { loadPdfDocument, getCachedDocument, closePdfDocument } from './pdfJsService';
 import { debugError, debugLog, debugWarn } from './debugLogger';
-import { readNativeTextFile, writeNativeTempFile } from './nativeFiles';
+import { readNativeTextFile, writeNativeTempFile, writeNativeTextFile } from './nativeFiles';
 import type { PdfReadingBlock, PdfReadingBlockKind, ReaderAnnotationRect } from '../types';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 
@@ -22,6 +22,7 @@ debugLog('api.adapter', 'initialized', { runtime: isTauri ? 'tauri' : 'browser' 
 const BROWSER_API_BASE = 'http://localhost:8000';
 const browserLocalFiles = new Map<string, FileInfo>();
 const browserLocalMarkdown = new Map<string, string>();
+const nativeMarkdownPaths = new Map<string, string>();
 
 function cacheBrowserMarkdown(fileId: string, path: string, content: string) {
   browserLocalMarkdown.set(fileId, content);
@@ -124,12 +125,6 @@ export interface FileInfo {
   };
 }
 
-export interface MarkdownContentResponse {
-  content: string;
-  wordCount: number;
-  readTime: number;
-}
-
 export interface PDFImageInfo {
   xref: number;
   resourceId?: string;
@@ -149,21 +144,6 @@ export interface ExtractedPdfImage {
   width: number;
   height: number;
   dataBase64: string;
-}
-
-export interface ExtractedImage {
-  page: number;
-  index: number;
-  path: string;
-  size: string;
-  width: number;
-  height: number;
-}
-
-export interface ExtractImagesResponse {
-  images: ExtractedImage[];
-  outputDir: string;
-  total: number;
 }
 
 export interface TileViewport {
@@ -287,8 +267,10 @@ export async function openMarkdownFile(path: string): Promise<FileInfo> {
   if (isTauri) {
     const content = await readNativeTextFile(path);
     const words = content.trim() ? content.trim().split(/\s+/).length : 0;
+    const id = generateRuntimeId("md");
+    nativeMarkdownPaths.set(id, path);
     return {
-      id: generateRuntimeId("md"),
+      id,
       name: fileName,
       type: 'markdown',
       path,
@@ -409,6 +391,10 @@ export async function listFiles(): Promise<{ files: FileInfo[] }> {
 
 export async function closeFile(fileId: string): Promise<{ success: boolean }> {
   if (isTauri) {
+    if (nativeMarkdownPaths.has(fileId)) {
+      nativeMarkdownPaths.delete(fileId);
+      return { success: true };
+    }
     try {
       await closePdfDocument(fileId);
     } finally {
@@ -713,109 +699,27 @@ export async function getPDFReadingBlocks(
   return blocks;
 }
 
-export async function getPDFImage(fileId: string, xref: number): Promise<Blob> {
-  if (isTauri) {
-    throw new Error('getPDFImage not implemented in Rust backend yet');
-  } else {
-    const response = await fetch(`http://localhost:8000/api/pdf/${fileId}/image/${xref}`);
-
-    if (!response.ok) {
-      throw new Error(`Failed to get PDF image: ${response.statusText}`);
-    }
-
-    return response.blob();
-  }
-}
-
-export async function getPDFImageSVG(fileId: string, pageNumber: number, xref: number): Promise<Blob> {
-  if (isTauri) {
-    throw new Error('getPDFImageSVG not implemented in Rust backend yet');
-  } else {
-    const response = await fetch(`http://localhost:8000/api/pdf/${fileId}/page/${pageNumber}/image/${xref}/svg`);
-
-    if (!response.ok) {
-      throw new Error(`Failed to get PDF SVG: ${response.statusText}`);
-    }
-
-    return response.blob();
-  }
-}
-
-export async function extractPDFImages(
-  fileId: string,
-  pages?: number[],
-  deduplicate: boolean = true
-): Promise<ExtractImagesResponse> {
-  if (isTauri) {
-    throw new Error('extractPDFImages not implemented in Rust backend yet');
-  } else {
-    const response = await fetch(`http://localhost:8000/api/pdf/${fileId}/extract-images`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pages, deduplicate }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to extract images: ${response.statusText}`);
-    }
-
-    return response.json();
-  }
-}
-
 // ============ Markdown Operations ============
-
-export async function getMarkdownContent(
-  fileId: string
-): Promise<MarkdownContentResponse> {
-  if (isTauri) {
-    throw new Error('Markdown not implemented in Rust backend yet');
-  } else {
-    const response = await fetch(`http://localhost:8000/api/markdown/${fileId}/content`);
-
-    if (!response.ok) {
-      throw new Error(`Failed to get markdown content: ${response.statusText}`);
-    }
-
-    return response.json();
-  }
-}
 
 export async function saveMarkdown(
   fileId: string,
   content: string
 ): Promise<{ success: boolean }> {
   if (isTauri) {
-    throw new Error('Markdown not implemented in Rust backend yet');
-  } else {
-    const response = await fetch(`http://localhost:8000/api/markdown/${fileId}/save`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to save markdown: ${response.statusText}`);
-    }
-
-    return response.json();
+    const path = nativeMarkdownPaths.get(fileId);
+    if (!path) throw new Error('Markdown file is not open in the native runtime');
+    await writeNativeTextFile(path, content);
+    return { success: true };
   }
-}
+  const response = await fetch(`http://localhost:8000/api/markdown/${fileId}/save`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content }),
+  });
 
-export async function previewMarkdown(content: string): Promise<{ html: string }> {
-  if (isTauri) {
-    throw new Error('Markdown not implemented in Rust backend yet');
-  } else {
-    const response = await fetch(`http://localhost:8000/api/markdown/preview`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to preview markdown: ${response.statusText}`);
-    }
-
-    return response.json();
+  if (!response.ok) {
+    throw new Error(`Failed to save markdown: ${response.statusText}`);
   }
+
+  return response.json();
 }
