@@ -224,7 +224,14 @@ export async function openFile(path: string): Promise<FileInfo> {
       pages = doc.numPages;
       debugLog('api.openFile', 'pdfjs loaded', { pages });
     } catch (error) {
-      debugWarn('api.openFile', 'pdfjs load failed; using Rust page count', error);
+      debugWarn('api.openFile', 'pdfjs load failed; releasing Rust PDF handle', error);
+      try {
+        await rustPdf.closePdf(info.file_id);
+      } catch (closeError) {
+        debugWarn('api.openFile', 'failed to release Rust PDF handle after PDF.js load failure', closeError);
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`PDF.js failed to load the document: ${message}`);
     }
 
     return {
