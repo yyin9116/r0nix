@@ -54,6 +54,7 @@ React UI
 - PDF 笔记和标注点击回跳使用 `page + sourceRect`，不再只定位到页码。
 - PDF 长文档块提取按 24 页分段，调用方取消时不再启动后续分段；1000 页 fixture 已通过分段完整性测试。
 - SVG 局部导出不依赖当前 PyMuPDF 不支持的 `clip` 参数，改用 SVG viewport 裁剪，并通过嵌入 Python fixture 验证。
+- xref 图片识别保留宽幅/条带型 raster 资源；PDF.js hover 几何按行和连续文字片段拆分，相关双栏与断行规则由纯服务 fixture 覆盖。
 - Markdown block parser 使用内容稳定 ID，节点结构包含 `kind/depth/tableAlign/sourcePath`，预览、翻译和阅读辅助共享同一节点序列。
 
 ## 待审阅
@@ -62,6 +63,7 @@ P 级痛点、验收标准和推荐执行顺序统一记录在 [产品痛点与�
 
 - 浏览器端图像识别和图像导出仍依赖后端 HTTP API，桌面端 Rust/PyMuPDF 链路已有集成测试。
 - 1000 页后端分段提取已通过 fixture；GitHub Actions CI run `32549546089` 已在 macOS 和 Windows 上通过嵌入式 PDF runtime 测试；桌面端真实打开、滚动、缩放的 GUI 性能仍需在打包应用中测量。
+- Tauri 开发构建已在当前 macOS 环境重新编译并启动，日志确认原生 runtime 和 39 页 PDF.js 加载成功；由于系统锁屏，未完成本轮桌面人工点击和截图回归。
 - Markdown 使用 `marked` GFM lexer，再由 `markdownBlocks.ts` 归一化为共享节点；HTML 以不可执行文本保留，脚注定义会恢复为 `auxiliary` 阅读块，普通引用链接定义保持原生引用语义。
 - 当前没有独立 unit-test runner 和 lint 脚本；Rust 单测中依赖嵌入 Python 的测试仍被显式忽略。
 - 桌面端打包需要在实际 macOS/Windows 环境分别验证原生 WebView、托盘和安装器行为。

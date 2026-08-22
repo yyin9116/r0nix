@@ -281,7 +281,10 @@ try:
         aspect = max(box_w / max(1.0, box_h), box_h / max(1.0, box_w))
         if vector:
             return box_w >= 14 and box_h >= 14 and 0.0018 <= area_ratio <= 0.45 and aspect <= 18
-        return box_w >= 18 and box_h >= 18 and area_ratio >= 0.0025 and aspect <= 8
+        # Raster resources are often banners, strips, or tiled PDF assets.
+        # A strict aspect/area cutoff silently drops legitimate figures and
+        # logos before the user can inspect or export them.
+        return box_w >= 6 and box_h >= 6 and area_ratio >= 0.00005 and aspect <= 64
 
     def merge_rects(rects, tolerance=8.0, overlap_threshold=0.65):
         merged_rects = []
@@ -467,6 +470,9 @@ import fitz
 doc = fitz.open()
 page = doc.new_page(width=200, height=200)
 page.insert_image(fitz.Rect(20, 20, 100, 100), stream=image_bytes)
+# A wide, short raster resource protects against aspect-ratio filtering that
+# used to hide banners and figure labels from the export list.
+page.insert_image(fitz.Rect(110, 160, 195, 168), stream=image_bytes)
 page.draw_rect(fitz.Rect(120, 120, 180, 180), color=(0.1, 0.3, 0.8), width=2)
 doc.save(path)
 doc.close()

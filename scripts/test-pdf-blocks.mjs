@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { buildDomPdfReadingBlocks, parseMinerUContentList } from "../src/services/pdfBlocks.ts";
+import { buildDomPdfReadingBlocks, groupPdfTextHighlightRects, parseMinerUContentList } from "../src/services/pdfBlocks.ts";
 
 class TestElement {}
 globalThis.HTMLElement = TestElement;
@@ -56,6 +56,17 @@ const twoColumnBlocks = buildDomPdfReadingBlocks(makeTwoColumnLayer(), 7);
 assert.equal(twoColumnBlocks.length, 2, "double-column text must produce two paragraph groups");
 assert.ok(twoColumnBlocks.every((block) => !block.text.includes("Right column") || !block.text.includes("Left column")));
 assert.ok(twoColumnBlocks.every((block) => block.rect && block.rect.width < 0.55), "block rect must stay within one column");
+
+const highlightRects = groupPdfTextHighlightRects([
+  { left: 20, top: 20, right: 100, bottom: 32 },
+  { left: 104, top: 20, right: 180, bottom: 32 },
+  { left: 20, top: 52, right: 92, bottom: 64 },
+  { left: 320, top: 20, right: 400, bottom: 32 },
+]);
+assert.equal(highlightRects.length, 3, "hover geometry must split columns and separate distant lines");
+assert.deepEqual(highlightRects[0], { left: 20, top: 20, right: 180, bottom: 32 });
+assert.deepEqual(highlightRects[1], { left: 320, top: 20, right: 400, bottom: 32 });
+assert.deepEqual(highlightRects[2], { left: 20, top: 52, right: 92, bottom: 64 });
 
 const mineruBlocks = parseMinerUContentList({
   content_list: [

@@ -93,6 +93,49 @@ type DomTextSpan = {
   rect: DOMRect;
 };
 
+export interface PdfTextHighlightRect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/**
+ * Converts PDF.js word rectangles into compact hover rectangles. Keeping the
+ * geometry independent from the DOM makes the two-column and line-gap rules
+ * testable without a browser runtime.
+ */
+export function groupPdfTextHighlightRects(rects: PdfTextHighlightRect[]): PdfTextHighlightRect[] {
+  const spans = rects
+    .filter((rect) => rect.right > rect.left && rect.bottom > rect.top)
+    .sort((left, right) => left.top - right.top || left.left - right.left);
+  const lines: PdfTextHighlightRect[][] = [];
+  for (const span of spans) {
+    const previous = lines[lines.length - 1]?.[0];
+    const tolerance = Math.max(3, (span.bottom - span.top) * 0.65);
+    if (!previous || Math.abs(span.top - previous.top) > tolerance) lines.push([span]);
+    else lines[lines.length - 1].push(span);
+  }
+
+  return lines.flatMap((line) => {
+    const ordered = [...line].sort((left, right) => left.left - right.left);
+    const segments: PdfTextHighlightRect[][] = [];
+    for (const span of ordered) {
+      const previous = segments[segments.length - 1]?.[segments[segments.length - 1].length - 1];
+      const gap = previous ? span.left - previous.right : 0;
+      const joinGap = Math.max(8, (span.bottom - span.top) * 1.5);
+      if (!previous || gap > joinGap) segments.push([span]);
+      else segments[segments.length - 1].push(span);
+    }
+    return segments.map((segment) => ({
+      left: Math.min(...segment.map((item) => item.left)),
+      top: Math.min(...segment.map((item) => item.top)),
+      right: Math.max(...segment.map((item) => item.right)),
+      bottom: Math.max(...segment.map((item) => item.bottom)),
+    }));
+  });
+}
+
 function textFromSpan(span: HTMLElement) {
   return span.textContent?.replace(/\s+/g, " ").trim() || "";
 }

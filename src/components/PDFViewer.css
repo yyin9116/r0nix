@@ -370,6 +370,8 @@
   position: absolute;
   white-space: pre;
   cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
   transform-origin: 0% 0%;
   margin: 0;
   padding: 0;

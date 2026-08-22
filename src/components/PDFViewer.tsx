@@ -39,7 +39,7 @@ import {
   type TranslationBlockResult,
 } from "../services/readingAssistant";
 import { loadTranslationCache, saveTranslationCache } from "../services/translationCache";
-import { buildDomPdfReadingBlocks } from "../services/pdfBlocks";
+import { buildDomPdfReadingBlocks, groupPdfTextHighlightRects } from "../services/pdfBlocks";
 import { loadResourceIndex, saveResourceIndex, type CachedResourceLink } from "../services/resourceIndexCache";
 import "./PDFViewer.css";
 
@@ -858,21 +858,31 @@ function drawSpanGroupHighlightElements(group: HTMLElement[], host: HTMLElement,
     .filter((item) => item.rect.width > 0 && item.rect.height > 0)
     .sort((left, right) => left.rect.top - right.rect.top || left.rect.left - right.rect.left);
   if (spans.length === 0) return [];
-  const padX = 5;
-  const padY = 4;
-  const left = Math.min(...spans.map((item) => item.rect.left));
-  const top = Math.min(...spans.map((item) => item.rect.top));
-  const right = Math.max(...spans.map((item) => item.rect.right));
-  const bottom = Math.max(...spans.map((item) => item.rect.bottom));
-  const element = existing[0] || document.createElement("div");
-  element.className = "pdf-assist-block-highlight";
-  element.style.left = `${Math.max(0, left - hostRect.left - padX)}px`;
-  element.style.top = `${Math.max(0, top - hostRect.top - padY)}px`;
-  element.style.width = `${Math.min(hostRect.width, right - left + padX * 2)}px`;
-  element.style.height = `${Math.min(hostRect.height, bottom - top + padY * 2)}px`;
-  if (element.parentElement !== host) host.appendChild(element);
-  const elements = [element];
-  for (const stale of existing.slice(1)) stale.remove();
+
+  // A single union rectangle fills the whitespace between lines and can span
+  // both columns. Keep the native text-layer geometry, but draw one compact
+  // rectangle for each continuous line segment instead.
+  const highlightRects = groupPdfTextHighlightRects(spans.map(({ rect }) => ({
+    left: rect.left,
+    top: rect.top,
+    right: rect.right,
+    bottom: rect.bottom,
+  })));
+  const elements = highlightRects.map((highlightRect, index) => {
+    const lineHeight = highlightRect.bottom - highlightRect.top;
+    const padX = Math.min(5, Math.max(2, lineHeight * 0.24));
+    const padY = Math.min(4, Math.max(2, lineHeight * 0.18));
+    const { left, top, right, bottom } = highlightRect;
+    const element = existing[index] || document.createElement("div");
+    element.className = "pdf-assist-block-highlight";
+    element.style.left = `${Math.max(0, left - hostRect.left - padX)}px`;
+    element.style.top = `${Math.max(0, top - hostRect.top - padY)}px`;
+    element.style.width = `${Math.min(hostRect.width, right - left + padX * 2)}px`;
+    element.style.height = `${Math.min(hostRect.height, bottom - top + padY * 2)}px`;
+    if (element.parentElement !== host) host.appendChild(element);
+    return element;
+  });
+  for (const stale of existing.slice(elements.length)) stale.remove();
   return elements;
 }
 

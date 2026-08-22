@@ -1333,6 +1333,10 @@ mod tests {
             .as_array()
             .and_then(|items| items.first())
             .expect("one embedded image");
+        assert!(
+            listed.as_array().is_some_and(|items| items.len() >= 2),
+            "wide raster resources must remain discoverable"
+        );
         let xref = image["xref"].as_u64().expect("image xref") as usize;
         assert_eq!(image["extension"], "png");
         assert_eq!(image["width"], 1);

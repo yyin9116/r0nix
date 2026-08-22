@@ -40,7 +40,12 @@ function backendHintError(action: string): Error {
 }
 
 function generateBrowserFileId() {
-  return `browser-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return generateRuntimeId("browser");
+}
+
+function generateRuntimeId(prefix: string) {
+  const randomUuid = globalThis.crypto?.randomUUID?.();
+  return `${prefix}-${randomUuid || `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`}`;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
@@ -229,7 +234,7 @@ function normalizePdfReadingBlocks(raw: unknown): PdfReadingBlock[] {
 export async function openFile(path: string): Promise<FileInfo> {
   debugLog('api.openFile', 'start', { path, isTauri });
   if (isTauri) {
-    const fileId = `file-${Date.now()}`;
+    const fileId = generateRuntimeId("file");
     const info = await rustPdf.openPdf(fileId, path);
     debugLog('api.openFile', 'rust open_pdf success', info);
     let pages = info.page_count;
@@ -283,7 +288,7 @@ export async function openMarkdownFile(path: string): Promise<FileInfo> {
     const content = await readNativeTextFile(path);
     const words = content.trim() ? content.trim().split(/\s+/).length : 0;
     return {
-      id: `md-${Date.now()}`,
+      id: generateRuntimeId("md"),
       name: fileName,
       type: 'markdown',
       path,
