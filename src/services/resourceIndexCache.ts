@@ -11,15 +11,16 @@ export type ResourceIndexSnapshot = {
   images: Record<number, PDFImageInfo[]>;
   links: Record<number, CachedResourceLink[]>;
   scannedPages: number[];
+  textByPage: Record<number, string>;
 };
 
 type ResourceIndexEnvelope = ResourceIndexSnapshot & {
-  version: 2;
+  version: 3;
   updatedAt: string;
 };
 
 const CACHE_PREFIX = "r0nix:resource-index:";
-const CACHE_VERSION = 2 as const;
+const CACHE_VERSION = 3 as const;
 const MAX_CACHED_PAGES = 2000;
 const MAX_CACHE_BYTES = 2_000_000;
 
@@ -92,12 +93,14 @@ function trimPages(snapshot: ResourceIndexSnapshot): ResourceIndexSnapshot {
     ...Object.keys(snapshot.images).map(Number),
     ...Object.keys(snapshot.links).map(Number),
     ...snapshot.scannedPages,
+    ...Object.keys(snapshot.textByPage).map(Number),
   ])).filter((page) => Number.isInteger(page) && page > 0).sort((a, b) => a - b);
   const keep = new Set(pages.slice(-MAX_CACHED_PAGES));
   return {
     images: Object.fromEntries(Object.entries(snapshot.images).filter(([page]) => keep.has(Number(page)))),
     links: Object.fromEntries(Object.entries(snapshot.links).filter(([page]) => keep.has(Number(page)))),
     scannedPages: pages.filter((page) => keep.has(page)),
+    textByPage: Object.fromEntries(Object.entries(snapshot.textByPage).filter(([page]) => keep.has(Number(page)))),
   };
 }
 
@@ -107,6 +110,17 @@ function sanitizeScannedPages(value: unknown): number[] {
     .map((page) => Number(page))
     .filter((page) => Number.isInteger(page) && page > 0)))
     .sort((left, right) => left - right);
+}
+
+function sanitizeTextByPage(value: unknown): Record<number, string> {
+  if (!value || typeof value !== "object") return {};
+  const result: Record<number, string> = {};
+  for (const [pageKey, rawText] of Object.entries(value)) {
+    const page = Number(pageKey);
+    if (!Number.isInteger(page) || page < 1 || typeof rawText !== "string") continue;
+    result[page] = rawText.slice(0, 200_000);
+  }
+  return result;
 }
 
 export function loadResourceIndex(key: string): ResourceIndexSnapshot | null {
@@ -120,6 +134,7 @@ export function loadResourceIndex(key: string): ResourceIndexSnapshot | null {
       images: sanitizeImages(parsed.images),
       links: sanitizeLinks(parsed.links),
       scannedPages: sanitizeScannedPages(parsed.scannedPages),
+      textByPage: sanitizeTextByPage(parsed.textByPage),
     });
   } catch {
     return null;
