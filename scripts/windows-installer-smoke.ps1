@@ -38,9 +38,12 @@ if ($installedBinaries.Count -ne 1) {
 
 $binary = $installedBinaries[0].FullName
 $applicationRoot = $installedBinaries[0].Directory.FullName
-$runtime = Join-Path $applicationRoot "resources/runtime"
-if (-not (Test-Path $runtime -PathType Container)) {
-  throw "Embedded runtime is missing beside the installed binary: $runtime"
+$runtimeCandidates = @(
+  (Join-Path $applicationRoot "runtime"),
+  (Join-Path $applicationRoot "resources/runtime")
+) | Where-Object { Test-Path $_ -PathType Container }
+if ($runtimeCandidates.Count -ne 1) {
+  throw "Expected exactly one embedded runtime beside the installed binary, found $($runtimeCandidates.Count): $($runtimeCandidates -join ", ")"
 }
 
 $process = Start-Process -FilePath $binary -PassThru
