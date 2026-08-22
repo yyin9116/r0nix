@@ -1213,22 +1213,23 @@ export default function App() {
 
   const handleCloseTab = useCallback(
     (id: string) => {
-      setTabs((prev) => {
-        const closing = prev.find((item) => item.id === id);
-        if (!closing) return prev;
-        if (closing.type === "web") {
-          closeWebTabNative(closing.id);
-        }
-        if ((closing.type === "pdf" || closing.type === "markdown") && closing.fileId) {
-          void api.closeFile(closing.fileId).catch((error) => {
-            debugWarn("tab.close", "failed to release document handle", {
-              tabId: closing.id,
-              fileId: closing.fileId,
-              error,
-            });
+      const closing = tabs.find((item) => item.id === id);
+      if (!closing) return;
+      if (closing.type === "web") {
+        closeWebTabNative(closing.id);
+      }
+      if ((closing.type === "pdf" || closing.type === "markdown") && closing.fileId) {
+        void api.closeFile(closing.fileId).catch((error) => {
+          debugWarn("tab.close", "failed to release document handle", {
+            tabId: closing.id,
+            fileId: closing.fileId,
+            error,
           });
-        }
+        });
+      }
 
+      setTabs((prev) => {
+        if (!prev.some((item) => item.id === id)) return prev;
         const nextTabs = prev.filter((item) => item.id !== id);
         if (nextTabs.length === 0) {
           setActiveTabId(DEFAULT_ACTIVE_TAB_ID);
@@ -1244,7 +1245,7 @@ export default function App() {
         return nextTabs;
       });
     },
-    [activeTabId, closeWebTabNative]
+    [activeTabId, closeWebTabNative, tabs]
   );
 
   const handleOpenExternal = useCallback(async (url: string) => {
