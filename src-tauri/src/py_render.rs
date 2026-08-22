@@ -371,9 +371,10 @@ try:
         if valid_box(left, top, right, bottom, vector=True):
             vector_rects.append((left, top, right, bottom))
 
-    # Keep vector figures local. A page-wide proximity merge turns unrelated
-    # paths, borders, and text outlines into a false full-page image.
-    for left, top, right, bottom in merge_rects(vector_rects, tolerance=3.0, overlap_threshold=0.7):
+    # Only collapse duplicate/near-identical drawing paths. Adjacent paths can
+    # be separate chart marks, borders, or glyph outlines; merging them by a
+    # proximity threshold creates false page-sized image targets.
+    for left, top, right, bottom in merge_rects(vector_rects, tolerance=0.0, overlap_threshold=0.92):
         if not valid_box(left, top, right, bottom, vector=True):
             continue
         items.append({
