@@ -2639,6 +2639,13 @@ export function PDFViewer({
         return blocks;
       })
       .catch((error) => {
+        if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+          setImageLabelStatus({
+            kind: "idle",
+            message: language === "zh-CN" ? "全文块提取已取消" : "Reading block extraction cancelled",
+          });
+          throw error;
+        }
         const message = error instanceof Error ? error.message : String(error);
         setImageLabelStatus({ kind: "error", message: t.imageLabelFailed.replace("{message}", message) });
         throw error;

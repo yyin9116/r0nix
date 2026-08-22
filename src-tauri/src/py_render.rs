@@ -3,9 +3,24 @@ use pyo3::types::PyDict;
 use std::env;
 use std::ffi::CStr;
 use std::path::PathBuf;
-use std::sync::Once;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Once,
+};
 
 static PYTHON_RUNTIME_ONCE: Once = Once::new();
+
+#[pyclass]
+pub struct CancellationProbe {
+    flag: Arc<AtomicBool>,
+}
+
+#[pymethods]
+impl CancellationProbe {
+    fn is_cancelled(&self) -> bool {
+        self.flag.load(Ordering::Acquire)
+    }
+}
 
 fn runtime_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
@@ -523,6 +538,7 @@ pub fn get_pdf_reading_blocks_json(
     path: &str,
     start_page: Option<usize>,
     end_page: Option<usize>,
+    cancel_flag: Option<Arc<AtomicBool>>,
 ) -> Result<String, String> {
     ensure_python_runtime();
     let path_owned = path.to_string();
@@ -532,6 +548,11 @@ pub fn get_pdf_reading_blocks_json(
         locals.set_item("path", path_owned.as_str())?;
         locals.set_item("start_page", start_page.unwrap_or(1))?;
         locals.set_item("end_page", end_page.unwrap_or(0))?;
+        if let Some(flag) = cancel_flag {
+            locals.set_item("cancel_probe", Py::new(py, CancellationProbe { flag })?)?;
+        } else {
+            locals.set_item("cancel_probe", py.None())?;
+        }
 
         py.run_bound(
             r#"
@@ -539,12 +560,17 @@ import fitz
 import json
 import re
 
+def check_cancelled():
+    if cancel_probe is not None and cancel_probe.is_cancelled():
+        raise RuntimeError("r0nix-cancelled")
+
 doc = fitz.open(path)
 try:
     items = []
     first_page = max(1, int(start_page)) - 1
     last_page = min(int(doc.page_count), int(end_page)) if int(end_page) > 0 else int(doc.page_count)
     for page_index in range(first_page, max(first_page, last_page)):
+        check_cancelled()
         page = doc.load_page(page_index)
         rect = page.rect
         page_x0 = float(rect.x0)
@@ -553,6 +579,7 @@ try:
         page_h = float(rect.height) or 1.0
 
         for block_index, block in enumerate(page.get_text("blocks")):
+            check_cancelled()
             if len(block) < 5:
                 continue
 

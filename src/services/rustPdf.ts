@@ -131,8 +131,17 @@ export async function getPageImages(
   return await invoke<string>("get_page_images", { fileId, pageNo });
 }
 
-export async function getPdfReadingBlocks(fileId: string, startPage?: number, endPage?: number): Promise<string> {
-  return await invoke<string>("get_pdf_reading_blocks", { fileId, startPage, endPage });
+export async function getPdfReadingBlocks(
+  fileId: string,
+  startPage?: number,
+  endPage?: number,
+  requestId?: string,
+): Promise<string> {
+  return await invoke<string>("get_pdf_reading_blocks", { fileId, startPage, endPage, requestId });
+}
+
+export async function cancelPdfReadingBlocks(requestId: string): Promise<void> {
+  await invoke("cancel_pdf_reading_blocks", { requestId });
 }
 
 function base64ToBytes(base64: string): Uint8Array {

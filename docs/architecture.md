@@ -42,6 +42,7 @@ React UI
 - Tauri 打开 PDF 时若 PDF.js 加载失败，会释放已打开的 Rust handle 并返回显式错误，不再以只有页数、没有可渲染文档的假成功状态继续运行。
 - Tauri 打开 PDF 只登记文件元数据，不再首屏等待 PyMuPDF 页数扫描；原生分页任务首次需要时才解析页数并回写句柄，避免大 PDF 打开阶段重复解析和 8 秒超时假成功。
 - 按需原生页数解析受 30 秒超时保护，超时以显式错误返回，不再让损坏或极端 PDF 无限占用调用方。
+- Tauri 阅读块提取使用请求 ID 和原子取消探针；AbortSignal 可通过 IPC 通知原生任务，PyMuPDF 在页/block 边界停止遍历并释放任务记录。
 - Full translation hover 优先使用 PDF.js text layer 的事件目标，只有文字间隙才进行几何回退命中，避免每帧遍历整页文本节点。
 - 浏览器模式增加 PDF.js 文本块兜底，Full translation 不再固定返回空块。
 - 删除未被阅读器消费的默认导出格式死配置，避免显示未实现的 JPG 能力。

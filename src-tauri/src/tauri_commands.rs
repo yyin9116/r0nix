@@ -10,7 +10,10 @@ use pdf_core::{plan_visible_tiles, PdfInfo, TileReadyPayload, TileRequestAck, Ti
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc,
+};
 use std::time::Duration;
 use tauri::{
     webview::WebviewBuilder, AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position,
@@ -21,6 +24,8 @@ use tokio::sync::Mutex;
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 static CANCELED_REQUESTS: once_cell::sync::Lazy<Mutex<HashSet<String>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashSet::new()));
+static PDF_BLOCK_CANCEL_FLAGS: once_cell::sync::Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 static WEBVIEW_TABS: once_cell::sync::Lazy<Mutex<HashMap<String, String>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 const DEFAULT_NATIVE_WEBVIEW_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 Edg/132.0.0.0";
@@ -784,20 +789,54 @@ pub async fn get_pdf_reading_blocks(
     file_id: String,
     start_page: Option<usize>,
     end_page: Option<usize>,
+    request_id: Option<String>,
 ) -> Result<String, String> {
     eprintln!(
-        "[get_pdf_reading_blocks] file_id={} start={:?} end={:?}",
-        file_id, start_page, end_page
+        "[get_pdf_reading_blocks] file_id={} start={:?} end={:?} request_id={:?}",
+        file_id, start_page, end_page, request_id
     );
     let path = resolve_file_path(&file_id).await?;
-
-    let task = tokio::task::spawn_blocking(move || {
-        get_pdf_reading_blocks_json(&path, start_page, end_page)
-    });
-    match tokio::time::timeout(Duration::from_secs(30), task).await {
-        Ok(result) => result.map_err(|err| format!("get_pdf_reading_blocks task failed: {err}"))?,
-        Err(_) => Err("PDF reading block extraction timed out after 30 seconds".to_string()),
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    if let Some(request_id) = request_id.as_deref() {
+        if request_id.trim().is_empty() {
+            return Err("reading block request id cannot be empty".to_string());
+        }
+        PDF_BLOCK_CANCEL_FLAGS
+            .lock()
+            .await
+            .insert(request_id.to_string(), cancel_flag.clone());
     }
+
+    let cancel_flag_for_task = cancel_flag.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        get_pdf_reading_blocks_json(&path, start_page, end_page, Some(cancel_flag_for_task))
+    });
+    let result = match tokio::time::timeout(Duration::from_secs(30), task).await {
+        Ok(Ok(result)) => {
+            result.map_err(|err| format!("get_pdf_reading_blocks task failed: {err}"))
+        }
+        Ok(Err(err)) => Err(format!("get_pdf_reading_blocks task failed: {err}")),
+        Err(_) => {
+            cancel_flag.store(true, Ordering::Release);
+            Err("PDF reading block extraction timed out after 30 seconds".to_string())
+        }
+    };
+    if let Some(request_id) = request_id {
+        PDF_BLOCK_CANCEL_FLAGS.lock().await.remove(&request_id);
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn cancel_pdf_reading_blocks(request_id: String) -> Result<(), String> {
+    if request_id.trim().is_empty() {
+        return Err("reading block request id cannot be empty".to_string());
+    }
+    if let Some(flag) = PDF_BLOCK_CANCEL_FLAGS.lock().await.get(&request_id) {
+        flag.store(true, Ordering::Release);
+    }
+    eprintln!("[cancel_pdf_reading_blocks] request_id={}", request_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1416,6 +1455,7 @@ mod tests {
                 path.to_str().expect("fixture path"),
                 Some(start_page),
                 Some(end_page),
+                None,
             )
             .expect("extract chunk");
             let blocks: Vec<serde_json::Value> =
@@ -1429,6 +1469,34 @@ mod tests {
         assert_eq!(pages.len(), 1000);
         assert_eq!(pages.first(), Some(&1));
         assert_eq!(pages.last(), Some(&1000));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[ignore = "requires the embedded Python/PyMuPDF runtime"]
+    fn reading_block_extraction_honors_cancellation_probe() {
+        use crate::py_render::{ensure_test_pdf_with_text_pages, get_pdf_reading_blocks_json};
+        use std::sync::{atomic::AtomicBool, Arc};
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let path = std::env::temp_dir().join(format!(
+            "r0nix-cancel-fixture-{}.pdf",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        ensure_test_pdf_with_text_pages(&path, 4).expect("create cancellation fixture");
+        let flag = Arc::new(AtomicBool::new(true));
+        let result = get_pdf_reading_blocks_json(
+            path.to_str().expect("fixture path"),
+            Some(1),
+            Some(4),
+            Some(flag),
+        );
+        assert!(result
+            .expect_err("cancelled extraction must fail")
+            .contains("r0nix-cancelled"));
         let _ = std::fs::remove_file(path);
     }
 }

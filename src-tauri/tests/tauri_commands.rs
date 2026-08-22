@@ -84,7 +84,9 @@ fn write_test_pdf(page_count: usize) -> std::path::PathBuf {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a matching embedded Python/PyMuPDF runtime"]
 async fn test_tauri_commands_open_info_and_list() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = write_test_pdf(2);
     let path_str = path.to_string_lossy().to_string();
     let file_id = "tauri-doc-1".to_string();
@@ -96,7 +98,8 @@ async fn test_tauri_commands_open_info_and_list() {
     assert_eq!(info.path, path.to_string_lossy());
 
     let count = get_page_count(file_id.clone()).await.unwrap();
-    assert_eq!(count, info.page_count);
+    let resolved_info = get_pdf_info(file_id.clone()).await.unwrap();
+    assert_eq!(count, resolved_info.page_count);
 
     let listed = list_pdfs().await.unwrap();
     assert!(listed.contains(&file_id));
@@ -108,7 +111,9 @@ async fn test_tauri_commands_open_info_and_list() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a matching embedded Python/PyMuPDF runtime"]
 async fn test_tauri_commands_export_png_and_svg() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = write_test_pdf(2);
     let path_str = path.to_string_lossy().to_string();
     let file_id = "tauri-doc-render".to_string();
@@ -130,7 +135,9 @@ async fn test_tauri_commands_export_png_and_svg() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a matching embedded Python/PyMuPDF runtime"]
 async fn test_tauri_commands_invalid_page() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = write_test_pdf(1);
     let path_str = path.to_string_lossy().to_string();
     let file_id = "tauri-doc-2".to_string();
@@ -148,7 +155,9 @@ async fn test_tauri_commands_invalid_page() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_tauri_commands_missing_document() {
-    let _guard = TEST_LOCK.lock().unwrap();
+    let _guard = TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let err = export_page_png("missing-doc".to_string(), 1, Some(1.0))
         .await
         .unwrap_err();

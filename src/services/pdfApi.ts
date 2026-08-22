@@ -630,80 +630,102 @@ export async function getPDFReadingBlocks(
     }
   };
   throwIfAborted();
+  const requestId = isTauri ? generateRuntimeId("pdf-blocks") : undefined;
+  const cancelNativeTask = () => {
+    if (!requestId) return;
+    void rustPdf.cancelPdfReadingBlocks(requestId).catch((error) => {
+      debugWarn("api.getPDFReadingBlocks", "failed to cancel native reading block task", error);
+    });
+  };
+  signal?.addEventListener("abort", cancelNativeTask, { once: true });
   if (isTauri) {
-    const total = await rustPdf.getPageCount(fileId);
-    throwIfAborted();
-    const chunkSize = 24;
+    try {
+      const total = await rustPdf.getPageCount(fileId);
+      throwIfAborted();
+      const chunkSize = 24;
+      const blocks: PdfReadingBlock[] = [];
+      const firstPage = Math.max(1, Math.min(total, Math.round(range?.startPage ?? 1)));
+      const lastPage = Math.max(firstPage, Math.min(total, Math.round(range?.endPage ?? total)));
+      for (let startPage = firstPage; startPage <= lastPage; startPage += chunkSize) {
+        throwIfAborted();
+        const endPage = Math.min(lastPage, startPage + chunkSize - 1);
+        let json: string;
+        try {
+          json = await rustPdf.getPdfReadingBlocks(fileId, startPage, endPage, requestId);
+        } catch (error) {
+          throwIfAborted();
+          throw error;
+        }
+        throwIfAborted();
+        const raw = JSON.parse(json) as unknown;
+        blocks.push(...normalizePdfReadingBlocks(raw));
+        onProgress?.(endPage, total);
+      }
+      return blocks;
+    } finally {
+      signal?.removeEventListener("abort", cancelNativeTask);
+    }
+  }
+
+  try {
+    const doc = getCachedDocument(fileId);
+    if (!doc) throw new Error(`PDF document is not loaded: ${fileId}`);
     const blocks: PdfReadingBlock[] = [];
-    const firstPage = Math.max(1, Math.min(total, Math.round(range?.startPage ?? 1)));
-    const lastPage = Math.max(firstPage, Math.min(total, Math.round(range?.endPage ?? total)));
-    for (let startPage = firstPage; startPage <= lastPage; startPage += chunkSize) {
+    const firstPage = Math.max(1, Math.min(doc.numPages, Math.round(range?.startPage ?? 1)));
+    const lastPage = Math.max(firstPage, Math.min(doc.numPages, Math.round(range?.endPage ?? doc.numPages)));
+    for (let pageNo = firstPage; pageNo <= lastPage; pageNo += 1) {
       throwIfAborted();
-      const endPage = Math.min(lastPage, startPage + chunkSize - 1);
-      const json = await rustPdf.getPdfReadingBlocks(fileId, startPage, endPage);
+      const page = await doc.getPage(pageNo);
+      const viewport = page.getViewport({ scale: 1 });
+      const content = await page.getTextContent();
       throwIfAborted();
-      const raw = JSON.parse(json) as unknown;
-      blocks.push(...normalizePdfReadingBlocks(raw));
-      onProgress?.(endPage, total);
+      const items = content.items as Array<Record<string, unknown>>;
+      const text = items
+        .map((item) => (typeof item.str === "string" ? item.str : ""))
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!text) continue;
+
+      const rects = items
+        .map((item) => {
+          const transform = Array.isArray(item.transform) ? item.transform.map(Number) : [];
+          const x = Number(transform[4]);
+          const baseline = Number(transform[5]);
+          const width = Number(item.width);
+          const height = Number(item.height) || Math.abs(Number(transform[3]));
+          if (![x, baseline, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
+          return {
+            left: x,
+            top: viewport.height - baseline - height,
+            right: x + width,
+            bottom: viewport.height - baseline,
+          };
+        })
+        .filter((rect): rect is { left: number; top: number; right: number; bottom: number } => Boolean(rect));
+      const left = rects.length > 0 ? Math.max(0, Math.min(...rects.map((rect) => rect.left))) : 0;
+      const top = rects.length > 0 ? Math.max(0, Math.min(...rects.map((rect) => rect.top))) : 0;
+      const right = rects.length > 0 ? Math.min(viewport.width, Math.max(...rects.map((rect) => rect.right))) : viewport.width;
+      const bottom = rects.length > 0 ? Math.min(viewport.height, Math.max(...rects.map((rect) => rect.bottom))) : viewport.height;
+      blocks.push({
+        id: `pdfjs-${pageNo}-text`,
+        page: pageNo,
+        kind: "text",
+        text,
+        rect: {
+          x: left / Math.max(1, viewport.width),
+          y: top / Math.max(1, viewport.height),
+          width: Math.max(0.01, (right - left) / Math.max(1, viewport.width)),
+          height: Math.max(0.01, (bottom - top) / Math.max(1, viewport.height)),
+        },
+        source: "pdfjs-dom",
+      });
+      onProgress?.(pageNo, doc.numPages);
     }
     return blocks;
+  } finally {
+    signal?.removeEventListener("abort", cancelNativeTask);
   }
-
-  const doc = getCachedDocument(fileId);
-  if (!doc) throw new Error(`PDF document is not loaded: ${fileId}`);
-  const blocks: PdfReadingBlock[] = [];
-  const firstPage = Math.max(1, Math.min(doc.numPages, Math.round(range?.startPage ?? 1)));
-  const lastPage = Math.max(firstPage, Math.min(doc.numPages, Math.round(range?.endPage ?? doc.numPages)));
-  for (let pageNo = firstPage; pageNo <= lastPage; pageNo += 1) {
-    throwIfAborted();
-    const page = await doc.getPage(pageNo);
-    const viewport = page.getViewport({ scale: 1 });
-    const content = await page.getTextContent();
-    throwIfAborted();
-    const items = content.items as Array<Record<string, unknown>>;
-    const text = items
-      .map((item) => (typeof item.str === "string" ? item.str : ""))
-      .join(" ")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (!text) continue;
-
-    const rects = items
-      .map((item) => {
-        const transform = Array.isArray(item.transform) ? item.transform.map(Number) : [];
-        const x = Number(transform[4]);
-        const baseline = Number(transform[5]);
-        const width = Number(item.width);
-        const height = Number(item.height) || Math.abs(Number(transform[3]));
-        if (![x, baseline, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
-        return {
-          left: x,
-          top: viewport.height - baseline - height,
-          right: x + width,
-          bottom: viewport.height - baseline,
-        };
-      })
-      .filter((rect): rect is { left: number; top: number; right: number; bottom: number } => Boolean(rect));
-    const left = rects.length > 0 ? Math.max(0, Math.min(...rects.map((rect) => rect.left))) : 0;
-    const top = rects.length > 0 ? Math.max(0, Math.min(...rects.map((rect) => rect.top))) : 0;
-    const right = rects.length > 0 ? Math.min(viewport.width, Math.max(...rects.map((rect) => rect.right))) : viewport.width;
-    const bottom = rects.length > 0 ? Math.min(viewport.height, Math.max(...rects.map((rect) => rect.bottom))) : viewport.height;
-    blocks.push({
-      id: `pdfjs-${pageNo}-text`,
-      page: pageNo,
-      kind: "text",
-      text,
-      rect: {
-        x: left / Math.max(1, viewport.width),
-        y: top / Math.max(1, viewport.height),
-        width: Math.max(0.01, (right - left) / Math.max(1, viewport.width)),
-        height: Math.max(0.01, (bottom - top) / Math.max(1, viewport.height)),
-      },
-      source: "pdfjs-dom",
-    });
-    onProgress?.(pageNo, doc.numPages);
-  }
-  return blocks;
 }
 
 // ============ Markdown Operations ============
