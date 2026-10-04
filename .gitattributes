@@ -1,0 +1,64 @@
+# ─────────────────────────────────────────────────────────────────────
+# 换行与二进制的唯一权威判定。
+#
+# 背景：本仓库此前既没有 .gitattributes、也没有 core.autocrlf，实测
+# 109 个文本文件里 69 个纯 LF、20 个纯 CRLF、17 个文件内部真·混合换行。
+# 后果：`git diff --check` 会刷出上千条 CRLF 假告警（每一行都算 trailing
+# whitespace），真问题被完全淹没；同一个文件被不同编辑器交替保存会反复
+# 产生整文件 diff。
+#
+# 约定：仓库内文本一律 LF；只有「在 Windows 上被原生工具链直接读取」的
+# 脚本保留 CRLF，避免解析异常。
+#
+# 改动这份文件后，存量文件需要跟随规范化：
+#   git add --renormalize .
+# 然后单独提交，不要和功能改动混在一起。
+# ─────────────────────────────────────────────────────────────────────
+
+* text=auto eol=lf
+
+# ── Windows 原生工具链直接读取：保留 CRLF ──
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+*.ps1     text eol=crlf
+*.nsh     text eol=crlf
+*.sln     text eol=crlf
+*.vcxproj text eol=crlf
+
+# ── 随包分发的第三方构建产物：字节即权威，不做任何换行转换 ──
+# public/pdf.worker.min.mjs 是从 pdfjs-dist 拷进来的压缩 worker（约 1 MB）。
+# 它没有人工编辑路径，按文本规范化只会换来一次 1 MB 的整文件 diff，
+# 且日后每次重新拷贝都再刷一遍；浏览器不关心它的行尾，所以直接退出文本判定。
+*.min.mjs -text
+*.min.js  -text
+*.min.css -text
+
+# ── 二进制：显式声明，禁止任何换行转换 ──
+# 重点：src-tauri/runtime/** 是随包分发的 Python 运行时（dll / dylib / so /
+# zip / pyd），一旦被当成文本做 CRLF 转换就会直接损坏，应用会启动失败。
+*.png    binary
+*.jpg    binary
+*.jpeg   binary
+*.gif    binary
+*.ico    binary
+*.icns   binary
+*.webp   binary
+*.bmp    binary
+*.woff   binary
+*.woff2  binary
+*.ttf    binary
+*.otf    binary
+*.eot    binary
+*.dll    binary
+*.dylib  binary
+*.so     binary
+*.pyd    binary
+*.zip    binary
+*.7z     binary
+*.gz     binary
+*.pdf    binary
+*.pyc    binary
+*.exe    binary
+*.node   binary
+*.dmg    binary
+*.sig    binary
