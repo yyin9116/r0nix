@@ -54,6 +54,50 @@ export function view(text) {
 }
 
 /**
+ * 去掉源码里的注释，返回**行数不变**的文本（注释位置换成空格，换行原样保留）。
+ *
+ * 为什么单独有这个函数：`view()` 解决的是「空白被压缩」，它**不碰注释**。
+ * 而用正则扫「禁止的写法」时，注释是必须排除的 —— §14 记载过本仓真实教训：
+ * 在原始文本上匹配会把注释里的示例值算成违规，于是有人为了压低基线，
+ * 把注释里「实测对比度 1.08:1」这样的证据写得含糊。**证据被守卫吃掉，
+ * 比多一条违规严重得多。**
+ *
+ * 用状态机而不是正则：字符串里的 `//` 与 `/*` 不能当注释开（`https://…`、
+ * 正则字面量、`"/*"`）。代价是模板串里的 `${}` 未做嵌套解析 —— 本仓够用，
+ * 真需要时再加深。
+ */
+export function stripComments(text) {
+  let out = "";
+  let i = 0;
+  let state = "code"; // code | line | block | sq | dq | tpl
+  while (i < text.length) {
+    const c = text[i];
+    const n = text[i + 1];
+    if (state === "code") {
+      if (c === "/" && n === "/") { state = "line"; i += 2; out += "  "; continue; }
+      if (c === "/" && n === "*") { state = "block"; i += 2; out += "  "; continue; }
+      if (c === "'" || c === '"' || c === "`") { state = c === "'" ? "sq" : c === '"' ? "dq" : "tpl"; out += c; i += 1; continue; }
+      out += c; i += 1; continue;
+    }
+    if (state === "line") {
+      if (c === "\n") { state = "code"; out += c; }
+      i += 1; continue;
+    }
+    if (state === "block") {
+      if (c === "\n") { out += c; i += 1; continue; }   // 保住行号
+      if (c === "*" && n === "/") { state = "code"; i += 2; out += "  "; continue; }
+      i += 1; continue;
+    }
+    // 字符串内部：转义符后一个字符原样吞掉
+    if (c === "\\") { out += c + (text[i + 1] ?? ""); i += 2; continue; }
+    out += c;
+    if ((state === "sq" && c === "'") || (state === "dq" && c === '"') || (state === "tpl" && c === "`")) state = "code";
+    i += 1;
+  }
+  return out;
+}
+
+/**
  * 自检：证明 view() 既不空转（该拦的能拦），也不误判（同义写法等价）。
  * 之所以把自检写进模块本身而不是只跑一次：本文件的失败模式是**静默**的
  * ——过松会让负断言永不触发，过紧会让正断言全灭。两种都不会抛异常，
@@ -74,6 +118,27 @@ export function selfTest() {
     ["模板字面量（压缩）", v.includes("node.style.transformOrigin=`${a}%`;"), true],
   ];
   const failures = cases.filter(([, got, want]) => got !== want);
+
+  // ---- stripComments 自检：重点在「该剥的剥、不该剥的留下、行数不变」----
+  const src = [
+    "const a = 1; // 说明里的 80ms 不该被算作违规",
+    "/** 块注释里的 500ms 同样不该算 */",
+    "const url = \"https://example.com\"; // 行尾",
+    "const s = \"a//b\"; /* 尾注 */",
+    "const real = 120;",
+  ].join("\n");
+  const stripped = stripComments(src);
+  const commentCases = [
+    ["行注释被剥掉", !stripped.includes("80ms"), true],
+    ["块注释被剥掉", !stripped.includes("500ms"), true],
+    ["代码里的真实值保留", stripped.includes("const real = 120;"), true],
+    ["字符串里的 // 不是注释", stripped.includes('"https://example.com"'), true],
+    ["字符串里的 a//b 保留", stripped.includes('"a//b"'), true],
+    ["行数不变（保住行号）", stripped.split("\n").length, src.split("\n").length],
+  ];
+  for (const [name, got, want] of commentCases) {
+    if (got !== want) failures.push([`stripComments · ${name}`, got, want]);
+  }
   return failures;
 }
 

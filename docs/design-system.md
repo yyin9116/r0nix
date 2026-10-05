@@ -709,13 +709,31 @@ App.tsx 的主内容列原写作 `bg-white dark:bg-[var(--chrome-surface-1)]` �
 
 ## 10. 动效
 
-| 令牌 | 值 | 用途 |
-|---|---|---|
-| `--duration-fast` | 120ms | hover / 按压反馈 |
-| `--duration-base` | 160ms | 状态与面板切换 |
-| `--duration-slow` | 240ms | 浮层进出 |
-| `--ease-standard` | `cubic-bezier(.2,0,0,1)` | 默认 |
-| `--ease-out` | `cubic-bezier(0,0,.2,1)` | 入场 |
+| 令牌 | 值 | 用途 | Tailwind 工具类 |
+|---|---|---|---|
+| `--duration-fast` | 120ms | hover / 按压反馈 | `duration-fast` |
+| `--duration-base` | 160ms | 状态与面板切换 | `duration-base` |
+| `--duration-slow` | 240ms | 浮层进出 | `duration-slow` |
+| `--ease-standard` | `cubic-bezier(.2,0,0,1)` | 默认 | `ease-standard` |
+| `--ease-out` | `cubic-bezier(0,0,.2,1)` | 入场 | `ease-out` |
+
+刻度外零残留（2026-10-05 全量实测）：源码里 63 个文件的时长已全部走上述令牌，
+由 `check-motion-scale` 守着 —— 刻度外时长字面量、数字型 `duration-150/200/300`、
+刻度外的 `ease-in / ease-in-out / ease-linear` 都会让门禁变红，6 个变异全部会红。
+
+**★ 补这套桥接时踩到的 Tailwind v4 事实（别再踩第二次）：**
+`duration-*` 在 v4 里是**数字型**内置工具（`duration-200` 直接产出 `transition-duration: 200ms`），
+它**不读 `--duration-*` theme 变量**。实测：在 `@theme` 里声明 `--duration-fast: 120ms`
+只会产出 `:root` 变量（产物里是 `--duration-fast:.12s`），**不会**产出 `.duration-fast` 类。
+所以必须再用 `@utility duration-fast { transition-duration: var(--duration-fast) }` 补上，
+否则 TSX 只能写 `duration-[var(--duration-slow)]` 这种任意值。
+`--duration-*: initial` / `--ease-*: initial` 用来清掉默认档位 —— 留着它们就等于留一条
+绕过刻度的小路（详见 `src/tokens.css` 的注释）。
+
+**★ 为什么必须走 `var()` 而不是把值写进类里：** 固定值的 `duration-200` 不受
+`prefers-reduced-motion` 归零影响 —— 令牌归零只管得住引用令牌的那些。
+这条失效是**静默**的：动画照常播，只是 reduce 用户也跟着看完整动画，没有任何报错。
+`check-motion-scale` 用一条正断言钉住 `@utility` 里必须是 `var(...)`（变异 M5 验证会红）。
 
 `prefers-reduced-motion: reduce` 时三个时长统一归零（令牌层处理，组件无需判断）。
 
@@ -733,15 +751,20 @@ App.tsx 的主内容列原写作 `bg-white dark:bg-[var(--chrome-surface-1)]` �
 `ZOOM_RENDER_COMMIT_DELAY_MS`（160ms，视觉预览到重渲染提交之间的延迟）数值上等于
 `--duration-base`，同样是硬编码，改令牌不会联动 —— 这是已知的影子副本，不是漏迁。
 
-待清理：实测 live CSS 里 `80ms`×2、`110ms`×1、`170ms`×1、`180ms`×1、`880ms`×1
-不在刻度上（`120ms`×11 已在刻度上）。`--ease-in` 曾定义但零引用，已删除。
+**★ 关于「待清理」那份旧清单（2026-10-04 记的）：** 原文写 live CSS 里有
+`80ms`×2 / `110ms` / `170ms` / `180ms` / `880ms` 不在刻度上。2026-10-05 重新全量实测，
+其中 **`170ms` / `180ms` / `880ms` 在本仓源码里根本不存在** —— 那份清单是从 `dist`
+产物上量的，混进了第三方样式（pdf.js 等）。**守卫只能管本仓源码**，第三方 CSS 管不着
+也不该管。真正属于本仓的离群值是 `80ms`×2 / `110ms` / `duration-150`×2 /
+`duration-200`×4 / `duration-220` / `duration-300`×2，现已全部收进刻度。
+教训：**清单要写「从哪儿量的」**，否则下一次会照着一份包含噪声的基线去排查不存在的问题。
 
-**★ 动效刻度目前没有门禁。** `check-design-tokens` 只管颜色，`--duration-*` /
-`--ease-*` 零守卫 —— 上面那批离群值没有任何东西拦着继续新增。也就是说这一节
-（连同 §10.1）是**没有牙**的，全靠自觉。
-补守卫的前提是先决定那 5 个离群值各自的归属：进刻度 / 登记为豁免 / 就地改成刻度值。
-那是产品与实现的共同决定（880ms 大概率是个加载动画，不该被压进 240ms），
-不是顺手能加的 —— **在决定之前，不要在验收清单里勾选「动效已合规」。**
+**守卫的匹配面：只对剥过注释的文本跑正则。** `view()` 解决的是「空白被压缩导致
+`includes` 失效」，它**不剥注释** —— 本仓此前也没有剥注释的工具，所以新写了一个
+`stripComments()`（`scripts/lib/source-view.mjs`）。不剥的代价 §14 记载过：
+注释里的示例值会被算成违规，于是有人为了压低基线把注释里的证据写得含糊。
+本守卫试运行时就抓到 3 处纯注释命中（`500ms` 捏合探测窗口、`250ms` 停留计时步长），
+它们根本不是动画时长。
 
 ### 10.1 光标与输入分工
 
@@ -1210,7 +1233,9 @@ Pattern 层的落地前先做了**外部先例调研**，避免把别人已经�
 - [ ] 圆角取自允许档位；间距取 2px 刻度；字号 ≥ 11px
 - [ ] 阴影只用 `--elev-sm / md / lg / xl`，没有新增字面量阴影
 - [ ] 引用运行时变量时，**声明 `var()` 的元素在注入点定义域之内**（见 §4.1 陷阱一）
-- [ ] 动效只用了 `--duration-*` 与 `--ease-*`（**注意：这条目前没有门禁**，见 §10）
+- [ ] 动效只用了 `--duration-*` / `--ease-*` 或它们的工具类（`duration-fast|base|slow`、
+      `ease-standard|ease-out`）—— 没有数字型 `duration-150/200/300`，
+      也没有刻度外的时长字面量与 `ease-in-out`（`check-motion-scale` 会拦，见 §10）
 - [ ] 光标描述的是该按键**实际会发生的动作** —— 判据看 handler 不看工具名；
       改了输入行为就要同步改光标（见 §10.1）
 - [ ] 同一行为判定没有在 JSX 里抄第二份（如「文本层渲不渲染」与「overlay 让不让路」）；
