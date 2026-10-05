@@ -23,7 +23,13 @@
 | §4 第 5 接触点 `App.tsx:408-423` 的逐字段重建 | ✅ **已迁走** | `readerAnnotations.ts:59-98` |
 | §8 「先测量再钳制」 | ✅ **已按修法 B 落地** | `src/services/overlayPlacement.ts` + `ReadingAssistMenu.tsx`（`useLayoutEffect` + `ResizeObserver` 实测尺寸，`clampOverlayPoint` / `resolveOverlayPoint` 派生位置） |
 | §3.5 否定集合 + §3.6 设置字段 + §5 气泡 + §6 LLM 契约 + §7 密度引擎 | ⬜ **未做** | 仍是本单的施工内容 |
-| §3.1 / §3.2 / §3.3 类型改动 | ⬜ **未做** | 仍是本单的施工内容（批次 1） |
+| §3.1 / §3.2 / §3.3 类型改动 | ✅ **已完成** | 批次 1 落地。实测：只加 `wavy` 后 `tsc` 报出 **5 个**接触点（比本单原预测的 3 个多 2 个），见 §4 表格下的更正 |
+| §9 强证据的两条单测（wavy / origin 存活） | ✅ **已完成** | `scripts/test-reader-annotations.mjs`，配 3 个变异测试（M1 tsc 绿/单测红、M2 谓词放宽、M3 穷举表漏成员 → TS2741） |
+| §3.5 否定集合 | ✅ **已完成** | `src/services/readingCompanion.ts`：`loadDismissedBlocks` / `dismissCompanionBlock` / `isBlockDismissed` / `dismissalForRemovedAnnotation`，接线在 `App.tsx` 的 `removeAnnotation` |
+| §3.6 设置字段 | ✅ **已完成** | `userSettings.ts` 4 个必填字段 + `USER_SETTINGS_VERSION` 3 → 4 |
+| §3.4 密度档位 `deriveIntensity` | ✅ **已完成** | 同上模块，单测含 26244 条单调性样本 |
+| §3.4 行为信号**采集**（dwell / revisits） | ⬜ **未做** | 类型 `CompanionDwellSample` 已定义，采集端（PageCanvas 的可见性观测）未接 |
+| §3.5 / §3.6 / §5 气泡 + §6 LLM 契约 | ⬜ **未做** | 仍是本单的施工内容 |
 
 ### ⚠️ 与原方案的一处主动偏离 —— 不要改回去
 
@@ -256,14 +262,34 @@ export function deriveIntensity(stats: CompanionLearningStats): CompanionIntensi
 | 3 | `annotationLabels` | `PDFViewer.tsx:224` | ✅ 会（`Record<ReaderAnnotationKind, string>` 缺属性） |
 | 4 | `sanitizeStoredAnnotations` **kind 白名单** | `services/readerAnnotations.ts:35-50`（原 `App.tsx:407`，已抽出） | ✅ **会**（变成穷举表派生后，漏成员报 `TS2741`） |
 | 5 | `sanitizeStoredAnnotations` **逐字段重建对象** | `services/readerAnnotations.ts:77-92`（原 `App.tsx:408-423`，已抽出） | ❌ **不会** ⚠️ |
-| 6 | `isAnnotationTool` / `getDraftOverlayStyle` | `readerCore.ts:661` / `:774` | ❌ 不会（但见 §3.2，应主动收窄） |
+| 6 | `isAnnotationTool` / `getDraftOverlayStyle` | `readerCore.ts:661` / `:774` | ✅ **会**（原判「❌ 不会」是错的，见下） |
+
+**★ 第 6 行的原判已被实测推翻 —— 不要按旧结论行事。**
+
+批次 1 只往 `ReaderAnnotationKind` 里加 `wavy`、不动其他任何代码，`tsc` 实际报出 **5 个**接触点：
+
+| 位置 | 错误码 | 本单原判 |
+|---|---|---|
+| `readerAnnotations.ts:35` 穷举表 | `TS2741` | 本单不知道这条（是后来抽模块时引入的，见 §0.0） |
+| `readerCore.ts:661` `isAnnotationTool` | `TS2677` 类型谓词不可赋值 | ❌ 说「不会」—— **错了** |
+| `readerCore.ts:716` `getAnnotationBadgeStyle` | `TS2366` | ✅ 会 |
+| `readerCore.ts:729` `getAnnotationOverlayStyle` | `TS2366` | ✅ 会 |
+| `PDFViewer.tsx:225` `annotationLabels` | `TS2741` | ✅ 会 |
+
+`isAnnotationTool` 之所以被抓到：它的签名是 `(tool: ToolType): tool is ReaderAnnotationKind`，
+而 `ToolType` 收窄前的取值并不包含 `wavy` —— 谓词声称的窄类型不是入参类型的子类型，
+`TS2677` 当场就报了。**逻辑上自相矛盾的谓词，编译器看得见。**
+
+推论：给联合类型加成员时，「先只加成员、跑一次 `tsc`」是比本表更可靠的接触点清单来源。
+本表只当**交叉核对**用 —— 它的价值在于标出那些 `tsc` **确实看不见**的点（第 5 条）。
 
 **第 5 条仍是同一个函数里的静默丢弃点**，后果是「标注存进去了，一刷新就没了」：
 
-- ~~第 4 条 `App.tsx:407` 逐字比对四种子串~~ —— **本轮已消除**：白名单改为穷举表派生，
-  加 kind 漏改会变成 `tsc` 的 `TS2741`，不再是静默丢弃点。
-- 第 5 条 `readerAnnotations.ts:77-92` 仍是**逐字段构造新对象**的，任何没被显式列举的字段
+- 第 4 条已消除：白名单改为穷举表派生，漏成员会变成 `tsc` 的 `TS2741`，不再是静默丢弃点。
+- 第 5 条 `readerAnnotations.ts:78-99` 仍是**逐字段构造新对象**的，任何没被显式列举的字段
   （如 `origin`）**都会被扔掉**。加字段时必须同步补进返回对象。
+  已用变异测试证明：删掉 `origin` 那一行时 **`tsc` 保持绿**（可选字段，编译器看不见），
+  只有 `scripts/test-reader-annotations.mjs` 会红 —— 这条断言是它唯一的护栏。
 
 - 文件：`src/services/readerAnnotations.ts:74-76`（原 `App.tsx:405-407`，本轮已抽出）
 - **期望原文**
@@ -424,6 +450,29 @@ export interface CompanionSuggestion {
 | 3 | `readingCompanion.ts` 源码中**不含** `invoke(` / `fetch(` | 「永不上传」的唯一可机械验证代理 |
 | 4 | `readingCompanion.ts` 的 `deriveIntensity` 不含 `Date.now` / `Math.random` | 纯函数约束，不是洁癖 —— 含随机源就无法单测 |
 | 5 | 气泡不新增独立内联浮层组件 | 即 `design-system.md` §14 的「不得新建第二套内联浮层」 |
+| 6 | `App.tsx` 的删除路径调用 `dismissalForRemovedAnnotation` | ⚠️ **弱证据**，只能证明「这行字还在」，见下方实证 |
+
+**★ 实证：字符串守卫抓不到「永假条件」—— 这是本轮最该记住的一条。**
+
+批次 3 给守卫 #6 做变异测试时，把调用包进 `if (false && …)`。结果**守卫仍然是绿的**：
+
+```ts
+if (false && target) {          // ← 永远不会执行
+  dismissRemovedAnnotation(loadDismissedBlocks(), storageKey, target);
+}
+```
+
+字符串断言只能证明「源码里还有这个符号」，证明不了「它会被执行」。
+这与 §9 开头那条「断言 2 是字符串匹配，属于弱证据」是同一类失败模式。
+
+修法不是把匹配串写得更花哨，而是**把决策搬进能跑的地方**：
+判定从组件里抽成了 `dismissalForRemovedAnnotation(annotations, annotationId)` 这个纯函数，
+由 `scripts/test-reading-companion.mjs` 用行为断言覆盖（删 AI 标注交出 blockId、
+删人工标注返回 `undefined`、老数据返回 `undefined`）。守卫 #6 降级为「防整条接线被删掉」
+这种最粗的回归，它的弱已在注释里写明。
+
+**推论（适用于后面所有批次）**：凡是「某个动作必须发生」的约束，
+都要问一句「这个约束写在能被 node 执行的地方吗」。写不进去的，就别指望它能防住回归。
 
 **★ 变异测试是必做项，不是可选项。** 本仓纪律：从未失败过的守卫等于没有守卫。
 逐条临时破坏 → 确认守卫变红 → 回滚 → 确认复绿。至少对 #1 与 #3 做一遍。
@@ -480,13 +529,17 @@ export interface CompanionSuggestion {
 
 | 批次 | 内容 | 出口条件 |
 |---|---|---|
-| 1 | §3.1 / §3.2 / §3.3 类型改动 + §4 的 3 个编译器可见接触点 | `npx tsc --noEmit` 通过（它会指路，不要绕过） |
-| 2 | ✅ 已抽 `services/readerAnnotations.ts`；⬜ 待补 2 条单测（wavy / origin 存活） | 单测通过 + 手动刷新页面确认 AI 标注不消失 |
-| 3 | §3.5 否定集合 + 「删标注同时写否定」 | 手测：删掉一条 AI 标注 → 翻回该页 → 不再出现 |
-| 4 | §3.4 本地信号采集 + `deriveIntensity` 单测 | 单测覆盖四档边界 + 单调性 |
+| 1 | §3.1 / §3.2 / §3.3 类型改动 + §4 的 3 个编译器可见接触点 | ✅ 已过。`npx tsc --noEmit` 通过；实测它指出的接触点是 **5 个**不是 3 个（见 §4） |
+| 2 | ✅ 已抽 `services/readerAnnotations.ts` + 2 条单测（wavy / origin 存活） | ✅ 已过。单测绿；3 个变异测试全部会红 |
+| 3 | §3.5 否定集合 + 「删标注同时写否定」+ §3.6 设置字段 | ✅ 已过。`deriveIntensity` 与其单测一并提前落地（原属批次 4）；7 个变异测试全部会红 |
+| 4 | §3.4 本地信号采集（dwell / revisits 观测端） | 单测覆盖四档边界 + 单调性（档位部分已完成，采集端待做） |
 | 5 | §6 `suggestReadingCompanion` + 解析降级 | 用错格式的假响应验证「本页不提示」而不抛错 |
 | 6 | §5 气泡三态 + ~~§8 钳制修复~~（§8 已完成） | 视觉核验 + 靠近下缘时的翻转行为 |
-| 7 | §9 守卫 + 变异测试 | 每条守卫都证明过会红 |
+| 7 | §9 守卫 + 变异测试 | 每条守卫都证明过会红；#3 / #4 与「删标注写否定」已提前落地 |
+
+> **批次 3 的一处顺序调整**：§3.6 的设置字段与 §3.4 的 `deriveIntensity` 被提前到批次 3。
+> 理由是 `companionIntensity` 这个字段的类型就是 `CompanionIntensity`，两者是同一个决定的
+> 两面，拆到两批会让中间那笔提交带着「有字段、没有档位定义」的半截状态。
 
 ---
 

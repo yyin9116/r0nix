@@ -37,6 +37,7 @@ import {
   type PersistenceWarning,
 } from "./services/localStore";
 import { loadStoredAnnotations, saveStoredAnnotations } from "./services/readerAnnotations";
+import { dismissCompanionBlock, dismissalForRemovedAnnotation, loadDismissedBlocks } from "./services/readingCompanion";
 import { debugWarn } from "./services/debugLogger";
 import { resolveAccentToken } from "./theme/accent";
 import type { LlmServiceConfig } from "./services/readingAssistant";
@@ -514,6 +515,12 @@ export default function App() {
   const latestActiveTabIdRef = useRef(activeTabId);
   const pendingPdfReleasesRef = useRef<Map<string, string>>(new Map());
   const progressRef = useRef<Record<string, { page: number; totalPages: number }>>({});
+  /**
+   * 批注表的只读镜像，供 `removeAnnotation` 在**不把它列进依赖**的前提下查找被删的那条。
+   * 不放进依赖是有意的：`removeAnnotation` 是传给子组件的回调，批注一变就重建会把它
+   * 下游所有 memo 全部打穿。同步点设在下面那个保存 effect 里（批注变化时必然执行）。
+   */
+  const annotationsRef = useRef(annotationsByDocument);
   const webTabIdsRef = useRef<string[]>([]);
   const openingPdfUrlsRef = useRef(new Map<string, Promise<boolean>>());
   const openingPathsRef = useRef<Set<string>>(new Set());
@@ -639,6 +646,7 @@ export default function App() {
 
   useEffect(() => {
     saveStoredAnnotations(annotationsByDocument);
+    annotationsRef.current = annotationsByDocument;
   }, [annotationsByDocument]);
 
   useEffect(() => {
@@ -1869,6 +1877,19 @@ export default function App() {
 
   const removeAnnotation = useCallback((path: string, annotationId: string) => {
     const storageKey = documentIdForPath(documents, path) || documentPathKey(path);
+    /**
+     * ⚠️ 删掉一条 **AI** 标注时必须同时把它写进否定集合，否则下次翻回这一页
+     * 它会重新长出来 —— 这是这套功能最容易被投诉的 bug（见施工单 §3.5）。
+     * 「该不该记、记哪一个」这个判定不在这里写，而在 `dismissalForRemovedAnnotation`
+     * 里，因为它必须能被行为断言覆盖（字符串守卫连 `if (false && …)` 都抓不到）。
+     */
+    const dismissedBlockId = dismissalForRemovedAnnotation(
+      annotationsRef.current[storageKey] || [],
+      annotationId
+    );
+    if (dismissedBlockId) {
+      dismissCompanionBlock(loadDismissedBlocks(), storageKey, dismissedBlockId);
+    }
     setAnnotationsByDocument((prev) => ({
       ...prev,
       [storageKey]: (prev[storageKey] || []).filter((annotation) => annotation.id !== annotationId),

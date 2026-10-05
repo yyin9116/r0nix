@@ -12,6 +12,8 @@ const service = view(readFileSync("src/services/readingAssistant.ts", "utf8"));
 const settings = view(readFileSync("src/components/Settings.tsx", "utf8"));
 // 批注水合已从 App.tsx 抽到独立模块（既可单测，也让 App.tsx 不再承担数据契约）。
 const annotations = view(readFileSync("src/services/readerAnnotations.ts", "utf8"));
+const companionRaw = readFileSync("src/services/readingCompanion.ts", "utf8");
+const companion = view(companionRaw);
 
 function assert(condition, message) {
   if (!condition) throw new Error(message);
@@ -64,5 +66,48 @@ assert(viewer.includes("findReadingBlockIdForRect"), "drawn annotations must res
 assert(viewer.includes("blockId: findReadingBlockIdForRect"), "new annotations must persist the source block id.");
 assert(viewer.includes('mode?: "page" | "original" | "crop"'), "image export must distinguish page, original-resource, and crop semantics");
 assert(viewer.includes("原始图片资源无法解码") && viewer.includes("exportImageCropPng"), "original image export failures must be visible and offer explicit crop export");
+
+// ── 伴读 Agent 的硬约束（docs/companion-reading-plan.md §3.4 / §3.5 / §9） ──
+// #3「行为信号永不上传」是产品决定，代码里唯一能机械验证的代理就是：
+// 这个模块不许出现任何网络调用。连 console.log 一起禁 —— 打日志同样是把本机行为外泄。
+// 注意：view() 不剥注释，所以注释里提到这些 API 也会命中；源码里的注释因此刻意
+// 写成了不带括号的形式。
+assert(
+  !companionRaw.includes("invoke(") &&
+    !companionRaw.includes("fetch(") &&
+    !companionRaw.includes("XMLHttpRequest") &&
+    !companionRaw.includes("console.log"),
+  "services/readingCompanion.ts must stay offline: no Tauri invoke, fetch, XHR or logging."
+);
+// #4 deriveIntensity 必须是纯函数，否则无法单测 —— 而它决定用户看到多少主动提示。
+// 只查函数体，避免把文件头里解释「为什么禁止」的注释误判成违规。
+const deriveMarker = "export function deriveIntensity";
+const deriveStart = companionRaw.indexOf(deriveMarker);
+const deriveRest = companionRaw.slice(deriveStart + deriveMarker.length);
+const nextExport = deriveRest.indexOf("\nexport ");
+const deriveBody = deriveRest.slice(0, nextExport < 0 ? deriveRest.length : nextExport);
+assert(deriveStart >= 0, "services/readingCompanion.ts must export deriveIntensity.");
+assert(
+  !deriveBody.includes("Date.now") && !deriveBody.includes("Math.random") && !deriveBody.includes("localStorage"),
+  "deriveIntensity must stay a pure function: no clock, no randomness, no IO."
+);
+// 否定集合必须走版本化封装，不要绕过它直接碰 localStorage（损坏隔离与前向兼容都在那层）。
+assert(
+  companion.includes('from "./localStore.ts"') && !companionRaw.includes("window.localStorage"),
+  "the companion dismissal set must persist through the versioned localStore wrapper."
+);
+// §3.5 那个「投诉级 bug」：只删标注不写否定集合 = 翻回这页它又长出来。
+// ⚠️ 这是**弱证据**，而且弱得有据可查：实测把调用包进 `if (false && …)` 之后
+// 守卫照样是绿的 —— 字符串守卫只能证明「这行字还在」，证明不了「它会被执行」。
+// 真正的判据是 `dismissalForRemovedAnnotation` 上的行为断言（见 test-reading-companion.mjs），
+// 这条只负责防「整条接线被删掉」这种最粗的回归。
+assert(
+  app.includes("dismissalForRemovedAnnotation") && app.includes("loadDismissedBlocks"),
+  "removing an AI annotation must also record its block in the companion dismissal set."
+);
+assert(
+  companion.includes("export function dismissalForRemovedAnnotation"),
+  "the dismissal decision must live in services/readingCompanion.ts where it is covered by behaviour tests."
+);
 
 console.log("reading-assist-contract: ok");

@@ -1,5 +1,8 @@
 import { START_PAGE_URL } from "../constants/startPage";
 import { readVersionedLocalState, writeVersionedLocalState } from "./localStore";
+// 只取类型：档位的运行时校验在下面用字面量比较完成（与 themeMode / themeAccent 一致），
+// 这样本文件不需要在运行时加载 readingCompanion。
+import type { CompanionIntensity } from "./readingCompanion";
 
 export type ThemeMode = "system" | "light" | "dark";
 export type ThemeAccent = "zinc" | "blue" | "green" | "orange" | "rose" | "violet";
@@ -41,11 +44,26 @@ export interface UserSettings {
   newTabDefaultUrl: string;
   quickLinks: QuickLinkItem[];
   language: AppLanguage;
+  /**
+   * 伴读是否主动弹提示。**默认关** —— 主动行为必须自报理由，而第一版还没来得及
+   * 让用户建立「它为什么出现」的预期。关掉不等于删除功能：锚点仍可点开。
+   * 见 docs/companion-reading-plan.md §5。
+   */
+  companionEnabled: boolean;
+  /** 主动提示的密度档位。 */
+  companionIntensity: CompanionIntensity;
+  /**
+   * AI 自动标注（波浪线 + 锚点）是否开启。**默认开**，且**独立于** `companionEnabled`：
+   * 自动标注是静态的、可预期的，它不是「弹窗」，不构成打扰。
+   */
+  companionAutoAnnotate: boolean;
+  /** 自动标注的密度档位。 */
+  companionAutoAnnotateIntensity: CompanionIntensity;
 }
 
 export const USER_SETTINGS_KEY = "pdf_reader_user_settings_v2";
 export const USER_SETTINGS_EVENT = "pdf-reader-settings-updated";
-const USER_SETTINGS_VERSION = 3;
+const USER_SETTINGS_VERSION = 4;
 
 const DEFAULT_SETTINGS: UserSettings = {
   defaultSaveDir: "",
@@ -66,7 +84,20 @@ const DEFAULT_SETTINGS: UserSettings = {
   newTabDefaultUrl: START_PAGE_URL,
   quickLinks: createDefaultQuickLinks(),
   language: "zh-CN",
+  companionEnabled: false,
+  companionIntensity: "medium",
+  companionAutoAnnotate: true,
+  companionAutoAnnotateIntensity: "medium",
 };
+
+/**
+ * 档位只有四个取值，用字面量比较而不是引入运行时常量表 ——
+ * 与上面 themeMode / themeAccent 的写法保持一致。
+ * 写成独立函数是因为有两个字段要用同一份清单，复制一份清单就是「第二处真相」。
+ */
+function sanitizeIntensity(value: unknown, fallback: CompanionIntensity): CompanionIntensity {
+  return value === "off" || value === "light" || value === "medium" || value === "heavy" ? value : fallback;
+}
 
 export function sanitizeUserSettings(raw: unknown): UserSettings {
   const parsed = raw && typeof raw === "object" ? (raw as Partial<UserSettings>) : {};
@@ -132,6 +163,17 @@ export function sanitizeUserSettings(raw: unknown): UserSettings {
     typeof parsed.newTabDefaultUrl === "string" ? parsed.newTabDefaultUrl : DEFAULT_SETTINGS.newTabDefaultUrl;
   const parsedQuickLinks = Array.isArray(parsed.quickLinks) ? parsed.quickLinks : [];
   const language: AppLanguage = parsed.language === "en-US" || parsed.language === "zh-CN" ? parsed.language : DEFAULT_SETTINGS.language;
+  const companionEnabled =
+    typeof parsed.companionEnabled === "boolean" ? parsed.companionEnabled : DEFAULT_SETTINGS.companionEnabled;
+  const companionIntensity = sanitizeIntensity(parsed.companionIntensity, DEFAULT_SETTINGS.companionIntensity);
+  const companionAutoAnnotate =
+    typeof parsed.companionAutoAnnotate === "boolean"
+      ? parsed.companionAutoAnnotate
+      : DEFAULT_SETTINGS.companionAutoAnnotate;
+  const companionAutoAnnotateIntensity = sanitizeIntensity(
+    parsed.companionAutoAnnotateIntensity,
+    DEFAULT_SETTINGS.companionAutoAnnotateIntensity
+  );
   const quickLinks = parsedQuickLinks
     .filter(
       (item): item is QuickLinkItem =>
@@ -161,6 +203,10 @@ export function sanitizeUserSettings(raw: unknown): UserSettings {
     newTabDefaultUrl,
     quickLinks: quickLinks.length > 0 ? quickLinks : DEFAULT_SETTINGS.quickLinks,
     language,
+    companionEnabled,
+    companionIntensity,
+    companionAutoAnnotate,
+    companionAutoAnnotateIntensity,
   };
 }
 
