@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
@@ -11,7 +11,7 @@ const MarkdownViewer = lazy(() => import("./components/MarkdownViewer").then((mo
 const Whiteboards = lazy(() => import("./components/Whiteboards").then((module) => ({ default: module.Whiteboards })));
 const WebBrowser = lazy(() => import("./components/WebBrowser").then((module) => ({ default: module.WebBrowser })));
 const Settings = lazy(() => import("./components/Settings").then((module) => ({ default: module.Settings })));
-import type { LibraryFilter, ReaderAnnotation, ReaderCollection, ReaderDocument, ReaderNote, Tab } from "./types";
+import type { LibraryFilter, PdfViewState, ReaderAnnotation, ReaderAnnotationRect, ReaderCollection, ReaderDocument, ReaderNote, Tab } from "./types";
 import * as api from "./services/pdfApi";
 import {
   loadUserSettings,
@@ -19,10 +19,9 @@ import {
   saveUserSettings,
   withDefaultDir,
   type AppLanguage,
-  type ThemeAccent,
   type UserSettings,
 } from "./services/userSettings";
-import { canUseNativeWebview, closeNativeWebviewTab } from "./services/nativeWebview";
+import { canUseNativeWebview, closeNativeWebviewTab, hideNativeWebviewTab, showNativeWebviewTab } from "./services/nativeWebview";
 import {
   collectNativeImportablePaths,
   writeNativeBinaryFile,
@@ -37,34 +36,51 @@ import {
   writeVersionedLocalState,
   type PersistenceWarning,
 } from "./services/localStore";
+import { loadStoredAnnotations, saveStoredAnnotations } from "./services/readerAnnotations";
 import { debugWarn } from "./services/debugLogger";
+import { resolveAccentToken } from "./theme/accent";
 import type { LlmServiceConfig } from "./services/readingAssistant";
 import { START_PAGE_URL } from "./constants/startPage";
-import { downloadPdfViaProxy } from "./services/webProxy";
+import { downloadDirectHttpResource, downloadPdfToNativeTemp, downloadPdfViaProxy, removeManagedWebPdfTemp, DIRECT_PDF_MAX_BYTES } from "./services/webProxy";
+import { documentIdForPath, documentPathKey, migrateDocumentArtifacts } from "./services/documentArtifacts";
 
 const DOCUMENTS_KEY = "r0nix_reader_documents_v2";
 const COLLECTIONS_KEY = "r0nix_reader_collections_v1";
 const NOTES_KEY = "r0nix_reader_notes_v1";
-const ANNOTATIONS_KEY = "r0nix_reader_annotations_v1";
 const TABS_KEY = "r0nix_reader_tabs_v1";
 const DOCUMENTS_STATE_VERSION = 2;
 const COLLECTIONS_STATE_VERSION = 1;
 const NOTES_STATE_VERSION = 1;
-const ANNOTATIONS_STATE_VERSION = 1;
-const TABS_STATE_VERSION = 1;
+const TABS_STATE_VERSION = 2;
 const PINNED_TABS: Tab[] = [
   { id: "library-main", type: "library", title: "Library", filter: "all", pinned: true },
 ];
 const DEFAULT_ACTIVE_TAB_ID = "library-main";
 
-const ACCENT_TOKENS: Record<ThemeAccent, { solid: string; soft: string; contrast: string }> = {
-  zinc: { solid: "#52525b", soft: "rgba(82, 82, 91, 0.16)", contrast: "#ffffff" },
-  blue: { solid: "#2563eb", soft: "rgba(37, 99, 235, 0.14)", contrast: "#ffffff" },
-  green: { solid: "#059669", soft: "rgba(5, 150, 105, 0.14)", contrast: "#ffffff" },
-  orange: { solid: "#ea580c", soft: "rgba(234, 88, 12, 0.14)", contrast: "#ffffff" },
-  rose: { solid: "#e11d48", soft: "rgba(225, 29, 72, 0.14)", contrast: "#ffffff" },
-  violet: { solid: "#7c3aed", soft: "rgba(124, 58, 237, 0.14)", contrast: "#ffffff" },
-};
+function isEphemeralWebPdfPath(path?: string): boolean {
+  if (!path) return false;
+  const fileName = path.split(/[\\/]/).pop() || "";
+  return /^(?:r0nix-web|r0nix-import)-[^\\/]+\.pdf$/i.test(fileName);
+}
+
+function cleanupManagedWebPdfTemp(path: string) {
+  let attempts = 0;
+  const attempt = () => {
+    attempts += 1;
+    void removeManagedWebPdfTemp(path).catch((error) => {
+      if (attempts < 4) {
+        window.setTimeout(attempt, 180);
+        return;
+      }
+      debugWarn("webview.pdf", "failed to remove managed PDF temp after tab close", {
+        path,
+        error,
+      });
+    });
+  };
+  // Let the React tab removal and deferred PDF handle release commit first.
+  window.setTimeout(attempt, 180);
+}
 
 const APP_I18N = {
   "zh-CN": {
@@ -76,6 +92,7 @@ const APP_I18N = {
     collectionExists: "\u96c6\u5408\u5df2\u5b58\u5728",
     tabClose: "\u5173\u95ed\u6807\u7b7e",
     pinnedCannotClose: "\u5df2\u56fa\u5b9a\u6807\u7b7e\uff08\u65e0\u6cd5\u5173\u95ed\uff09",
+    unsavedMarkdownClose: "\u6b64 Markdown \u5305\u542b\u672a\u4fdd\u5b58\u4fee\u6539\uff0c\u786e\u5b9a\u5173\u95ed\u6807\u7b7e\u5417\uff1f",
   },
   "en-US": {
     libraryTab: "Library",
@@ -86,6 +103,7 @@ const APP_I18N = {
     collectionExists: "Collection already exists",
     tabClose: "Close tab",
     pinnedCannotClose: "Pinned tab (cannot close)",
+    unsavedMarkdownClose: "This Markdown tab has unsaved changes. Close it anyway?",
   },
 } as const;
 
@@ -138,6 +156,10 @@ function makeDocumentId(path: string) {
   return `doc-${path.trim().toLowerCase()}`;
 }
 
+function createDocumentId() {
+  return `doc-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 function documentTabKey(tab: Tab) {
   if ((tab.type !== "pdf" && tab.type !== "markdown") || !tab.filePath) return "";
   return `${tab.type}:${tab.filePath.trim().toLowerCase()}`;
@@ -149,6 +171,44 @@ function choosePdfViewState(left?: Tab["pdfViewState"], right?: Tab["pdfViewStat
   const leftTime = Date.parse(left.updatedAt || "");
   const rightTime = Date.parse(right.updatedAt || "");
   return Number.isFinite(rightTime) && rightTime > (Number.isFinite(leftTime) ? leftTime : 0) ? right : left;
+}
+
+function sanitizePdfViewState(raw: unknown): PdfViewState | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const value = raw as Record<string, unknown>;
+  const finite = (input: unknown, fallback: number) => {
+    const number = Number(input);
+    return Number.isFinite(number) ? number : fallback;
+  };
+  const totalPages = Math.max(1, Math.round(finite(value.totalPages, 1)));
+  const page = Math.max(1, Math.min(totalPages, Math.round(finite(value.page, 1))));
+  const zoom = Math.max(50, Math.min(400, finite(value.zoom, 100)));
+  const scrollTop = Math.max(0, finite(value.scrollTop, 0));
+  const scrollLeft = Math.max(0, finite(value.scrollLeft, 0));
+  const focusCandidate = value.focusRect;
+  const focusRect = focusCandidate && typeof focusCandidate === "object"
+    ? (() => {
+        const rect = focusCandidate as Record<string, unknown>;
+        const x = finite(rect.x, -1);
+        const y = finite(rect.y, -1);
+        const width = finite(rect.width, -1);
+        const height = finite(rect.height, -1);
+        const safeX = Math.max(0, Math.min(1, x));
+        const safeY = Math.max(0, Math.min(1, y));
+        return x >= 0 && y >= 0 && width > 0 && height > 0 && safeX < 1 && safeY < 1
+          ? {
+              x: safeX,
+              y: safeY,
+              width: Math.min(1 - safeX, width),
+              height: Math.min(1 - safeY, height),
+            }
+          : undefined;
+      })()
+    : undefined;
+  const updatedAt = typeof value.updatedAt === "string" && Number.isFinite(Date.parse(value.updatedAt))
+    ? value.updatedAt
+    : new Date(0).toISOString();
+  return { page, totalPages, zoom, scrollTop, scrollLeft, focusRect, updatedAt };
 }
 
 function mergeDuplicateDocumentTabs(tabs: Tab[], activeTabId: string) {
@@ -176,6 +236,8 @@ function mergeDuplicateDocumentTabs(tabs: Tab[], activeTabId: string) {
       title: existing.title || tab.title,
       fileId: existing.fileId || tab.fileId,
       content: existing.content || tab.content,
+      contentDirty: Boolean(existing.contentDirty || tab.contentDirty),
+      contentBase: existing.contentBase || tab.contentBase,
       pdfViewState: choosePdfViewState(existing.pdfViewState, tab.pdfViewState),
       pinned: Boolean(existing.pinned || tab.pinned),
     };
@@ -193,10 +255,6 @@ function mergeDuplicateDocumentTabs(tabs: Tab[], activeTabId: string) {
         : merged[0]?.id || DEFAULT_ACTIVE_TAB_ID,
     changed: merged.length !== tabs.length,
   };
-}
-
-function makeNoteStorageKey(path: string) {
-  return path.trim().toLowerCase();
 }
 
 function isDocumentTrashed(doc: Pick<ReaderDocument, "trashedAt">) {
@@ -268,6 +326,8 @@ function loadStoredDocuments(): ReaderDocument[] {
         isFavorite: Boolean(item.isFavorite),
         progress: typeof item.progress === "number" ? Math.max(0, Math.min(100, item.progress)) : 0,
         pageCount: typeof item.pageCount === "number" ? Math.max(1, Math.round(item.pageCount)) : 1,
+        fileSize: typeof item.fileSize === "number" && item.fileSize > 0 ? Math.round(item.fileSize) : undefined,
+        addedAt: typeof item.addedAt === "string" && item.addedAt ? item.addedAt : (typeof item.lastOpenedAt === "string" && item.lastOpenedAt ? item.lastOpenedAt : new Date().toISOString()),
         lastOpenedAt:
           typeof item.lastOpenedAt === "string" && item.lastOpenedAt
             ? item.lastOpenedAt
@@ -325,48 +385,6 @@ function loadStoredNotes(): Record<string, ReaderNote[]> {
   });
 }
 
-function loadStoredAnnotations(): Record<string, ReaderAnnotation[]> {
-  return readVersionedLocalState(ANNOTATIONS_KEY, ANNOTATIONS_STATE_VERSION, {}, (raw) => {
-    const parsed = raw as Record<string, Array<Partial<ReaderAnnotation>>>;
-    const next: Record<string, ReaderAnnotation[]> = {};
-    for (const [key, value] of Object.entries(parsed || {})) {
-      if (!Array.isArray(value)) continue;
-      next[key] = value
-        .filter((item) => typeof item?.id === "string" && typeof item?.page === "number")
-        .map((item): ReaderAnnotation | null => {
-          const rect = item.rect;
-          const validRect =
-            rect &&
-            typeof rect.x === "number" &&
-            typeof rect.y === "number" &&
-            typeof rect.width === "number" &&
-            typeof rect.height === "number";
-          const kind = item.kind;
-          if (!validRect) return null;
-          if (kind !== "highlight" && kind !== "underline" && kind !== "strike" && kind !== "text") return null;
-          return {
-            id: item.id as string,
-            documentId: typeof item.documentId === "string" && item.documentId ? item.documentId : undefined,
-            page: Math.max(1, Math.round(item.page as number)),
-            kind,
-            rect: {
-              x: Math.max(0, Math.min(1, rect.x)),
-              y: Math.max(0, Math.min(1, rect.y)),
-              width: Math.max(0.002, Math.min(1, rect.width)),
-              height: Math.max(0.002, Math.min(1, rect.height)),
-            },
-            content: typeof item.content === "string" ? item.content : undefined,
-            createdAt:
-              typeof item.createdAt === "string" && item.createdAt ? item.createdAt : new Date().toISOString(),
-          };
-        })
-        .filter((item): item is ReaderAnnotation => Boolean(item))
-        .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
-    }
-    return next;
-  });
-}
-
 function sanitizeStoredTabs(raw: unknown): { tabs: Tab[]; activeTabId: string } {
   const parsed = raw && typeof raw === "object" ? (raw as { tabs?: unknown; activeTabId?: unknown }) : {};
   const rawTabs = Array.isArray(parsed.tabs) ? parsed.tabs : [];
@@ -392,13 +410,16 @@ function sanitizeStoredTabs(raw: unknown): { tabs: Tab[]; activeTabId: string } 
         return { id, type, title, pinned: Boolean(item.pinned) };
       }
       if ((type === "pdf" || type === "markdown") && typeof item.filePath === "string" && item.filePath.trim()) {
+        if (isEphemeralWebPdfPath(item.filePath)) return null;
         return {
           id,
           type,
           title,
           filePath: item.filePath,
           content: type === "markdown" && typeof item.content === "string" ? item.content : undefined,
-          pdfViewState: type === "pdf" && item.pdfViewState ? item.pdfViewState : undefined,
+          contentDirty: type === "markdown" ? Boolean(item.contentDirty) : undefined,
+          contentBase: type === "markdown" && typeof item.contentBase === "string" ? item.contentBase : undefined,
+          pdfViewState: type === "pdf" ? sanitizePdfViewState(item.pdfViewState) : undefined,
           pinned: Boolean(item.pinned),
         };
       }
@@ -441,6 +462,28 @@ function guessPdfFileName(url: string, contentDisposition = "") {
   }
 }
 
+function safePdfFileName(rawName: string) {
+  const fallback = "document.pdf";
+  const normalized = rawName
+    .replace(/[\\/\0]/g, "-")
+    .replace(/[<>:"|?*]/g, "-")
+    .replace(/\.\.+/g, ".")
+    .trim();
+  if (!normalized || normalized === "." || normalized === "..") return fallback;
+  return normalized.toLowerCase().endsWith(".pdf") ? normalized : `${normalized}.pdf`;
+}
+
+function assertPdfPayload(bytes: ArrayBuffer, contentType = "") {
+  const header = new TextDecoder().decode(new Uint8Array(bytes).subarray(0, 1024));
+  const normalizedType = contentType.toLowerCase();
+  if (!bytes.byteLength || !header.includes("%PDF-")) {
+    if (normalizedType.includes("text/html") || /<!doctype html|<html[\s>]/i.test(header)) {
+      throw new Error("服务器返回了网页而不是 PDF");
+    }
+    throw new Error("下载内容不是有效的 PDF");
+  }
+}
+
 function shortHostSafe(url: string) {
   try {
     return new URL(normalizeUrl(url)).host;
@@ -469,20 +512,22 @@ export default function App() {
   const tabsPersistTimerRef = useRef<number | null>(null);
   const latestTabsRef = useRef(tabs);
   const latestActiveTabIdRef = useRef(activeTabId);
+  const pendingPdfReleasesRef = useRef<Map<string, string>>(new Map());
   const progressRef = useRef<Record<string, { page: number; totalPages: number }>>({});
   const webTabIdsRef = useRef<string[]>([]);
+  const openingPdfUrlsRef = useRef(new Map<string, Promise<boolean>>());
   const openingPathsRef = useRef<Set<string>>(new Set());
+  const cancelledOpeningPathsRef = useRef<Set<string>>(new Set());
+  const pendingPdfNavigationRef = useRef<{ path: string; page: number; focusRect?: ReaderAnnotationRect } | null>(null);
 
   const activeTab = useMemo(() => tabs.find((tab) => tab.id === activeTabId), [activeTabId, tabs]);
+  const activeDocument = useMemo(
+    () => activeTab?.filePath ? documents.find((document) => samePath(document.path, activeTab.filePath as string)) : undefined,
+    [activeTab?.filePath, documents],
+  );
   const activeFilter: LibraryFilter = activeTab?.type === "library" ? activeTab.filter || "all" : "all";
   const activePanelKey = activeTab ? `${activeTab.type}-${activeTab.id}` : "empty";
-  const accent = ACCENT_TOKENS[settings.themeAccent] || ACCENT_TOKENS.zinc;
-  const resolvedAccent = useMemo(() => {
-    if (settings.themeAccent !== "zinc") return accent;
-    return theme === "dark"
-      ? { solid: "#f4f4f5", soft: "rgba(244, 244, 245, 0.12)", contrast: "#18181b" }
-      : { solid: "#18181b", soft: "rgba(24, 24, 27, 0.08)", contrast: "#ffffff" };
-  }, [accent, settings.themeAccent, theme]);
+  const resolvedAccent = useMemo(() => resolveAccentToken(settings.themeAccent, theme), [settings.themeAccent, theme]);
   const uiText = useMemo(() => getUiText(settings.language), [settings.language]);
   const aiModelConfig = useMemo<LlmServiceConfig>(
     () => ({
@@ -505,24 +550,32 @@ export default function App() {
     ]
   );
 
-  const appStyle = useMemo(
-    () =>
-      ({
-        "--reader-accent": resolvedAccent.solid,
-        "--reader-accent-soft": resolvedAccent.soft,
-        "--reader-accent-contrast": resolvedAccent.contrast,
-      }) as CSSProperties,
-    [resolvedAccent]
-  );
+  // 强调色注入点必须在 :root（documentElement），不能挂在应用外壳 div 上。
+  // 原因：自定义属性在【声明它的那个元素】上就完成 var() 代入，而 tokens.css 里的
+  // --accent / --accent-primary / --accent-light / --accent-hover / --accent-ring
+  // 与 @theme 的 --color-accent* 全部声明在 :root。若 --reader-accent 只挂在外壳 div，
+  // :root 看不到它，这些令牌会被烧成兜底值并原样继承给所有后代 —— 结果是全应用
+  // 69 处「跟随强调色」的声明（PDFViewer.css 59 / WebViewPanel.css 7 /
+  // ReadingAssistMenu.css 3）永远是灰色，用户选 green 还是 rose 都一样。
+  // 已在 Chrome 实测（accent=green，浅色）：外壳 --reader-accent = #059669，
+  // 而 :root --accent = --accent-primary = --color-accent = #52525b，bg-accent 渲染为灰。
+  // useLayoutEffect 而非 useEffect：强调色会影响首帧配色，用它把写入提前到绘制前，
+  // 避免「先闪一下兜底灰再换成用户强调色」。本应用无 SSR，不受其警告约束。
+  useLayoutEffect(() => {
+    const target = document.documentElement.style;
+    target.setProperty("--reader-accent", resolvedAccent.solid);
+    target.setProperty("--reader-accent-soft", resolvedAccent.soft);
+    target.setProperty("--reader-accent-contrast", resolvedAccent.contrast);
+  }, [resolvedAccent]);
 
   const activeNotes = useMemo(() => {
     if (!activeTab?.filePath || (activeTab.type !== "pdf" && activeTab.type !== "markdown")) return [];
-    return notesByDocument[makeNoteStorageKey(activeTab.filePath)] || [];
-  }, [activeTab?.filePath, activeTab?.type, notesByDocument]);
+    return notesByDocument[activeDocument?.id || documentPathKey(activeTab.filePath)] || notesByDocument[documentPathKey(activeTab.filePath)] || [];
+  }, [activeDocument?.id, activeTab?.filePath, activeTab?.type, notesByDocument]);
   const activeAnnotations = useMemo(() => {
     if (!activeTab?.filePath || activeTab.type !== "pdf") return [];
-    return annotationsByDocument[makeNoteStorageKey(activeTab.filePath)] || [];
-  }, [activeTab?.filePath, activeTab?.type, annotationsByDocument]);
+    return annotationsByDocument[activeDocument?.id || documentPathKey(activeTab.filePath)] || annotationsByDocument[documentPathKey(activeTab.filePath)] || [];
+  }, [activeDocument?.id, activeTab?.filePath, activeTab?.type, annotationsByDocument]);
 
   const updateBusyMessage = useCallback((message: string, clearAfterMs?: number) => {
     if (busyTimerRef.current !== null) {
@@ -544,8 +597,35 @@ export default function App() {
     });
   }, []);
 
+  const flushPendingPdfReleases = useCallback(() => {
+    for (const [fileId, context] of pendingPdfReleasesRef.current) {
+      const stillReferenced = latestTabsRef.current.some(
+        (tab) => (tab.type === "pdf" || tab.type === "markdown") && tab.fileId === fileId,
+      );
+      if (stillReferenced) continue;
+      pendingPdfReleasesRef.current.delete(fileId);
+      void api.closeFile(fileId).catch((error) => {
+        debugWarn("pdf.close", "failed to release deferred document handle", { fileId, context, error });
+      });
+    }
+  }, []);
+
+  const releasePdfFileAfterTabCommit = useCallback((fileId: string, context: string) => {
+    // Queue the release until React has committed the tab change, then verify
+    // that no remaining PDF/Markdown tab still references this handle. This
+    // prevents a close/reopen race from destroying a newly reused file ID.
+    pendingPdfReleasesRef.current.set(fileId, context);
+    window.setTimeout(flushPendingPdfReleases, 0);
+  }, [flushPendingPdfReleases]);
+
   useEffect(() => {
-    const serializable = documents.map(({ fileId, ...doc }) => doc);
+    flushPendingPdfReleases();
+  }, [flushPendingPdfReleases, tabs]);
+
+  useEffect(() => {
+    const serializable = documents
+      .filter((document) => !isEphemeralWebPdfPath(document.path))
+      .map(({ fileId, ...doc }) => doc);
     writeVersionedLocalState(DOCUMENTS_KEY, DOCUMENTS_STATE_VERSION, serializable);
   }, [documents]);
 
@@ -558,13 +638,23 @@ export default function App() {
   }, [notesByDocument]);
 
   useEffect(() => {
-    writeVersionedLocalState(ANNOTATIONS_KEY, ANNOTATIONS_STATE_VERSION, annotationsByDocument);
+    saveStoredAnnotations(annotationsByDocument);
   }, [annotationsByDocument]);
+
+  useEffect(() => {
+    if (documents.length === 0) return;
+    const notes = migrateDocumentArtifacts(notesByDocument, documents);
+    if (notes.changed) setNotesByDocument(notes.artifacts);
+    const annotations = migrateDocumentArtifacts(annotationsByDocument, documents);
+    if (annotations.changed) setAnnotationsByDocument(annotations.artifacts);
+  }, [documents]);
 
   useEffect(() => {
     latestTabsRef.current = tabs;
     latestActiveTabIdRef.current = activeTabId;
-    const serializableTabs = tabs.map(({ fileId, ...tab }) => tab);
+    const serializableTabs = tabs
+      .filter((tab) => !isEphemeralWebPdfPath(tab.filePath))
+      .map(({ fileId, ...tab }) => tab);
     if (tabsPersistTimerRef.current !== null) {
       window.clearTimeout(tabsPersistTimerRef.current);
     }
@@ -582,7 +672,9 @@ export default function App() {
 
   useEffect(() => {
     const flushTabs = () => {
-      const serializableTabs = latestTabsRef.current.map(({ fileId, ...tab }) => tab);
+      const serializableTabs = latestTabsRef.current
+        .filter((tab) => !isEphemeralWebPdfPath(tab.filePath))
+        .map(({ fileId, ...tab }) => tab);
       writeVersionedLocalState(TABS_KEY, TABS_STATE_VERSION, {
         tabs: serializableTabs,
         activeTabId: latestActiveTabIdRef.current,
@@ -608,7 +700,13 @@ export default function App() {
   useEffect(() => {
     const showWarning = (warning: PersistenceWarning) => {
       updateBusyMessage(
-        `Local data issue: ${warning.key} was isolated${warning.backupKey ? ` as ${warning.backupKey}` : ""}`,
+        warning.kind === "read"
+          ? settings.language === "zh-CN"
+            ? `本地数据读取异常：${warning.key}，已保留原始数据。`
+            : `Local data read issue: ${warning.key}; the original data was preserved.`
+          : settings.language === "zh-CN"
+            ? `本地数据写入失败：${warning.key}，已保留旧数据。`
+            : `Local data write failed: ${warning.key}; the previous value was preserved.`,
         5200
       );
     };
@@ -621,7 +719,7 @@ export default function App() {
     };
     window.addEventListener(PERSISTENCE_WARNING_EVENT, onWarning);
     return () => window.removeEventListener(PERSISTENCE_WARNING_EVENT, onWarning);
-  }, [updateBusyMessage]);
+  }, [settings.language, updateBusyMessage]);
 
   useEffect(() => {
     if (settings.themeMode !== "system") {
@@ -644,6 +742,12 @@ export default function App() {
   useEffect(() => {
     document.documentElement.classList.toggle("dark", theme === "dark");
     document.documentElement.dataset.theme = theme;
+    // 让原生控件（滚动条、input、下拉）跟随主题。
+    // index.html 的内联脚本已在首帧前设过一次，这里再设一次是为了让 React
+    // 成为唯一权威：否则内联脚本与 React 对「主题」的判断一旦不同源
+    // （例如 localStorage 在两者之间才被写入），就会出现 class 是 dark
+    // 而 color-scheme 还是 light 的分叉。
+    document.documentElement.style.colorScheme = theme;
   }, [theme]);
 
   const persistSettings = useCallback((next: UserSettings) => {
@@ -747,10 +851,18 @@ export default function App() {
     setTabs((prev) =>
       prev.map((tab) =>
         tab.id === tabId && tab.type === "markdown"
-          ? { ...tab, content: nextContent }
+          ? { ...tab, content: nextContent, contentDirty: true }
           : tab
       )
     );
+  }, []);
+
+  const markMarkdownTabSaved = useCallback((path: string, content: string) => {
+    setTabs((prev) => prev.map((tab) =>
+      tab.type === "markdown" && tab.filePath && samePath(tab.filePath, path) && tab.content === content
+        ? { ...tab, contentDirty: false, contentBase: content }
+        : tab
+    ));
   }, []);
 
   const saveMarkdownFile = useCallback(
@@ -775,7 +887,7 @@ export default function App() {
   );
 
   const openWebTab = useCallback(
-    (url?: string) => {
+    (url?: string, options?: { forceNew?: boolean }) => {
       const normalized = url ? normalizeUrl(url) : START_PAGE_URL;
       const nextTab: Tab = {
         id: `web-${Date.now()}`,
@@ -788,7 +900,7 @@ export default function App() {
         const existing = prev.find(
           (tab) => tab.type === "web" && normalizeUrl(tab.url || START_PAGE_URL) === normalized
         );
-        if (existing) {
+        if (existing && !options?.forceNew) {
           setActiveTabId(existing.id);
           return prev;
         }
@@ -804,7 +916,7 @@ export default function App() {
       const existing = prev.find((item) => samePath(item.path, path));
       const markdown = isMarkdownPath(path);
       const nextItem: ReaderDocument = {
-        id: existing?.id || makeDocumentId(path),
+        id: existing?.id || createDocumentId(),
         title: existing?.title || baseTitleFromPath(path),
         path,
         kind: markdown ? "markdown" : "pdf",
@@ -815,6 +927,8 @@ export default function App() {
         isFavorite: existing?.isFavorite || false,
         progress: existing?.progress || 0,
         pageCount: markdown ? 1 : existing?.pageCount || 1,
+        fileSize: existing?.fileSize,
+        addedAt: existing?.addedAt || new Date().toISOString(),
         lastOpenedAt: existing?.lastOpenedAt || new Date().toISOString(),
         trashedAt: existing?.trashedAt,
         fileId: existing?.fileId,
@@ -827,14 +941,12 @@ export default function App() {
   }, []);
 
   const upsertDocumentFromOpen = useCallback(
-    (payload: { title: string; path: string; fileId?: string; pageCount: number; kind: "pdf" | "markdown"; content?: string }) => {
+    (payload: { title: string; path: string; fileId?: string; pageCount: number; fileSize?: number; kind: "pdf" | "markdown"; content?: string }) => {
       const now = new Date().toISOString();
-      const nextId = makeDocumentId(payload.path);
-
       setDocuments((prev) => {
         const existing = prev.find((item) => samePath(item.path, payload.path));
         const nextItem: ReaderDocument = {
-          id: nextId,
+          id: existing?.id || createDocumentId(),
           title: payload.title,
           path: payload.path,
           kind: payload.kind,
@@ -845,6 +957,8 @@ export default function App() {
           isFavorite: existing?.isFavorite || false,
           progress: existing?.progress || 0,
           pageCount: payload.kind === "markdown" ? 1 : payload.pageCount || existing?.pageCount || 1,
+          fileSize: payload.fileSize || existing?.fileSize,
+          addedAt: existing?.addedAt || now,
           lastOpenedAt: now,
           trashedAt: existing?.trashedAt,
           fileId: payload.fileId,
@@ -852,6 +966,14 @@ export default function App() {
         const rest = prev.filter((item) => !samePath(item.path, payload.path));
         return [nextItem, ...rest];
       });
+
+      const existingDocumentTab = latestTabsRef.current.find(
+        (item) =>
+          (item.type === "pdf" || item.type === "markdown") &&
+          item.filePath &&
+          samePath(item.filePath, payload.path),
+      );
+      const nextDocumentTabId = existingDocumentTab?.id || `${payload.kind}-${Date.now()}`;
 
       setTabs((prev) => {
         const existing = prev.find(
@@ -867,7 +989,19 @@ export default function App() {
             title: payload.title,
             filePath: payload.path,
             fileId: payload.fileId,
-            content: payload.kind === "markdown" ? payload.content : undefined,
+            content: payload.kind === "markdown"
+              ? existing?.contentDirty && existing.contentBase === payload.content
+                ? existing.content
+                : payload.content
+              : undefined,
+            contentDirty: payload.kind === "markdown"
+              ? Boolean(existing?.contentDirty && existing.contentBase === payload.content)
+              : undefined,
+            contentBase: payload.kind === "markdown"
+              ? existing?.contentDirty && existing.contentBase === payload.content
+                ? existing.contentBase
+                : payload.content
+              : undefined,
           };
           const updated: Tab[] = [];
           for (const item of prev) {
@@ -886,22 +1020,23 @@ export default function App() {
             }
             updated.push(item);
           }
-          setActiveTabId(existing.id);
           return updated;
         }
 
         const nextTab: Tab = {
-          id: `${payload.kind}-${Date.now()}`,
+          id: nextDocumentTabId,
           type: payload.kind === "markdown" ? "markdown" : "pdf",
           title: payload.title,
           filePath: payload.path,
           fileId: payload.fileId,
           content: payload.kind === "markdown" ? payload.content : undefined,
+          contentDirty: payload.kind === "markdown" ? false : undefined,
+          contentBase: payload.kind === "markdown" ? payload.content : undefined,
           pinned: false,
         };
-        setActiveTabId(nextTab.id);
         return [...prev, nextTab];
       });
+      setActiveTabId(nextDocumentTabId);
     },
     []
   );
@@ -926,6 +1061,7 @@ export default function App() {
       if (openingPathsRef.current.has(openKey)) {
         return false;
       }
+      cancelledOpeningPathsRef.current.delete(openKey);
       openingPathsRef.current.add(openKey);
       const existingDoc = documents.find((item) => samePath(item.path, path));
       try {
@@ -935,45 +1071,78 @@ export default function App() {
 
         if (markdown) {
           const fileInfo = await api.openMarkdownFile(cleanPath);
-          const markdownText = await api.readMarkdownText(fileInfo.path);
-          upsertDocumentFromOpen({
-            title: preferredTitle || fileInfo.name || fileNameFromPath(fileInfo.path),
-            path: fileInfo.path,
-            fileId: fileInfo.id,
-            pageCount: 1,
-            kind: "markdown",
-            content: markdownText,
-          });
-          updateBusyMessage("", 120);
-          return true;
+          try {
+            const markdownText = await api.readMarkdownText(fileInfo.path);
+            if (cancelledOpeningPathsRef.current.has(openKey)) {
+              cancelledOpeningPathsRef.current.delete(openKey);
+              await api.closeFile(fileInfo.id);
+              return false;
+            }
+            upsertDocumentFromOpen({
+              title: preferredTitle || fileInfo.name || fileNameFromPath(fileInfo.path),
+              path: fileInfo.path,
+              fileId: fileInfo.id,
+              pageCount: 1,
+              kind: "markdown",
+              content: markdownText,
+            });
+            updateBusyMessage("", 120);
+            return true;
+          } catch (error) {
+            await api.closeFile(fileInfo.id).catch((closeError) => {
+              debugWarn("markdown.close", "failed to release Markdown handle after open failure", {
+                fileId: fileInfo.id,
+                error: closeError,
+              });
+            });
+            throw error;
+          }
         }
 
         const fileInfo = await api.openFile(cleanPath);
+        if (cancelledOpeningPathsRef.current.has(openKey)) {
+          cancelledOpeningPathsRef.current.delete(openKey);
+          await api.closeFile(fileInfo.id);
+          return false;
+        }
         upsertDocumentFromOpen({
           title: preferredTitle || fileInfo.name || fileNameFromPath(fileInfo.path),
           path: fileInfo.path,
           fileId: fileInfo.id,
           pageCount: fileInfo.meta.pages || 1,
+          fileSize: fileInfo.meta.fileSize,
           kind: "pdf",
         });
 
         if (existingDoc?.fileId && existingDoc.fileId !== fileInfo.id) {
-          void api.closeFile(existingDoc.fileId).catch((error) => {
-            debugWarn("pdf.close", "failed to close replaced file handle", { fileId: existingDoc.fileId, error });
-          });
+          releasePdfFileAfterTabCommit(existingDoc.fileId, "replace-document");
         }
 
         updateBusyMessage("", 120);
         return true;
       } catch (error) {
+        const failedTab = latestTabsRef.current.find(
+          (tab) =>
+            (tab.type === "pdf" || tab.type === "markdown") &&
+            tab.filePath &&
+            samePath(tab.filePath, cleanPath) &&
+            !tab.fileId,
+        );
+        if (failedTab) {
+          setTabs((prev) => prev.filter((tab) => tab.id !== failedTab.id));
+          if (latestActiveTabIdRef.current === failedTab.id) {
+            setActiveTabId(DEFAULT_ACTIVE_TAB_ID);
+          }
+        }
         const message = error instanceof Error ? error.message : String(error);
         updateBusyMessage(`Failed to open file: ${message}`, 3200);
         return false;
       } finally {
         openingPathsRef.current.delete(openKey);
+        cancelledOpeningPathsRef.current.delete(openKey);
       }
     },
-    [documents, tabs, updateBusyMessage, upsertDocumentFromOpen]
+    [documents, releasePdfFileAfterTabCommit, tabs, updateBusyMessage, upsertDocumentFromOpen]
   );
 
   useEffect(() => {
@@ -1031,6 +1200,52 @@ export default function App() {
       )
     );
   }, []);
+
+  const openPdfReference = useCallback(
+    (doc: ReaderDocument, targetPage: number, focusRect?: ReaderAnnotationRect) => {
+      const page = Math.max(1, Math.round(targetPage || 1));
+      const existing = latestTabsRef.current.find(
+        (tab) => tab.type === "pdf" && tab.filePath && samePath(tab.filePath, doc.path),
+      );
+      if (existing) {
+        setActiveTabId(existing.id);
+        const current = existing.pdfViewState;
+        updatePdfTabViewState(existing.id, {
+          page,
+          totalPages: Math.max(page, current?.totalPages || page),
+          zoom: current?.zoom || 100,
+          scrollTop: 0,
+          scrollLeft: 0,
+          focusRect,
+          updatedAt: new Date().toISOString(),
+        });
+        return;
+      }
+      pendingPdfNavigationRef.current = { path: doc.path, page, focusRect };
+      void openPdfByPath(doc.path, doc.title);
+    },
+    [openPdfByPath, updatePdfTabViewState],
+  );
+
+  useEffect(() => {
+    const pending = pendingPdfNavigationRef.current;
+    if (!pending) return;
+    const target = tabs.find((tab) => tab.type === "pdf" && tab.filePath && samePath(tab.filePath, pending.path) && tab.fileId);
+    if (!target) return;
+    pendingPdfNavigationRef.current = null;
+    setActiveTabId(target.id);
+    const current = target.pdfViewState;
+    updatePdfTabViewState(target.id, {
+      page: Math.max(1, Math.round(pending.page)),
+      totalPages: Math.max(pending.page, current?.totalPages || pending.page),
+      zoom: current?.zoom || 100,
+      scrollTop: 0,
+      scrollLeft: 0,
+      focusRect: pending.focusRect,
+      updatedAt: new Date().toISOString(),
+    });
+  }, [tabs, updatePdfTabViewState]);
+
   const downloadResourceToFile = useCallback(
     async (rawUrl: string, options?: { preferPdf?: boolean }) => {
       const normalized = normalizeUrl(rawUrl);
@@ -1055,16 +1270,26 @@ export default function App() {
         }
 
         if (!bytes) {
-          const response = await fetch(normalized);
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status} ${response.statusText}`);
-          }
-          bytes = await response.arrayBuffer();
-          finalUrl = response.url || normalized;
-          contentDisposition = response.headers.get("content-disposition") || "";
+          const direct = await downloadDirectHttpResource(normalized);
+          bytes = direct.bytes;
+          finalUrl = direct.finalUrl || normalized;
+          contentDisposition = direct.contentDisposition || "";
         }
 
         const fileName = guessPdfFileName(finalUrl, contentDisposition);
+        if (!isTauriRuntime()) {
+          const objectUrl = URL.createObjectURL(new Blob([bytes], { type: options?.preferPdf ? "application/pdf" : "application/octet-stream" }));
+          const anchor = document.createElement("a");
+          anchor.href = objectUrl;
+          anchor.download = fileName;
+          anchor.rel = "noopener";
+          document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+          window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+          updateBusyMessage(`Downloaded ${fileName}`, 2200);
+          return { savePath: "", fileName, finalUrl };
+        }
         const savePath = await save({
           defaultPath: withDefaultDir(fileName, settings.defaultSaveDir),
           filters: [
@@ -1091,58 +1316,159 @@ export default function App() {
   );
 
   const openPdfFromUrl = useCallback(
-    async (rawUrl: string) => {
+    async (rawUrl: string, sourceTabId?: string) => {
       const normalized = normalizeUrl(rawUrl);
       if (!normalized) return false;
-      try {
+      const existingRequest = openingPdfUrlsRef.current.get(normalized);
+      if (existingRequest) return existingRequest;
+
+      const request = (async () => {
+        try {
+          if (sourceTabId && !latestTabsRef.current.some((tab) => tab.id === sourceTabId && tab.type === "web")) {
+            return false;
+          }
+          // Hide the native surface before downloading. It must not keep receiving
+          // navigation/resize work while the active tab changes to the PDF.
+          if (sourceTabId && canUseNativeWebview()) {
+            try {
+              await hideNativeWebviewTab(sourceTabId);
+            } catch (error) {
+              // The PDF event may arrive while the web tab is being removed;
+              // hiding is a safety measure, not a prerequisite for opening.
+              debugWarn("webview.pdf", "failed to hide source webview", { sourceTabId, error });
+            }
+          }
+
+          if (isTauriRuntime()) {
+            updateBusyMessage("正在下载 PDF...");
+            const downloaded = await downloadPdfToNativeTemp(
+              normalized,
+              settings.proxyEnabled && settings.proxyUrl.trim() ? settings.proxyUrl : undefined,
+            );
+            if (sourceTabId && !latestTabsRef.current.some((tab) => tab.id === sourceTabId && tab.type === "web")) {
+              await removeManagedWebPdfTemp(downloaded.path);
+              return false;
+            }
+            const opened = await openPdfByPath(
+              downloaded.path,
+              safePdfFileName(downloaded.fileName).replace(/\.pdf$/i, ""),
+              { silentBusy: true },
+            );
+            if (!opened) {
+              await removeManagedWebPdfTemp(downloaded.path);
+              throw new Error("PDF 文件打开失败");
+            }
+            return true;
+          }
+
         let bytes: ArrayBuffer | null = null;
         let finalUrl = normalized;
         let contentDisposition = "";
+        let contentType = "";
 
         if (settings.proxyEnabled && settings.proxyUrl.trim()) {
           const viaProxy = await downloadPdfViaProxy(normalized, settings.proxyUrl);
           if (viaProxy) {
+            if (viaProxy.status >= 400) {
+              throw new Error(`PDF 请求失败 (${viaProxy.status})`);
+            }
             bytes = viaProxy.bytes;
             finalUrl = viaProxy.finalUrl || normalized;
             contentDisposition = viaProxy.contentDisposition || "";
+            contentType = viaProxy.contentType || "";
           }
         }
 
         if (!bytes) {
-          const response = await fetch(normalized);
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status} ${response.statusText}`);
+          const direct = await downloadDirectHttpResource(normalized, { maxBytes: DIRECT_PDF_MAX_BYTES });
+          if (direct.status >= 400) {
+            throw new Error(`PDF 请求失败 (${direct.status})`);
           }
-          bytes = await response.arrayBuffer();
-          finalUrl = response.url || normalized;
-          contentDisposition = response.headers.get("content-disposition") || "";
+          bytes = direct.bytes;
+          finalUrl = direct.finalUrl || normalized;
+          contentDisposition = direct.contentDisposition || "";
+          contentType = direct.contentType || "";
         }
 
-        const fileName = guessPdfFileName(finalUrl, contentDisposition);
-        const tempPath = await writeNativeTempFile(`r0nix-web-${Date.now()}-${fileName}`, new Uint8Array(bytes));
+        if (!bytes) throw new Error("PDF 下载没有返回内容");
+        assertPdfPayload(bytes, contentType);
+        const fileName = safePdfFileName(guessPdfFileName(finalUrl, contentDisposition));
+        if (!isTauriRuntime()) {
+          const browserFile = new File([bytes], fileName, { type: "application/pdf" });
+          const fileInfo = await api.uploadFile(browserFile);
+          if (sourceTabId && !latestTabsRef.current.some((tab) => tab.id === sourceTabId && tab.type === "web")) {
+            await api.closeFile(fileInfo.id).catch((closeError) => {
+              debugWarn("webview.pdf", "failed to release late browser PDF upload", {
+                fileId: fileInfo.id,
+                error: closeError,
+              });
+            });
+            return false;
+          }
+          upsertDocumentFromOpen({
+            title: fileName.replace(/\.pdf$/i, ""),
+            path: fileInfo.path,
+            fileId: fileInfo.id,
+            pageCount: fileInfo.meta.pages || 1,
+            fileSize: fileInfo.meta.fileSize,
+            kind: "pdf",
+          });
+          updateBusyMessage("", 120);
+          return true;
+        }
+        const tempPath = await writeNativeTempFile(
+          `r0nix-web-${Date.now()}-${fileName}`,
+          new Uint8Array(bytes)
+        );
         return await openPdfByPath(tempPath, fileName.replace(/\.pdf$/i, ""), { silentBusy: true });
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        updateBusyMessage(`Failed to open PDF URL: ${message}`, 3600);
-        return false;
+        } catch (error) {
+          // The native surface is hidden before the download starts so a PDF
+          // tab can take over cleanly. Restore it when opening fails; otherwise
+          // a rejected download leaves the web tab looking like a blank page.
+          if (sourceTabId && canUseNativeWebview()) {
+            try {
+              if (latestTabsRef.current.some((tab) => tab.id === sourceTabId && tab.type === "web")) {
+                await showNativeWebviewTab(sourceTabId, true);
+              }
+            } catch (restoreError) {
+              debugWarn("webview.pdf", "failed to restore source webview after PDF open failure", {
+                sourceTabId,
+                error: restoreError,
+              });
+            }
+          }
+          const message = error instanceof Error ? error.message : String(error);
+          updateBusyMessage(`打开 PDF 失败: ${message}`, 3600);
+          return false;
+        }
+      })();
+      openingPdfUrlsRef.current.set(normalized, request);
+      try {
+        return await request;
+      } finally {
+        if (openingPdfUrlsRef.current.get(normalized) === request) {
+          openingPdfUrlsRef.current.delete(normalized);
+        }
       }
     },
-    [openPdfByPath, settings.proxyEnabled, settings.proxyUrl, updateBusyMessage]
+    [openPdfByPath, settings.proxyEnabled, settings.proxyUrl, updateBusyMessage, upsertDocumentFromOpen]
   );
 
   const openPdfDialog = useCallback(async () => {
-    try {
-      const selected = await open({
-        multiple: false,
-        filters: [{ name: "Documents", extensions: ["pdf", "md", "markdown"] }],
-        title: "Open Document",
-      });
-      if (typeof selected === "string") {
-        await openPdfByPath(selected);
-        return;
+    if (isTauriRuntime()) {
+      try {
+        const selected = await open({
+          multiple: false,
+          filters: [{ name: "Documents", extensions: ["pdf", "md", "markdown"] }],
+          title: "Open Document",
+        });
+        if (typeof selected === "string") {
+          await openPdfByPath(selected);
+          return;
+        }
+      } catch {
+        // Fall through to the browser-compatible file input when the native dialog is unavailable.
       }
-    } catch {
-      // fall back to browser file input below
     }
 
     if (typeof window === "undefined") return;
@@ -1172,19 +1498,30 @@ export default function App() {
       const markdown = ext === "md" || ext === "markdown";
       updateBusyMessage(markdown ? "Opening Markdown..." : "Opening PDF...");
       const opened = await api.uploadFile(pickedFile);
-      let markdownText = "";
-      if (markdown) {
-        markdownText = await api.readMarkdownText(opened.path);
+      try {
+        let markdownText = "";
+        if (markdown) {
+          markdownText = await api.readMarkdownText(opened.path);
+        }
+        upsertDocumentFromOpen({
+          title: opened.name.replace(/\.(pdf|md|markdown)$/i, ""),
+          path: opened.path,
+          fileId: opened.id,
+          pageCount: markdown ? 1 : opened.meta.pages || 1,
+          fileSize: opened.meta.fileSize,
+          kind: markdown ? "markdown" : "pdf",
+          content: markdown ? markdownText : undefined,
+        });
+        updateBusyMessage("", 120);
+      } catch (error) {
+        await api.closeFile(opened.id).catch((closeError) => {
+          debugWarn("upload.close", "failed to release uploaded file after import failure", {
+            fileId: opened.id,
+            error: closeError,
+          });
+        });
+        throw error;
       }
-      upsertDocumentFromOpen({
-        title: opened.name.replace(/\.(pdf|md|markdown)$/i, ""),
-        path: opened.path,
-        fileId: opened.id,
-        pageCount: markdown ? 1 : opened.meta.pages || 1,
-        kind: markdown ? "markdown" : "pdf",
-        content: markdown ? markdownText : undefined,
-      });
-      updateBusyMessage("", 120);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       updateBusyMessage(`Failed to open file: ${message}`, 3200);
@@ -1192,9 +1529,9 @@ export default function App() {
   }, [openPdfByPath, updateBusyMessage, upsertDocumentFromOpen]);
 
   const importFolder = useCallback(async () => {
-    const selected = await open({ directory: true, multiple: false, title: "Import Folder" });
-    if (typeof selected !== "string" || !selected.trim()) return;
     try {
+      const selected = await open({ directory: true, multiple: false, title: "Import Folder" });
+      if (typeof selected !== "string" || !selected.trim()) return;
       updateBusyMessage("Scanning folder...");
       const pdfPaths = await collectNativeImportablePaths(selected);
       if (pdfPaths.length === 0) {
@@ -1215,17 +1552,20 @@ export default function App() {
     (id: string) => {
       const closing = tabs.find((item) => item.id === id);
       if (!closing) return;
+      if (closing.type === "markdown" && closing.contentDirty && typeof window !== "undefined") {
+        if (!window.confirm(uiText.unsavedMarkdownClose)) return;
+      }
       if (closing.type === "web") {
         closeWebTabNative(closing.id);
       }
+      if ((closing.type === "pdf" || closing.type === "markdown") && !closing.fileId && closing.filePath) {
+        cancelledOpeningPathsRef.current.add(closing.filePath.trim().toLowerCase());
+      }
       if ((closing.type === "pdf" || closing.type === "markdown") && closing.fileId) {
-        void api.closeFile(closing.fileId).catch((error) => {
-          debugWarn("tab.close", "failed to release document handle", {
-            tabId: closing.id,
-            fileId: closing.fileId,
-            error,
-          });
-        });
+        releasePdfFileAfterTabCommit(closing.fileId, `close-tab:${closing.id}`);
+      }
+      if ((closing.type === "pdf" || closing.type === "markdown") && closing.filePath && isEphemeralWebPdfPath(closing.filePath)) {
+        cleanupManagedWebPdfTemp(closing.filePath);
       }
 
       setTabs((prev) => {
@@ -1245,7 +1585,7 @@ export default function App() {
         return nextTabs;
       });
     },
-    [activeTabId, closeWebTabNative, tabs]
+    [activeTabId, closeWebTabNative, releasePdfFileAfterTabCommit, tabs, uiText.unsavedMarkdownClose]
   );
 
   const handleOpenExternal = useCallback(async (url: string) => {
@@ -1254,12 +1594,17 @@ export default function App() {
       updateBusyMessage("Only HTTP(S) links can be opened externally", 2600);
       return;
     }
-    if (canUseNativeWebview()) {
-      const shell = await import("@tauri-apps/plugin-shell");
-      await shell.open(normalized);
-      return;
+    try {
+      if (canUseNativeWebview()) {
+        const shell = await import("@tauri-apps/plugin-shell");
+        await shell.open(normalized);
+        return;
+      }
+      window.open(normalized, "_blank", "noopener,noreferrer");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      updateBusyMessage(`Failed to open external link: ${message}`, 3200);
     }
-    window.open(normalized, "_blank", "noopener,noreferrer");
   }, [updateBusyMessage]);
 
   const focusLibrarySearch = useCallback(() => {
@@ -1277,6 +1622,19 @@ export default function App() {
 
   const removeDocumentTabs = useCallback(
     (path: string) => {
+      const removedTabs = latestTabsRef.current.filter(
+        (tab) =>
+          (tab.type === "pdf" || tab.type === "markdown") &&
+          tab.filePath &&
+          samePath(tab.filePath, path),
+      );
+      for (const tab of removedTabs) {
+        if (tab.fileId) {
+          releasePdfFileAfterTabCommit(tab.fileId, `remove-document:${tab.id}`);
+        } else if (tab.filePath) {
+          cancelledOpeningPathsRef.current.add(tab.filePath.trim().toLowerCase());
+        }
+      }
       setTabs((prev) => {
         const nextTabs = prev.filter(
           (tab) => !((tab.type === "pdf" || tab.type === "markdown") && tab.filePath && samePath(tab.filePath, path))
@@ -1289,7 +1647,7 @@ export default function App() {
         return fallbackTabs;
       });
     },
-    [activeTabId]
+    [activeTabId, releasePdfFileAfterTabCommit]
   );
 
   const handleMoveToTrash = useCallback(
@@ -1325,24 +1683,24 @@ export default function App() {
       setNotesByDocument((prev) => {
         const next = { ...prev };
         for (const target of targets) {
-          delete next[makeNoteStorageKey(target.path)];
+          delete next[target.id];
+          delete next[documentPathKey(target.path)];
         }
         return next;
       });
       setAnnotationsByDocument((prev) => {
         const next = { ...prev };
         for (const target of targets) {
-          delete next[makeNoteStorageKey(target.path)];
+          delete next[target.id];
+          delete next[documentPathKey(target.path)];
         }
         return next;
       });
 
       for (const target of targets) {
-        delete progressRef.current[makeNoteStorageKey(target.path)];
+        delete progressRef.current[documentPathKey(target.path)];
         if (target.fileId) {
-          void api.closeFile(target.fileId).catch((error) => {
-            debugWarn("pdf.close", "failed to close deleted file handle", { fileId: target.fileId, error });
-          });
+          releasePdfFileAfterTabCommit(target.fileId, "delete-document");
         }
       }
 
@@ -1351,7 +1709,7 @@ export default function App() {
         2200
       );
     },
-    [documents, removeDocumentTabs, updateBusyMessage]
+    [documents, releasePdfFileAfterTabCommit, removeDocumentTabs, updateBusyMessage]
   );
 
   const handleDeleteDocument = useCallback(
@@ -1456,10 +1814,10 @@ export default function App() {
   const addNote = useCallback((path: string, page: number, content: string, kind: ReaderNote["kind"] = "note", reference?: string, source?: Pick<ReaderNote, "blockId" | "sourceRect">) => {
     const trimmed = content.trim();
     if (!trimmed) return;
-    const storageKey = makeNoteStorageKey(path);
+    const storageKey = documentIdForPath(documents, path) || documentPathKey(path);
     const nextNote: ReaderNote = {
       id: `note-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      documentId: makeDocumentId(path),
+      documentId: storageKey,
       blockId: source?.blockId,
       page,
       kind,
@@ -1469,35 +1827,35 @@ export default function App() {
       createdAt: new Date().toISOString(),
     };
     setNotesByDocument((prev) => ({ ...prev, [storageKey]: [nextNote, ...(prev[storageKey] || [])] }));
-  }, []);
+  }, [documents]);
 
   const updateNote = useCallback((path: string, noteId: string, content: string) => {
     const trimmed = content.trim();
     if (!trimmed) return;
-    const storageKey = makeNoteStorageKey(path);
+    const storageKey = documentIdForPath(documents, path) || documentPathKey(path);
     setNotesByDocument((prev) => ({
       ...prev,
       [storageKey]: (prev[storageKey] || []).map((note) => note.id === noteId ? { ...note, content: trimmed } : note),
     }));
-  }, []);
+  }, [documents]);
 
   const removeNote = useCallback((path: string, noteId: string) => {
-    const storageKey = makeNoteStorageKey(path);
+    const storageKey = documentIdForPath(documents, path) || documentPathKey(path);
     setNotesByDocument((prev) => ({
       ...prev,
       [storageKey]: (prev[storageKey] || []).filter((note) => note.id !== noteId),
     }));
-  }, []);
+  }, [documents]);
 
   const addAnnotation = useCallback(
     (
       path: string,
       annotation: Omit<ReaderAnnotation, "id" | "createdAt">
     ) => {
-      const storageKey = makeNoteStorageKey(path);
+      const storageKey = documentIdForPath(documents, path) || documentPathKey(path);
       const nextAnnotation: ReaderAnnotation = {
         ...annotation,
-        documentId: makeDocumentId(path),
+        documentId: storageKey,
         id: `annotation-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         createdAt: new Date().toISOString(),
       };
@@ -1506,26 +1864,28 @@ export default function App() {
         [storageKey]: [nextAnnotation, ...(prev[storageKey] || [])],
       }));
     },
-    []
+    [documents]
   );
 
   const removeAnnotation = useCallback((path: string, annotationId: string) => {
-    const storageKey = makeNoteStorageKey(path);
+    const storageKey = documentIdForPath(documents, path) || documentPathKey(path);
     setAnnotationsByDocument((prev) => ({
       ...prev,
       [storageKey]: (prev[storageKey] || []).filter((annotation) => annotation.id !== annotationId),
     }));
-  }, []);
+  }, [documents]);
 
   useEffect(() => {
     if (!canUseNativeWebview()) return;
     const disposes: UnlistenFn[] = [];
+    let disposed = false;
 
     void Promise.all([
       listen<{ tabId: string; url: string }>("r0nix://webview-pdf-link", (event) => {
+        const sourceTabId = event.payload?.tabId;
         const url = event.payload?.url;
-        if (!url) return;
-        void openPdfFromUrl(url);
+        if (!sourceTabId || !url) return;
+        void openPdfFromUrl(url, sourceTabId);
       }),
       listen<{ tabId: string; url: string }>("r0nix://webview-navigated", (event) => {
         const nextTabId = event.payload?.tabId;
@@ -1534,10 +1894,17 @@ export default function App() {
         updateTabUrl(nextTabId, nextUrl);
       }),
     ]).then((unlisteners) => {
+      if (disposed) {
+        for (const dispose of unlisteners) dispose();
+        return;
+      }
       disposes.push(...unlisteners);
+    }).catch((error) => {
+      debugWarn("webview.events", "failed to register native webview listeners", { error });
     });
 
     return () => {
+      disposed = true;
       for (const dispose of disposes) {
         dispose();
       }
@@ -1594,9 +1961,8 @@ export default function App() {
 
   return (
     <div
-      style={appStyle}
-      className={`flex h-screen w-full overflow-hidden font-sans selection:bg-zinc-200 dark:selection:bg-zinc-700 ${
-        theme === "dark" ? "dark bg-[var(--chrome-surface-1)] text-zinc-100" : "bg-zinc-100 text-zinc-900"
+      className={`flex h-screen w-full overflow-hidden font-sans bg-surface-app text-content-primary${
+        theme === "dark" ? " dark" : ""
       }`}
     >
       <Sidebar
@@ -1623,7 +1989,7 @@ export default function App() {
         onManageQuickLinks={() => openSettingsTab("quick-links")}
       />
 
-      <div className="flex-1 flex flex-col min-w-0 bg-white dark:bg-[var(--chrome-surface-1)]">
+      <div className="flex-1 flex flex-col min-w-0 bg-surface-panel">
         <Tabs
           tabs={tabs}
           activeTabId={activeTabId}
@@ -1633,6 +1999,7 @@ export default function App() {
           }}
           onTabClose={handleCloseTab}
           onToggleSidebar={() => setIsSidebarOpen((value) => !value)}
+          onNewTab={() => openWebTab(undefined, { forceNew: true })}
           isSidebarOpen={isSidebarOpen}
           language={settings.language}
           onTabContextMenu={(tab, event) => {
@@ -1640,7 +2007,7 @@ export default function App() {
           }}
         />
 
-        <div className="flex-1 overflow-hidden relative bg-zinc-50 dark:bg-[var(--chrome-surface-1)]">
+        <div className="flex-1 overflow-hidden relative bg-surface-app">
           <AnimatePresence>
             {busyMessage ? (
               <motion.div
@@ -1665,12 +2032,12 @@ export default function App() {
               const y = Math.min(tabContextMenu.y, Math.max(12, window.innerHeight - 120));
               return (
                 <div
-                  className="fixed z-[80] w-52 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-white/95 dark:bg-zinc-900/95 backdrop-blur shadow-2xl p-1.5"
+                  className="fixed z-[80] w-52 rounded-xl border border-border-subtle bg-surface-panel/95 backdrop-blur shadow-2xl p-1.5"
                   style={{ left: x, top: y }}
                   onMouseDown={(event) => event.stopPropagation()}
                 >
                   <button
-                    className="w-full text-left px-3 py-2 rounded-lg text-sm text-zinc-700 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 disabled:opacity-45"
+                    className="w-full text-left px-3 py-2 rounded-lg text-sm text-content-secondary hover:bg-surface-hover disabled:opacity-45"
                     disabled={!canClose}
                     onClick={() => {
                       if (targetTab && !targetTab.pinned) {
@@ -1688,7 +2055,7 @@ export default function App() {
 
           <Suspense
             fallback={
-              <div className="absolute inset-0 flex items-center justify-center text-xs text-zinc-500 dark:text-zinc-400">
+              <div className="absolute inset-0 flex items-center justify-center text-xs text-content-muted">
                 {settings.language === "zh-CN" ? "正在加载视图..." : "Loading view..."}
               </div>
             }
@@ -1698,10 +2065,12 @@ export default function App() {
               activeTab.filter === "whiteboards" ? (
                 <Whiteboards
                   documents={visibleDocuments}
+                  notesByDocument={notesByDocument}
                   language={settings.language}
                   onOpenPdf={(doc) => {
                     void openPdfByPath(doc.path, doc.title);
                   }}
+                  onOpenPdfAt={openPdfReference}
                 />
               ) : (
                 <Library
@@ -1751,7 +2120,8 @@ export default function App() {
             {activeTab?.type === "pdf" ? (
               <PDFViewer
                 title={activeTab.title}
-                documentId={activeTab.filePath ? makeDocumentId(activeTab.filePath) : undefined}
+                documentId={activeDocument?.id}
+                documentFileSize={activeDocument?.fileSize}
                 fileId={activeTab.fileId}
                 language={settings.language}
                 notes={activeNotes}
@@ -1781,6 +2151,15 @@ export default function App() {
                 }}
                 onResolveDefaultPath={(fileName) => withDefaultDir(fileName, settings.defaultSaveDir)}
                 onOpenExternal={handleOpenExternal}
+                onOpenLinkInApp={(url) => {
+                  const normalized = normalizeUrl(url);
+                  if (!normalized) return;
+                  if (/\.pdf(?:$|[?#])/i.test(normalized)) {
+                    void openPdfFromUrl(normalized);
+                  } else {
+                    openWebTab(normalized);
+                  }
+                }}
                 aiModelConfig={aiModelConfig}
                 initialViewState={activeTab.pdfViewState}
                 onViewStateChange={(viewState) => updatePdfTabViewState(activeTab.id, viewState)}
@@ -1813,6 +2192,7 @@ export default function App() {
             {activeTab?.type === "markdown" ? (
               <MarkdownViewer
                 title={activeTab.title}
+                documentId={activeDocument?.id}
                 filePath={activeTab.filePath}
                 content={activeTab.content || ""}
                 language={settings.language}
@@ -1838,6 +2218,7 @@ export default function App() {
                   if (!activeTab.filePath) return;
                   try {
                     await saveMarkdownFile(activeTab.filePath, activeTab.fileId, next);
+                    markMarkdownTabSaved(activeTab.filePath, next);
                     updateBusyMessage(
                       settings.language === "zh-CN" ? "Markdown 已保存" : "Markdown saved",
                       1800
@@ -1864,8 +2245,8 @@ export default function App() {
                 language={settings.language}
                 initialUrl={activeTab.url || START_PAGE_URL}
                 onUrlChange={(nextUrl) => updateTabUrl(activeTab.id, nextUrl)}
-                onOpenPdfInApp={(url) => {
-                  void openPdfFromUrl(url);
+                onOpenPdfInApp={async (url) => {
+                  await openPdfFromUrl(url, activeTab.id);
                 }}
                 onOpenExternal={(url) => {
                   void handleOpenExternal(url);
@@ -1893,17 +2274,3 @@ export default function App() {
     </div>
   );
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-

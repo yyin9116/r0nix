@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Copy, Languages, MessageSquare, Quote, Send, Sparkles, Square, X } from "lucide-react";
 import {
   READING_ASSIST_MAX_EXCERPT_CHARS,
@@ -7,6 +7,13 @@ import {
   isModelEndpointConfigured,
   type LlmServiceConfig,
 } from "../services/readingAssistant";
+import {
+  clampOverlayPoint,
+  resolveOverlayPoint,
+  type OverlayPlacement,
+  type OverlayPoint,
+  type OverlaySize,
+} from "../services/overlayPlacement";
 import type { AppLanguage } from "../services/userSettings";
 import type { ReaderAnnotationRect } from "../types";
 import "./ReadingAssistMenu.css";
@@ -90,24 +97,6 @@ const I18N = {
   },
 } as const;
 
-function clampMenuPosition(x: number, y: number) {
-  if (typeof window === "undefined") return { left: x, top: y };
-  return {
-    left: Math.max(12, Math.min(window.innerWidth - 372, x)),
-    top: Math.max(12, Math.min(window.innerHeight - 420, y)),
-  };
-}
-
-function clampToolbarPosition(x: number, y: number, expanded: boolean) {
-  if (typeof window === "undefined") return { left: x, top: y };
-  const width = expanded ? 390 : 300;
-  const height = expanded ? 260 : 48;
-  return {
-    left: Math.max(12, Math.min(window.innerWidth - width - 12, x - width / 2)),
-    top: Math.max(12, Math.min(window.innerHeight - height - 12, y)),
-  };
-}
-
 async function copyText(text: string) {
   await navigator.clipboard.writeText(text);
 }
@@ -119,19 +108,58 @@ export function ReadingAssistMenu({ selection, language, modelConfig, onClose, o
   const [status, setStatus] = useState("");
   const [isAsking, setIsAsking] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
-  const [position, setPosition] = useState(() => (selection ? clampMenuPosition(selection.x, selection.y) : { left: 0, top: 0 }));
+  /** 选区锚点。位置不再由「锚点 + 写死的宽高」算出，而是等实测尺寸到手后合成。 */
+  const [anchor, setAnchor] = useState<{ x: number; y: number } | null>(null);
+  /** 用户拖拽后的位置。为 null 表示跟随锚点。 */
+  const [manual, setManual] = useState<OverlayPoint | null>(null);
+  /** 实测尺寸。实测前为 null，第一帧由 useLayoutEffect 在 paint 之前补齐。 */
+  const [measured, setMeasured] = useState<OverlaySize | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const askAbortRef = useRef<AbortController | null>(null);
   const dragRef = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
 
+  const placement: OverlayPlacement = variant === "inline-toolbar" ? "centered" : "top-left";
+
+  // 位置是**派生值**，不是状态：尺寸一变（展开、回答流入、语言切换），钳制结果自动跟上。
+  // 旧实现把位置存进 state，并在「展开之前」用常量估算钳制，尺寸真的变了就只能再算一次，
+  // 因此始终落后于真实渲染尺寸 —— 而写死的高度没有任何 CSS 来源，根本无法同步。
+  const position = useMemo<OverlayPoint>(() => {
+    if (typeof window === "undefined") return { left: 0, top: 0 };
+    const viewport = { width: window.innerWidth, height: window.innerHeight };
+    const size = measured ?? { width: 0, height: 0 };
+    if (manual) return clampOverlayPoint(manual, size, viewport);
+    return resolveOverlayPoint(anchor, size, placement, viewport);
+  }, [anchor, manual, measured, placement]);
+
+  // 尺寸只从 DOM 取。ResizeObserver 覆盖展开、回答流入、字体与语言变化等所有变形来源。
+  useLayoutEffect(() => {
+    const element = menuRef.current;
+    if (!element) return;
+    const measure = () => {
+      const rect = element.getBoundingClientRect();
+      setMeasured((previous) =>
+        previous && Math.abs(previous.width - rect.width) < 0.5 && Math.abs(previous.height - rect.height) < 0.5
+          ? previous
+          : { width: rect.width, height: rect.height }
+      );
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [selection?.id, variant]);
+
   useEffect(() => {
     askAbortRef.current?.abort();
     askAbortRef.current = null;
+    setIsAsking(false);
     setQuestion("");
     setAnswer("");
     setStatus("");
     setIsExpanded(false);
-    if (selection) setPosition(variant === "inline-toolbar" ? clampToolbarPosition(selection.x, selection.y, false) : clampMenuPosition(selection.x, selection.y));
+    setManual(null);
+    setAnchor(selection ? { x: selection.x, y: selection.y } : null);
   }, [selection?.id, variant]);
 
   useEffect(() => {
@@ -197,7 +225,9 @@ export function ReadingAssistMenu({ selection, language, modelConfig, onClose, o
   const moveDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== event.pointerId) return;
-    setPosition(clampMenuPosition(event.clientX - drag.offsetX, event.clientY - drag.offsetY));
+    // 只记原始落点，钳制交给派生的 position。若在这里就地钳制，
+    // 越界拖拽会吃掉抓取偏移，手感变成「粘在边缘拽不动」。
+    setManual({ left: event.clientX - drag.offsetX, top: event.clientY - drag.offsetY });
     event.preventDefault();
   };
 
@@ -220,19 +250,22 @@ export function ReadingAssistMenu({ selection, language, modelConfig, onClose, o
   };
 
   const handleQuote = async () => {
+    // Saving a citation is a local product action and must not depend on the
+    // platform clipboard permission succeeding in the same click.
+    onSaveQuote?.(selection, quoteText);
     try {
       await copyText(quoteText);
-      onSaveQuote?.(selection, quoteText);
       onHint?.(t.quoted);
     } catch {
-      onHint?.("Clipboard unavailable");
+      onHint?.(`${t.quoted}；剪贴板不可用`);
     }
   };
 
   const expandWithQuestion = (value?: string) => {
     if (value) setQuestion(value);
     setIsExpanded(true);
-    setPosition(clampToolbarPosition(selection.x, selection.y, true));
+    // 回到锚点即可；变宽变高由 ResizeObserver + 派生的 position 自动处理。
+    setManual(null);
   };
 
   const handleAsk = async () => {
@@ -255,9 +288,11 @@ export function ReadingAssistMenu({ selection, language, modelConfig, onClose, o
         reference: `${selection.sourceTitle} / ${selection.reference}`,
         signal: controller.signal,
       });
+      if (controller.signal.aborted || askAbortRef.current !== controller) return;
       setAnswer(result.answer);
       setStatus("");
     } catch (error) {
+      if (askAbortRef.current !== controller) return;
       if (controller.signal.aborted) {
         const reason = controller.signal.reason;
         const message = reason instanceof Error ? reason.message : String(reason || "");
@@ -269,8 +304,8 @@ export function ReadingAssistMenu({ selection, language, modelConfig, onClose, o
     } finally {
       if (askAbortRef.current === controller) {
         askAbortRef.current = null;
+        setIsAsking(false);
       }
-      setIsAsking(false);
     }
   };
 

@@ -1,29 +1,29 @@
-﻿import { useEffect, useMemo, useRef, useState } from "react";
+﻿import { useEffect, useMemo, useState } from "react";
 import {
   FileText,
   LayoutTemplate,
-  Link2,
-  Move,
   Plus,
   StickyNote,
   Trash2,
   ZoomIn,
   ZoomOut,
   PanelRight,
-  Hand,
 } from "lucide-react";
-import type { ReaderDocument } from "../types";
+import type { ReaderAnnotationRect, ReaderDocument, ReaderNote } from "../types";
 import type { AppLanguage } from "../services/userSettings";
 import { readVersionedLocalState, writeVersionedLocalState } from "../services/localStore";
+import { BOARD_COLOR_ORDER, BOARD_PALETTE, normalizeCardColor, type CardColor } from "../theme/boardPalette";
+import { WhiteboardCanvas } from "./WhiteboardCanvas";
 
 interface WhiteboardsProps {
   documents: ReaderDocument[];
+  notesByDocument: Record<string, ReaderNote[]>;
   onOpenPdf: (doc: ReaderDocument) => void;
+  onOpenPdfAt?: (doc: ReaderDocument, page: number, sourceRect?: ReaderAnnotationRect) => void;
   language: AppLanguage;
 }
 
-type CardColor = "zinc" | "stone" | "slate" | "olive" | "blue";
-type WhiteboardCard = {
+export type WhiteboardCard = {
   id: string;
   type: "note" | "paper";
   title: string;
@@ -35,15 +35,23 @@ type WhiteboardCard = {
   color: CardColor;
   groupId?: string;
   docId?: string;
+  source?: {
+    noteId?: string;
+    documentId: string;
+    blockId?: string;
+    page: number;
+    sourceRect?: ReaderAnnotationRect;
+    reference?: string;
+  };
   updatedAt: string;
 };
-type WhiteboardConnection = {
+export type WhiteboardConnection = {
   id: string;
   fromCardId: string;
   toCardId: string;
   createdAt: string;
 };
-type WhiteboardGroup = {
+export type WhiteboardGroup = {
   id: string;
   title: string;
   x: number;
@@ -54,43 +62,13 @@ type WhiteboardGroup = {
   docId?: string;
   createdAt: string;
 };
-type WhiteboardState = {
+export type WhiteboardState = {
   version: 2;
   zoom: number;
   cards: WhiteboardCard[];
   connections: WhiteboardConnection[];
   groups: WhiteboardGroup[];
 };
-type InteractionState =
-  | {
-      type: "drag";
-      cardId: string;
-      pointerBoardX: number;
-      pointerBoardY: number;
-      startX: number;
-      startY: number;
-      width: number;
-      height: number;
-    }
-  | {
-      type: "resize";
-      cardId: string;
-      pointerBoardX: number;
-      pointerBoardY: number;
-      startWidth: number;
-      startHeight: number;
-      x: number;
-      y: number;
-    };
-
-type BoardPanState = {
-  pointerId: number;
-  startClientX: number;
-  startClientY: number;
-  startScrollLeft: number;
-  startScrollTop: number;
-};
-
 const I18N = {
   "zh-CN": {
     boardTitle: "白板",
@@ -101,6 +79,8 @@ const I18N = {
     resetZoom: "重置缩放",
     zoomIn: "放大",
     clearBoard: "清空白板",
+    clearBoardConfirm: "当前白板内容将被清空，是否继续？",
+    seedBoardConfirm: "套用模板会替换当前白板内容，是否继续？",
     emptyTitle: "搭建可执行的研究白板",
     emptyDesc: "创建论文分组、调整卡片大小、编辑笔记颜色，并通过真实连线组织思路，所有内容会本地持久化。",
     addFirstNote: "添加第一条笔记",
@@ -135,6 +115,13 @@ const I18N = {
     startLink: "开始连接",
     deleteCard: "删除卡片",
     openLinkedPdf: "打开关联 PDF",
+    openSource: "回到来源",
+    readingNotes: "阅读笔记",
+    readingNotesDesc: "将已有笔记作为带来源的卡片加入白板。",
+    addReadingNote: "加入白板",
+    noReadingNotes: "暂无已保存的阅读笔记。",
+    sourcePage: "来源页",
+    sourceBlock: "阅读块",
     selectedLink: "当前连接",
     connectsTo: "连接到",
     missingCard: "卡片不存在",
@@ -169,9 +156,6 @@ const I18N = {
     evidenceToVerify: "待验证证据",
     evidenceToVerifyDesc: "有哪些结果或图表值得重点复核？",
     colorZinc: "锌灰",
-    colorStone: "岩灰",
-    colorSlate: "石板",
-    colorOlive: "橄榄",
     colorBlue: "蓝色",
     dragCanvas: "\u62d6\u52a8\u753b\u5e03",
     dragCanvasOn: "\u5df2\u5f00\u542f",
@@ -186,6 +170,8 @@ const I18N = {
     resetZoom: "Reset zoom",
     zoomIn: "Zoom in",
     clearBoard: "Clear Board",
+    clearBoardConfirm: "The current board will be cleared. Continue?",
+    seedBoardConfirm: "Applying a template will replace the current board. Continue?",
     emptyTitle: "Build a working research board",
     emptyDesc: "Create paper clusters, resize cards, edit note colors, and connect ideas with real links that stay persisted locally.",
     addFirstNote: "Add First Note",
@@ -220,6 +206,13 @@ const I18N = {
     startLink: "Start Link",
     deleteCard: "Delete Card",
     openLinkedPdf: "Open Linked PDF",
+    openSource: "Open source",
+    readingNotes: "Reading notes",
+    readingNotesDesc: "Add existing notes as source-linked cards.",
+    addReadingNote: "Add to board",
+    noReadingNotes: "No saved reading notes yet.",
+    sourcePage: "Source page",
+    sourceBlock: "Reading block",
     selectedLink: "Selected link",
     connectsTo: "connects to",
     missingCard: "Missing card",
@@ -254,9 +247,6 @@ const I18N = {
     evidenceToVerify: "Evidence to verify",
     evidenceToVerifyDesc: "What result or figure should be checked in detail?",
     colorZinc: "Zinc",
-    colorStone: "Stone",
-    colorSlate: "Slate",
-    colorOlive: "Olive",
     colorBlue: "Blue",
     dragCanvas: "Drag canvas",
     dragCanvasOn: "On",
@@ -275,14 +265,6 @@ const MAX_CARD_HEIGHT = 460;
 const MIN_ZOOM = 0.7;
 const MAX_ZOOM = 1.6;
 
-const CARD_PALETTE: Array<{ id: CardColor; border: string; chip: string; fill: string; text: string }> = [
-  { id: "zinc", border: "rgba(63,63,70,0.9)", chip: "rgba(82,82,91,0.12)", fill: "rgba(250,250,250,0.96)", text: "#18181b" },
-  { id: "stone", border: "rgba(87,83,78,0.85)", chip: "rgba(120,113,108,0.12)", fill: "rgba(250,250,249,0.96)", text: "#1c1917" },
-  { id: "slate", border: "rgba(51,65,85,0.88)", chip: "rgba(71,85,105,0.14)", fill: "rgba(248,250,252,0.96)", text: "#0f172a" },
-  { id: "olive", border: "rgba(82,82,55,0.88)", chip: "rgba(113,113,63,0.14)", fill: "rgba(250,250,244,0.96)", text: "#27272a" },
-  { id: "blue", border: "rgba(37,99,235,0.8)", chip: "rgba(59,130,246,0.12)", fill: "rgba(248,250,252,0.96)", text: "#172554" },
-];
-
 function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -295,12 +277,39 @@ function normalizeZoom(value: number) {
   return clamp(Number.isFinite(value) ? value : 1, MIN_ZOOM, MAX_ZOOM);
 }
 
-function normalizeColor(value: unknown): CardColor {
-  return value === "stone" || value === "slate" || value === "olive" || value === "blue" ? value : "zinc";
-}
-
-function getPalette(color: CardColor) {
-  return CARD_PALETTE.find((item) => item.id === color) || CARD_PALETTE[0];
+function sanitizeSource(value: unknown) {
+  if (!value || typeof value !== "object") return undefined;
+  const candidate = value as {
+    noteId?: unknown;
+    documentId?: unknown;
+    blockId?: unknown;
+    page?: unknown;
+    sourceRect?: Partial<ReaderAnnotationRect>;
+    reference?: unknown;
+  };
+  if (typeof candidate.documentId !== "string" || !candidate.documentId.trim()) return undefined;
+  const page = typeof candidate.page === "number" && Number.isFinite(candidate.page)
+    ? Math.max(1, Math.round(candidate.page))
+    : 1;
+  const rect = candidate.sourceRect;
+  const sourceRect = rect &&
+    typeof rect.x === "number" && typeof rect.y === "number" &&
+    typeof rect.width === "number" && typeof rect.height === "number"
+    ? {
+        x: clamp(rect.x, 0, 1),
+        y: clamp(rect.y, 0, 1),
+        width: clamp(rect.width, 0.002, 1),
+        height: clamp(rect.height, 0.002, 1),
+      }
+    : undefined;
+  return {
+    noteId: typeof candidate.noteId === "string" && candidate.noteId ? candidate.noteId : undefined,
+    documentId: candidate.documentId,
+    blockId: typeof candidate.blockId === "string" && candidate.blockId ? candidate.blockId : undefined,
+    page,
+    sourceRect,
+    reference: typeof candidate.reference === "string" && candidate.reference.trim() ? candidate.reference.trim() : undefined,
+  };
 }
 
 function sanitizeCard(item: Partial<WhiteboardCard>, index: number): WhiteboardCard | null {
@@ -315,9 +324,10 @@ function sanitizeCard(item: Partial<WhiteboardCard>, index: number): WhiteboardC
     y: typeof item.y === "number" ? item.y : 64 + Math.floor(index / 3) * 200,
     width: clamp(typeof item.width === "number" ? item.width : 280, MIN_CARD_WIDTH, MAX_CARD_WIDTH),
     height: clamp(typeof item.height === "number" ? item.height : 200, MIN_CARD_HEIGHT, MAX_CARD_HEIGHT),
-    color: normalizeColor(item.color),
+    color: normalizeCardColor(item.color),
     groupId: typeof item.groupId === "string" ? item.groupId : undefined,
     docId: typeof item.docId === "string" ? item.docId : undefined,
+    source: sanitizeSource(item.source),
     updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : new Date().toISOString(),
   };
 }
@@ -337,7 +347,7 @@ function sanitizeGroup(item: Partial<WhiteboardGroup>, index: number): Whiteboar
     y: typeof item.y === "number" ? item.y : 64 + Math.floor(index / 2) * 420,
     width: clamp(typeof item.width === "number" ? item.width : 980, 620, BOARD_WIDTH - 48),
     height: clamp(typeof item.height === "number" ? item.height : 380, 280, BOARD_HEIGHT - 48),
-    color: normalizeColor(item.color),
+    color: normalizeCardColor(item.color),
     docId: typeof item.docId === "string" ? item.docId : undefined,
     createdAt: typeof item.createdAt === "string" ? item.createdAt : new Date().toISOString(),
   };
@@ -392,8 +402,9 @@ function createNoteCard(seed?: Partial<WhiteboardCard>): WhiteboardCard {
     y: seed?.y ?? 72,
     width: clamp(seed?.width ?? 300, MIN_CARD_WIDTH, MAX_CARD_WIDTH),
     height: clamp(seed?.height ?? 210, MIN_CARD_HEIGHT, MAX_CARD_HEIGHT),
-    color: normalizeColor(seed?.color),
+    color: normalizeCardColor(seed?.color),
     groupId: typeof seed?.groupId === "string" ? seed.groupId : undefined,
+    source: seed?.source,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -408,47 +419,30 @@ function createPaperCard(doc: ReaderDocument, index: number, seed?: Partial<Whit
     y: seed?.y ?? 120 + Math.floor(index / 3) * 220,
     width: clamp(seed?.width ?? 320, MIN_CARD_WIDTH, MAX_CARD_WIDTH),
     height: clamp(seed?.height ?? 210, MIN_CARD_HEIGHT, MAX_CARD_HEIGHT),
-    color: normalizeColor(seed?.color ?? "slate"),
+    color: normalizeCardColor(seed?.color ?? "zinc"),
     groupId: typeof seed?.groupId === "string" ? seed.groupId : undefined,
     docId: doc.id,
     updatedAt: new Date().toISOString(),
   };
 }
 
-function buildConnectionPath(from: WhiteboardCard, to: WhiteboardCard) {
-  const startOnRight = from.x <= to.x;
-  const startX = startOnRight ? from.x + from.width : from.x;
-  const startY = from.y + from.height / 2;
-  const endX = startOnRight ? to.x : to.x + to.width;
-  const endY = to.y + to.height / 2;
-  const delta = clamp(Math.abs(endX - startX) * 0.42, 70, 220);
-  const c1x = startOnRight ? startX + delta : startX - delta;
-  const c2x = startOnRight ? endX - delta : endX + delta;
-  return `M ${startX} ${startY} C ${c1x} ${startY}, ${c2x} ${endY}, ${endX} ${endY}`;
-}
-
-export function Whiteboards({ documents, onOpenPdf, language }: WhiteboardsProps) {
+export function Whiteboards({ documents, notesByDocument, onOpenPdf, onOpenPdfAt, language }: WhiteboardsProps) {
   const [board, setBoard] = useState<WhiteboardState>(loadBoardState);
   const t = I18N[language];
   const colorLabelById: Record<CardColor, string> = {
     zinc: t.colorZinc,
-    stone: t.colorStone,
-    slate: t.colorSlate,
-    olive: t.colorOlive,
     blue: t.colorBlue,
   };
   const [selectedCardId, setSelectedCardId] = useState<string | null>(null);
   const [selectedConnectionId, setSelectedConnectionId] = useState<string | null>(null);
-  const [pendingConnectionFromId, setPendingConnectionFromId] = useState<string | null>(null);
   const [isSidecarOpen, setIsSidecarOpen] = useState(true);
-  const [isPanMode, setIsPanMode] = useState(false);
-  const viewportRef = useRef<HTMLDivElement | null>(null);
-  const scrollWrapRef = useRef<HTMLDivElement | null>(null);
-  const interactionRef = useRef<InteractionState | null>(null);
-  const panRef = useRef<BoardPanState | null>(null);
   const documentMap = useMemo(() => new Map(documents.map((doc) => [doc.id, doc])), [documents]);
   const cardMap = useMemo(() => new Map(board.cards.map((card) => [card.id, card])), [board.cards]);
   const recentDocs = useMemo(() => documents.slice(0, 6), [documents]);
+  const readingNotes = useMemo(
+    () => recentDocs.flatMap((doc) => (notesByDocument[doc.id] || []).map((note) => ({ doc, note }))).slice(0, 10),
+    [notesByDocument, recentDocs],
+  );
   const selectedCard = selectedCardId ? cardMap.get(selectedCardId) || null : null;
   const selectedConnection = useMemo(() => board.connections.find((connection) => connection.id === selectedConnectionId) || null, [board.connections, selectedConnectionId]);
   const stats = useMemo(() => ({
@@ -465,7 +459,6 @@ export function Whiteboards({ documents, onOpenPdf, language }: WhiteboardsProps
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
-        setPendingConnectionFromId(null);
         setSelectedConnectionId(null);
         return;
       }
@@ -481,93 +474,11 @@ export function Whiteboards({ documents, onOpenPdf, language }: WhiteboardsProps
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [selectedCardId, selectedConnectionId]);
 
-  const clientToBoard = (clientX: number, clientY: number) => {
-    const rect = viewportRef.current?.getBoundingClientRect();
-    const zoom = board.zoom || 1;
-    if (!rect) return { x: 0, y: 0 };
-    return { x: (clientX - rect.left) / zoom, y: (clientY - rect.top) / zoom };
-  };
-
-  useEffect(() => {
-    const handlePointerMove = (event: PointerEvent) => {
-      const interaction = interactionRef.current;
-      if (!interaction) return;
-      const point = clientToBoard(event.clientX, event.clientY);
-      setBoard((prev) => {
-        const cards = prev.cards.map((card) => {
-          if (card.id !== interaction.cardId) return card;
-          if (interaction.type === "drag") {
-            const nextX = clamp(interaction.startX + (point.x - interaction.pointerBoardX), 24, BOARD_WIDTH - interaction.width - 24);
-            const nextY = clamp(interaction.startY + (point.y - interaction.pointerBoardY), 24, BOARD_HEIGHT - interaction.height - 24);
-            return { ...card, x: nextX, y: nextY, updatedAt: new Date().toISOString() };
-          }
-          const nextWidth = clamp(interaction.startWidth + (point.x - interaction.pointerBoardX), MIN_CARD_WIDTH, Math.min(MAX_CARD_WIDTH, BOARD_WIDTH - interaction.x - 24));
-          const nextHeight = clamp(interaction.startHeight + (point.y - interaction.pointerBoardY), MIN_CARD_HEIGHT, Math.min(MAX_CARD_HEIGHT, BOARD_HEIGHT - interaction.y - 24));
-          return { ...card, width: nextWidth, height: nextHeight, updatedAt: new Date().toISOString() };
-        });
-        return { ...prev, cards };
-      });
-    };
-
-    const handlePanMove = (event: PointerEvent) => {
-      const panState = panRef.current;
-      if (!panState || event.pointerId !== panState.pointerId) return;
-      const wrap = scrollWrapRef.current;
-      if (!wrap) return;
-      const dx = event.clientX - panState.startClientX;
-      const dy = event.clientY - panState.startClientY;
-      wrap.scrollLeft = panState.startScrollLeft - dx;
-      wrap.scrollTop = panState.startScrollTop - dy;
-    };
-
-    const clearInteraction = () => {
-      interactionRef.current = null;
-    };
-
-    const clearPan = () => {
-      panRef.current = null;
-    };
-
-    window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointermove", handlePanMove);
-    window.addEventListener("pointerup", clearInteraction);
-    window.addEventListener("pointercancel", clearInteraction);
-    window.addEventListener("pointerup", clearPan);
-    window.addEventListener("pointercancel", clearPan);
-    return () => {
-      window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointermove", handlePanMove);
-      window.removeEventListener("pointerup", clearInteraction);
-      window.removeEventListener("pointercancel", clearInteraction);
-      window.removeEventListener("pointerup", clearPan);
-      window.removeEventListener("pointercancel", clearPan);
-    };
-  }, [board.zoom]);
-
   const patchCard = (id: string, patch: Partial<WhiteboardCard>) => {
     setBoard((prev) => ({
       ...prev,
       cards: prev.cards.map((card) => card.id === id ? { ...card, ...patch, updatedAt: new Date().toISOString() } : card),
     }));
-  };
-
-  const addConnection = (fromCardId: string, toCardId: string) => {
-    if (fromCardId === toCardId) {
-      setPendingConnectionFromId(null);
-      return;
-    }
-    setBoard((prev) => {
-      const exists = prev.connections.some((connection) =>
-        (connection.fromCardId === fromCardId && connection.toCardId === toCardId) ||
-        (connection.fromCardId === toCardId && connection.toCardId === fromCardId)
-      );
-      if (exists) return prev;
-      const nextConnection: WhiteboardConnection = { id: createId("wb-link"), fromCardId, toCardId, createdAt: new Date().toISOString() };
-      setSelectedConnectionId(nextConnection.id);
-      setSelectedCardId(null);
-      return { ...prev, connections: [...prev.connections, nextConnection] };
-    });
-    setPendingConnectionFromId(null);
   };
 
   const removeConnection = (id: string) => {
@@ -582,21 +493,46 @@ export function Whiteboards({ documents, onOpenPdf, language }: WhiteboardsProps
       connections: prev.connections.filter((connection) => connection.fromCardId !== id && connection.toCardId !== id),
     }));
     setSelectedCardId((current) => current === id ? null : current);
-    setPendingConnectionFromId((current) => current === id ? null : current);
   };
 
   const addNote = () => {
     const offset = board.cards.length % 5;
-    const next = createNoteCard({ title: t.researchNote, x: 56 + offset * 40, y: 56 + offset * 28, color: "stone" });
+    const next = createNoteCard({ title: t.researchNote, x: 56 + offset * 40, y: 56 + offset * 28, color: "zinc" });
     setBoard((prev) => ({ ...prev, cards: [...prev.cards, next] }));
     setSelectedCardId(next.id);
     setSelectedConnectionId(null);
   };
 
+  const addReadingNote = (doc: ReaderDocument, note: ReaderNote) => {
+    const source = {
+      noteId: note.id,
+      documentId: doc.id,
+      blockId: note.blockId,
+      page: note.page,
+      sourceRect: note.sourceRect,
+      reference: note.reference,
+    };
+    setBoard((prev) => {
+      const exists = prev.cards.some((card) => card.source?.noteId === note.id);
+      if (exists) return prev;
+      const next = createNoteCard({
+        title: note.reference || `${t.readingNotes} · ${doc.title}`,
+        content: note.content,
+        source,
+        x: 56 + (prev.cards.length % 5) * 40,
+        y: 56 + (prev.cards.length % 5) * 28,
+        color: "blue",
+      });
+      setSelectedCardId(next.id);
+      setSelectedConnectionId(null);
+      return { ...prev, cards: [...prev.cards, next] };
+    });
+  };
+
   const addPaper = (doc: ReaderDocument) => {
     setBoard((prev) => {
       if (prev.cards.some((card) => card.type === "paper" && card.docId === doc.id && !card.groupId)) return prev;
-      const next = createPaperCard(doc, prev.cards.length, { color: "slate" });
+      const next = createPaperCard(doc, prev.cards.length, { color: "zinc" });
       setSelectedCardId(next.id);
       setSelectedConnectionId(null);
       return { ...prev, cards: [...prev.cards, next] };
@@ -611,10 +547,10 @@ export function Whiteboards({ documents, onOpenPdf, language }: WhiteboardsProps
       const groupX = 72 + (clusterIndex % 2) * 520;
       const groupY = 72 + Math.floor(clusterIndex / 2) * 430;
       const nextGroup: WhiteboardGroup = { id: groupId, title: `${doc.title} ${t.cluster}`, x: groupX, y: groupY, width: 980, height: 380, color: "zinc", docId: doc.id, createdAt: new Date().toISOString() };
-      const paper = createPaperCard(doc, prev.cards.length, { x: groupX + 28, y: groupY + 56, width: 340, height: 218, groupId, color: "slate" });
+      const paper = createPaperCard(doc, prev.cards.length, { x: groupX + 28, y: groupY + 56, width: 340, height: 218, groupId, color: "zinc" });
       const noteTemplates = [
-        createNoteCard({ title: t.problemClaim, content: t.problemClaimDesc, x: groupX + 400, y: groupY + 56, width: 248, height: 170, groupId, color: "stone" }),
-        createNoteCard({ title: t.methodsEvidence, content: t.methodsEvidenceDesc, x: groupX + 680, y: groupY + 56, width: 248, height: 170, groupId, color: "olive" }),
+        createNoteCard({ title: t.problemClaim, content: t.problemClaimDesc, x: groupX + 400, y: groupY + 56, width: 248, height: 170, groupId, color: "zinc" }),
+        createNoteCard({ title: t.methodsEvidence, content: t.methodsEvidenceDesc, x: groupX + 680, y: groupY + 56, width: 248, height: 170, groupId, color: "zinc" }),
         createNoteCard({ title: t.openQuestions, content: t.openQuestionsDesc, x: groupX + 400, y: groupY + 246, width: 528, height: 132, groupId, color: "blue" }),
       ];
       const nextConnections = noteTemplates.map((note) => ({ id: createId("wb-link"), fromCardId: paper.id, toCardId: note.id, createdAt: new Date().toISOString() }));
@@ -625,6 +561,7 @@ export function Whiteboards({ documents, onOpenPdf, language }: WhiteboardsProps
   };
 
   const seedBoard = () => {
+    if ((board.cards.length > 0 || board.groups.length > 0 || board.connections.length > 0) && !window.confirm(t.seedBoardConfirm)) return;
     if (recentDocs.length === 0) {
       const intro = createNoteCard({ title: t.readingPlan, content: t.readingPlanDesc, x: 80, y: 80, width: 360, height: 220 });
       setBoard({ version: 2, zoom: board.zoom, cards: [intro], groups: [], connections: [] });
@@ -640,10 +577,10 @@ export function Whiteboards({ documents, onOpenPdf, language }: WhiteboardsProps
       const groupX = 120 + (clusterIndex % 2) * 520;
       const groupY = 340 + Math.floor(clusterIndex / 2) * 430;
       const group: WhiteboardGroup = { id: groupId, title: `${doc.title} ${t.cluster}`, x: groupX, y: groupY, width: 980, height: 380, color: "zinc", docId: doc.id, createdAt: new Date().toISOString() };
-      const paper = createPaperCard(doc, nextBoard.cards.length, { x: groupX + 28, y: groupY + 56, width: 340, height: 218, groupId, color: "slate" });
+      const paper = createPaperCard(doc, nextBoard.cards.length, { x: groupX + 28, y: groupY + 56, width: 340, height: 218, groupId, color: "zinc" });
       const notes = [
-        createNoteCard({ title: t.mainContribution, content: t.mainContributionDesc, x: groupX + 400, y: groupY + 56, width: 248, height: 160, groupId, color: "stone" }),
-        createNoteCard({ title: t.evidenceToVerify, content: t.evidenceToVerifyDesc, x: groupX + 680, y: groupY + 56, width: 248, height: 160, groupId, color: "olive" }),
+        createNoteCard({ title: t.mainContribution, content: t.mainContributionDesc, x: groupX + 400, y: groupY + 56, width: 248, height: 160, groupId, color: "zinc" }),
+        createNoteCard({ title: t.evidenceToVerify, content: t.evidenceToVerifyDesc, x: groupX + 680, y: groupY + 56, width: 248, height: 160, groupId, color: "zinc" }),
       ];
       const connections = notes.map((note) => ({ id: createId("wb-link"), fromCardId: paper.id, toCardId: note.id, createdAt: new Date().toISOString() }));
       nextBoard = { ...nextBoard, groups: [...nextBoard.groups, group], cards: [...nextBoard.cards, paper, ...notes], connections: [...nextBoard.connections, ...connections] };
@@ -651,14 +588,13 @@ export function Whiteboards({ documents, onOpenPdf, language }: WhiteboardsProps
     setBoard(nextBoard);
     setSelectedCardId(intro.id);
     setSelectedConnectionId(null);
-    setPendingConnectionFromId(null);
   };
 
   const clearBoard = () => {
+    if ((board.cards.length > 0 || board.groups.length > 0 || board.connections.length > 0) && !window.confirm(t.clearBoardConfirm)) return;
     setBoard({ version: 2, zoom: board.zoom, cards: [], groups: [], connections: [] });
     setSelectedCardId(null);
     setSelectedConnectionId(null);
-    setPendingConnectionFromId(null);
   };
 
   const adjustZoom = (delta: number) => {
@@ -669,245 +605,158 @@ export function Whiteboards({ documents, onOpenPdf, language }: WhiteboardsProps
     setBoard((prev) => ({ ...prev, zoom: normalizeZoom(value) }));
   };
   return (
-    <div className="flex h-full bg-white dark:bg-zinc-900 text-zinc-800 dark:text-zinc-200 font-sans">
+    <div className="flex h-full bg-surface-panel text-content-primary font-sans">
       <div className="flex-1 min-w-0 flex flex-col">
-        <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200 dark:border-zinc-800 gap-4">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border-subtle gap-4">
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight text-zinc-900 dark:text-zinc-100">{t.boardTitle}</h1>
-            <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{t.boardStats(board.cards.length, stats.groups, stats.connections)}</p>
+            <h1 className="text-2xl font-semibold tracking-tight text-content-primary">{t.boardTitle}</h1>
+            <p className="text-xs text-content-muted mt-1">{t.boardStats(board.cards.length, stats.groups, stats.connections)}</p>
           </div>
           <div className="flex items-center gap-3 flex-wrap justify-end">
-            <button onClick={() => setIsPanMode((value) => !value)} className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border transition-colors ${isPanMode ? "border-teal-500 bg-teal-500/10 text-teal-700 dark:text-teal-300" : "border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800"}`}>
-              <Hand size={15} />
-              {t.dragCanvas}
-              <span className="rounded-md bg-white/70 dark:bg-zinc-900/70 px-1.5 py-0.5 text-[11px] font-mono">{isPanMode ? t.dragCanvasOn : t.dragCanvasOff}</span>
-            </button>
-            <button onClick={addNote} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-zinc-800 dark:hover:bg-white transition-colors"><StickyNote size={15} />{t.addNote}</button>
-            <button onClick={seedBoard} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"><LayoutTemplate size={15} />{t.seedBoard}</button>
-            <div className="inline-flex items-center gap-1 rounded-xl border border-zinc-200 dark:border-zinc-700 px-2 py-1 bg-white dark:bg-zinc-900">
-              <button onClick={() => adjustZoom(-0.1)} className="p-1.5 rounded-lg text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors" title={t.zoomOut}><ZoomOut size={15} /></button>
-              <button onClick={() => setZoom(1)} className="px-2 py-1 text-xs font-medium rounded-lg text-zinc-600 dark:text-zinc-300 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors" title={t.resetZoom}>{Math.round(board.zoom * 100)}%</button>
-              <button onClick={() => adjustZoom(0.1)} className="p-1.5 rounded-lg text-zinc-500 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors" title={t.zoomIn}><ZoomIn size={15} /></button>
+            <button onClick={addNote} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-content-primary text-content-inverse hover:bg-content-primary-hover transition-colors"><StickyNote size={15} />{t.addNote}</button>
+            <button onClick={seedBoard} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border border-border-default bg-surface-panel text-content-secondary hover:bg-surface-hover transition-colors"><LayoutTemplate size={15} />{t.seedBoard}</button>
+            <div className="inline-flex items-center gap-1 rounded-xl border border-border-default px-2 py-1 bg-surface-panel">
+              <button onClick={() => adjustZoom(-0.1)} className="p-1.5 rounded-lg text-content-muted hover:bg-surface-hover transition-colors" title={t.zoomOut}><ZoomOut size={15} /></button>
+              <button onClick={() => setZoom(1)} className="px-2 py-1 text-xs font-medium rounded-lg text-content-secondary hover:bg-surface-hover transition-colors" title={t.resetZoom}>{Math.round(board.zoom * 100)}%</button>
+              <button onClick={() => adjustZoom(0.1)} className="p-1.5 rounded-lg text-content-muted hover:bg-surface-hover transition-colors" title={t.zoomIn}><ZoomIn size={15} /></button>
             </div>
-            <button onClick={() => setIsSidecarOpen((value) => !value)} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"><PanelRight size={15} />{isSidecarOpen ? t.hideSidecar : t.showSidecar}</button>
-            <button onClick={clearBoard} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"><Trash2 size={15} />{t.clearBoard}</button>
+            <button onClick={() => setIsSidecarOpen((value) => !value)} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border border-border-default bg-surface-panel text-content-secondary hover:bg-surface-hover transition-colors"><PanelRight size={15} />{isSidecarOpen ? t.hideSidecar : t.showSidecar}</button>
+            <button onClick={clearBoard} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border border-border-default bg-surface-panel text-content-secondary hover:bg-surface-hover transition-colors"><Trash2 size={15} />{t.clearBoard}</button>
           </div>
         </div>
 
-        <div ref={scrollWrapRef} className={`flex-1 overflow-auto p-6 bg-zinc-50 dark:bg-zinc-950 ${isPanMode ? "cursor-grab active:cursor-grabbing" : ""}`}>
-          <div className="mx-auto min-w-max">
-            <div style={{ width: BOARD_WIDTH * board.zoom, minHeight: BOARD_HEIGHT * board.zoom }}>
-              <div
-                ref={viewportRef}
-                className="relative rounded-3xl border border-zinc-200 dark:border-zinc-800 shadow-sm overflow-hidden"
-                style={{ width: BOARD_WIDTH, minHeight: BOARD_HEIGHT, transform: `scale(${board.zoom})`, transformOrigin: "top left", backgroundColor: "rgba(244, 244, 245, 0.82)", backgroundImage: "radial-gradient(circle at 1px 1px, rgba(113,113,122,0.16) 1px, transparent 0)", backgroundSize: "24px 24px" }}
-                onPointerDown={(event) => {
-                  const isRightButton = event.button === 2 || (event.buttons & 2) === 2;
-                  if (!isPanMode && !isRightButton) return;
-                  const wrap = scrollWrapRef.current;
-                  if (!wrap) return;
-                  panRef.current = {
-                    pointerId: event.pointerId,
-                    startClientX: event.clientX,
-                    startClientY: event.clientY,
-                    startScrollLeft: wrap.scrollLeft,
-                    startScrollTop: wrap.scrollTop,
-                  };
-                }}
-                onMouseDown={() => {
-                  if (isPanMode) return;
-                  setSelectedCardId(null);
-                  setSelectedConnectionId(null);
-                }}
-                onWheel={(event) => {
-                  if (!event.ctrlKey) return;
-                  event.preventDefault();
-                  const delta = event.deltaY > 0 ? -0.08 : 0.08;
-                  setBoard((prev) => ({ ...prev, zoom: normalizeZoom(prev.zoom + delta) }));
-                }}
-                onContextMenu={(event) => event.preventDefault()}
-              >
-                {board.cards.length === 0 ? (
-                  <div className="absolute inset-0 flex items-center justify-center p-10 text-center">
-                    <div className="max-w-xl rounded-3xl border border-dashed border-zinc-300 dark:border-zinc-700 bg-white/80 dark:bg-zinc-900/80 px-8 py-10 backdrop-blur">
-                      <LayoutTemplate size={28} className="mx-auto mb-4 text-zinc-400" />
-                      <h2 className="text-2xl font-semibold text-zinc-900 dark:text-zinc-100 mb-3">{t.emptyTitle}</h2>
-                      <p className="text-sm leading-7 text-zinc-600 dark:text-zinc-400 mb-6">{t.emptyDesc}</p>
-                      <div className="flex items-center justify-center gap-3 flex-wrap">
-                        <button onClick={(event) => { event.stopPropagation(); addNote(); }} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-zinc-800 dark:hover:bg-white transition-colors"><Plus size={15} />{t.addFirstNote}</button>
-                        <button onClick={(event) => { event.stopPropagation(); seedBoard(); }} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"><FileText size={15} />{t.seedFromPapers}</button>
-                      </div>
-                    </div>
-                  </div>
-                ) : null}
-
-                {board.groups.map((group) => {
-                  const palette = getPalette(group.color);
-                  const groupedCards = board.cards.filter((card) => card.groupId === group.id);
-                  return (
-                    <div key={group.id} className="absolute rounded-[28px] border border-dashed pointer-events-none" style={{ left: group.x, top: group.y, width: group.width, height: group.height, borderColor: palette.border, backgroundColor: palette.chip }}>
-                      <div className="absolute left-5 top-4 flex items-center gap-3">
-                        <span className="inline-flex items-center rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.16em]" style={{ backgroundColor: palette.fill, color: palette.text }}>{t.cluster}</span>
-                        <div>
-                          <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{group.title}</div>
-                          <div className="text-[11px] text-zinc-500 dark:text-zinc-400">{groupedCards.length} {t.cardsNoun} {group.docId ? t.linkedToPaper : t.inCluster}</div>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-
-                <svg className="absolute inset-0 h-full w-full overflow-visible">
-                  {board.connections.map((connection) => {
-                    const from = cardMap.get(connection.fromCardId);
-                    const to = cardMap.get(connection.toCardId);
-                    if (!from || !to) return null;
-                    const active = connection.id === selectedConnectionId;
-                    const path = buildConnectionPath(from, to);
-                    return (
-                      <g key={connection.id} className="cursor-pointer" onMouseDown={(event) => { event.stopPropagation(); setSelectedConnectionId(connection.id); setSelectedCardId(null); }}>
-                        <path d={path} fill="none" stroke="transparent" strokeWidth={18} />
-                        <path d={path} fill="none" stroke={active ? "#18181b" : "rgba(82,82,91,0.56)"} strokeWidth={active ? 3 : 2} strokeDasharray={active ? "0" : "6 6"} strokeLinecap="round" />
-                      </g>
-                    );
-                  })}
-                </svg>
-                {board.cards.map((card) => {
-                  const linkedDoc = card.docId ? documentMap.get(card.docId) : undefined;
-                  const selected = selectedCardId === card.id;
-                  const palette = getPalette(card.color);
-                  const linking = pendingConnectionFromId === card.id;
-                  return (
-                    <div key={card.id} className={`absolute rounded-2xl border shadow-lg overflow-hidden ${selected ? "ring-2 ring-zinc-900/20 dark:ring-zinc-100/15" : "ring-0"}`} style={{ left: card.x, top: card.y, width: card.width, minHeight: card.height, backgroundColor: palette.fill, borderColor: selected ? palette.border : "rgba(228, 228, 231, 0.96)" }} onMouseDown={(event) => { event.stopPropagation(); if (isPanMode || event.button === 2) return; setSelectedCardId(card.id); setSelectedConnectionId(null); }}>
-                      <div className="flex items-center justify-between px-3 py-2 border-b cursor-grab active:cursor-grabbing" style={{ backgroundColor: palette.chip, borderColor: "rgba(228, 228, 231, 0.88)" }} onPointerDown={(event) => { event.stopPropagation(); if (isPanMode || event.button !== 0) return; const point = clientToBoard(event.clientX, event.clientY); interactionRef.current = { type: "drag", cardId: card.id, pointerBoardX: point.x, pointerBoardY: point.y, startX: card.x, startY: card.y, width: card.width, height: card.height }; setSelectedCardId(card.id); setSelectedConnectionId(null); }}>
-                        <div className="flex items-center gap-2 text-[11px] font-semibold text-zinc-600 dark:text-zinc-300 uppercase tracking-[0.16em]">
-                          {card.type === "note" ? <StickyNote size={13} /> : <FileText size={13} />}
-                          {card.type === "note" ? t.note : t.paper}
-                          <span className="inline-flex h-2.5 w-2.5 rounded-full" style={{ backgroundColor: palette.border }} />
-                        </div>
-                        <div className="flex items-center gap-1 text-zinc-500 dark:text-zinc-400">
-                          <button className={`p-1 rounded-md transition-colors ${linking ? "bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900" : "hover:bg-white/70 dark:hover:bg-zinc-800"}`} onClick={(event) => { event.stopPropagation(); if (pendingConnectionFromId && pendingConnectionFromId !== card.id) { addConnection(pendingConnectionFromId, card.id); return; } setPendingConnectionFromId((current) => current === card.id ? null : card.id); setSelectedCardId(card.id); setSelectedConnectionId(null); }} title={linking ? t.cancelLinking : pendingConnectionFromId ? t.connectToCard : t.startLinking}><Link2 size={13} /></button>
-                          <Move size={13} />
-                          <button className="p-1 rounded-md hover:bg-white/70 dark:hover:bg-zinc-800 hover:text-red-500 transition-colors" onClick={(event) => { event.stopPropagation(); removeCard(card.id); }} title={t.removeCard}><Trash2 size={13} /></button>
-                        </div>
-                      </div>
-
-                      <div className="p-3 space-y-3" style={{ color: palette.text }}>
-                        <input value={card.title} onChange={(event) => patchCard(card.id, { title: event.target.value })} className="w-full bg-transparent text-sm font-semibold border-0 border-b border-zinc-200 dark:border-zinc-800 pb-2 focus:outline-none" />
-                        {card.type === "paper" ? (
-                          <>
-                            <textarea value={card.content} onChange={(event) => patchCard(card.id, { content: event.target.value })} className="w-full bg-transparent resize-none text-sm leading-6 border-0 focus:outline-none text-zinc-700 dark:text-zinc-300" style={{ minHeight: Math.max(84, card.height - 132) }} />
-                            {linkedDoc ? (
-                              <div className="space-y-2">
-                                <div className="text-xs text-zinc-500 dark:text-zinc-400 leading-5">{linkedDoc.authors.length > 0 ? linkedDoc.authors.join(", ") : t.unknownAuthors}</div>
-                                <button onClick={() => onOpenPdf(linkedDoc)} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-zinc-800 dark:hover:bg-white transition-colors"><FileText size={13} />{t.openPdf}</button>
-                              </div>
-                            ) : (
-                              <div className="text-xs text-zinc-500 dark:text-zinc-400">{t.linkedMissing}</div>
-                            )}
-                          </>
-                        ) : (
-                          <textarea value={card.content} onChange={(event) => patchCard(card.id, { content: event.target.value })} className="w-full bg-transparent resize-none text-sm leading-6 border-0 focus:outline-none text-zinc-700 dark:text-zinc-300" style={{ minHeight: Math.max(96, card.height - 96) }} placeholder={t.notePlaceholder} />
-                        )}
-                      </div>
-
-                      <button className="absolute right-2 bottom-2 h-5 w-5 rounded-md border border-zinc-300 dark:border-zinc-700 bg-white/90 dark:bg-zinc-900/90 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 cursor-se-resize" title={t.resizeCard} onPointerDown={(event) => { event.stopPropagation(); if (isPanMode || event.button !== 0) return; const point = clientToBoard(event.clientX, event.clientY); interactionRef.current = { type: "resize", cardId: card.id, pointerBoardX: point.x, pointerBoardY: point.y, startWidth: card.width, startHeight: card.height, x: card.x, y: card.y }; setSelectedCardId(card.id); setSelectedConnectionId(null); }}>
-                        <span className="block h-full w-full bg-[linear-gradient(135deg,transparent_35%,currentColor_35%,currentColor_45%,transparent_45%,transparent_60%,currentColor_60%,currentColor_70%,transparent_70%)] opacity-60" />
-                      </button>
-                    </div>
-                  );
-                })}
+        <div className="relative min-h-0 flex-1 bg-surface-app">
+          <WhiteboardCanvas
+            board={board}
+            documents={documentMap}
+            language={language}
+            onBoardChange={(updater) => setBoard(updater)}
+            onSelectCard={(id) => { setSelectedCardId(id); setSelectedConnectionId(null); }}
+            onSelectConnection={(id) => { setSelectedConnectionId(id); setSelectedCardId(null); }}
+          />
+          {board.cards.length === 0 ? (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center p-10 text-center">
+              <div className="pointer-events-auto max-w-xl rounded-3xl border border-dashed border-border-default bg-surface-panel/90 px-8 py-10 shadow-sm backdrop-blur">
+                <LayoutTemplate size={28} className="mx-auto mb-4 text-content-disabled" />
+                <h2 className="text-2xl font-semibold text-content-primary mb-3">{t.emptyTitle}</h2>
+                <p className="text-sm leading-7 text-content-secondary mb-6">{t.emptyDesc}</p>
+                <div className="flex items-center justify-center gap-3 flex-wrap">
+                  <button onClick={addNote} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-content-primary text-content-inverse hover:bg-content-primary-hover transition-colors"><Plus size={15} />{t.addFirstNote}</button>
+                  <button onClick={seedBoard} className="inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border border-border-default bg-surface-panel text-content-secondary hover:bg-surface-hover transition-colors"><FileText size={15} />{t.seedFromPapers}</button>
+                </div>
               </div>
             </div>
-          </div>
+          ) : null}
         </div>
       </div>
-      <aside className={`${isSidecarOpen ? "w-96" : "w-0"} transition-[width] duration-300 ease-in-out shrink-0 border-l border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 hidden xl:flex xl:flex-col overflow-hidden`}>
-        <div className="px-5 py-4 border-b border-zinc-200 dark:border-zinc-800">
-          <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{selectedCard ? t.inspector : selectedConnection ? t.connection : t.sidecar}</div>
-          <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{pendingConnectionFromId ? t.sidecarLinkHint : t.sidecarDefaultHint}</p>
+      <aside className={`${isSidecarOpen ? "w-96" : "w-0"} transition-[width] duration-300 ease-in-out shrink-0 border-l border-border-subtle bg-surface-panel hidden xl:flex xl:flex-col overflow-hidden`}>
+        <div className="px-5 py-4 border-b border-border-subtle">
+          <div className="text-sm font-semibold text-content-primary">{selectedCard ? t.inspector : selectedConnection ? t.connection : t.sidecar}</div>
+          <p className="text-xs text-content-muted mt-1">{t.sidecarDefaultHint}</p>
         </div>
 
         <div className="w-96 flex-1 overflow-auto p-4 space-y-4">
           {selectedCard ? (
-            <div className="rounded-3xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 p-4 space-y-4">
+            <div className="rounded-3xl border border-border-subtle bg-surface-app p-4 space-y-4">
               <div>
-                <div className="text-xs uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400 mb-2">{t.selectedCard}</div>
-                <input value={selectedCard.title} onChange={(event) => patchCard(selectedCard.id, { title: event.target.value })} className="w-full bg-white dark:bg-zinc-900 rounded-xl border border-zinc-200 dark:border-zinc-800 px-3 py-2 text-sm font-medium focus:outline-none" />
+                <div className="text-xs uppercase tracking-[0.16em] text-content-muted mb-2">{t.selectedCard}</div>
+                <input value={selectedCard.title} onChange={(event) => patchCard(selectedCard.id, { title: event.target.value })} className="w-full bg-surface-panel rounded-xl border border-border-subtle px-3 py-2 text-sm font-medium" />
               </div>
 
               <div>
-                <div className="text-xs uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400 mb-2">{t.colorTag}</div>
+                <div className="text-xs uppercase tracking-[0.16em] text-content-muted mb-2">{t.colorTag}</div>
                 <div className="grid grid-cols-5 gap-2">
-                  {CARD_PALETTE.map((palette) => (
-                    <button key={palette.id} onClick={() => patchCard(selectedCard.id, { color: palette.id })} className={`rounded-2xl border px-2 py-3 text-[11px] font-medium transition-colors ${selectedCard.color === palette.id ? "border-zinc-900 dark:border-zinc-100 text-zinc-900 dark:text-zinc-100" : "border-zinc-200 dark:border-zinc-700 text-zinc-500 dark:text-zinc-400"}`} style={{ backgroundColor: palette.chip }}>
-                      <span className="mx-auto mb-2 block h-3 w-3 rounded-full" style={{ backgroundColor: palette.border }} />{colorLabelById[palette.id]}
-                    </button>
-                  ))}
+                  {BOARD_COLOR_ORDER.map((id) => {
+                    const swatch = BOARD_PALETTE[id];
+                    return (
+                      <button key={id} onClick={() => patchCard(selectedCard.id, { color: id })} className={`rounded-2xl border px-2 py-3 text-[11px] font-medium transition-colors ${selectedCard.color === id ? "border-content-primary text-content-primary" : "border-border-default text-content-muted"}`} style={{ backgroundColor: swatch.chip }}>
+                        <span className="mx-auto mb-2 block h-3 w-3 rounded-full" style={{ backgroundColor: swatch.border }} />{colorLabelById[id]}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
               <div>
-                <div className="text-xs uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400 mb-2">{t.content}</div>
-                <textarea value={selectedCard.content} onChange={(event) => patchCard(selectedCard.id, { content: event.target.value })} className="w-full min-h-[180px] rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-3 text-sm leading-6 focus:outline-none resize-none" />
+                <div className="text-xs uppercase tracking-[0.16em] text-content-muted mb-2">{t.content}</div>
+                <textarea value={selectedCard.content} onChange={(event) => patchCard(selectedCard.id, { content: event.target.value })} className="w-full min-h-[180px] rounded-2xl border border-border-subtle bg-surface-panel px-3 py-3 text-sm leading-6 resize-none" />
               </div>
 
-              <div className="grid grid-cols-2 gap-3 text-xs text-zinc-500 dark:text-zinc-400">
-                <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-3">{t.size} {Math.round(selectedCard.width)} × {Math.round(selectedCard.height)}</div>
-                <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-3">{selectedCard.groupId ? t.clusteredCard : t.freeformCard}</div>
+              <div className="grid grid-cols-2 gap-3 text-xs text-content-muted">
+                <div className="rounded-2xl border border-border-subtle bg-surface-panel px-3 py-3">{t.size} {Math.round(selectedCard.width)} × {Math.round(selectedCard.height)}</div>
+                <div className="rounded-2xl border border-border-subtle bg-surface-panel px-3 py-3">{selectedCard.groupId ? t.clusteredCard : t.freeformCard}</div>
               </div>
 
               <div className="flex items-center gap-2 flex-wrap">
-                <button onClick={() => setPendingConnectionFromId((current) => current === selectedCard.id ? null : selectedCard.id)} className={`inline-flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${pendingConnectionFromId === selectedCard.id ? "bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900" : "border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800"}`}><Link2 size={13} />{pendingConnectionFromId === selectedCard.id ? t.linking : t.startLink}</button>
-                <button onClick={() => removeCard(selectedCard.id)} className="inline-flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"><Trash2 size={13} />{t.deleteCard}</button>
+                <button onClick={() => removeCard(selectedCard.id)} className="inline-flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium border border-border-default bg-surface-panel text-content-secondary hover:bg-surface-hover transition-colors"><Trash2 size={13} />{t.deleteCard}</button>
                 {selectedCard.docId && documentMap.get(selectedCard.docId) ? (
-                  <button onClick={() => { const doc = documentMap.get(selectedCard.docId as string); if (doc) onOpenPdf(doc); }} className="inline-flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-zinc-800 dark:hover:bg-white transition-colors"><FileText size={13} />{t.openLinkedPdf}</button>
+                  <button onClick={() => { const doc = documentMap.get(selectedCard.docId as string); if (doc) onOpenPdf(doc); }} className="inline-flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium bg-content-primary text-content-inverse hover:bg-content-primary-hover transition-colors"><FileText size={13} />{t.openLinkedPdf}</button>
+                ) : null}
+                {selectedCard.source && documentMap.get(selectedCard.source.documentId) ? (
+                  <button onClick={() => { const doc = documentMap.get(selectedCard.source?.documentId || ""); if (doc) (onOpenPdfAt || onOpenPdf)(doc, selectedCard.source?.page || 1, selectedCard.source?.sourceRect); }} className="inline-flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium bg-[var(--reader-accent)] text-[var(--reader-accent-contrast)] hover:opacity-90 transition-opacity"><FileText size={13} />{t.openSource} · {t.sourcePage} {selectedCard.source.page}</button>
                 ) : null}
               </div>
             </div>
           ) : selectedConnection ? (
-            <div className="rounded-3xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 p-4 space-y-4">
-              <div className="text-xs uppercase tracking-[0.16em] text-zinc-500 dark:text-zinc-400">{t.selectedLink}</div>
-              <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-4 py-4 space-y-2">
-                <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{cardMap.get(selectedConnection.fromCardId)?.title || t.missingCard}</div>
-                <div className="text-xs text-zinc-400">{t.connectsTo}</div>
-                <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100">{cardMap.get(selectedConnection.toCardId)?.title || t.missingCard}</div>
+            <div className="rounded-3xl border border-border-subtle bg-surface-app p-4 space-y-4">
+              <div className="text-xs uppercase tracking-[0.16em] text-content-muted">{t.selectedLink}</div>
+              <div className="rounded-2xl border border-border-subtle bg-surface-panel px-4 py-4 space-y-2">
+                <div className="text-sm font-medium text-content-primary">{cardMap.get(selectedConnection.fromCardId)?.title || t.missingCard}</div>
+                <div className="text-xs text-content-disabled">{t.connectsTo}</div>
+                <div className="text-sm font-medium text-content-primary">{cardMap.get(selectedConnection.toCardId)?.title || t.missingCard}</div>
               </div>
-              <button onClick={() => removeConnection(selectedConnection.id)} className="inline-flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"><Trash2 size={13} />{t.deleteLink}</button>
+              <button onClick={() => removeConnection(selectedConnection.id)} className="inline-flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium border border-border-default bg-surface-panel text-content-secondary hover:bg-surface-hover transition-colors"><Trash2 size={13} />{t.deleteLink}</button>
             </div>
           ) : (
-            <div className="rounded-3xl border border-dashed border-zinc-300 dark:border-zinc-700 bg-zinc-50 dark:bg-zinc-950 p-5 text-sm leading-7 text-zinc-600 dark:text-zinc-400">{t.selectHint}</div>
+            <div className="rounded-3xl border border-dashed border-border-default bg-surface-app p-5 text-sm leading-7 text-content-secondary">{t.selectHint}</div>
           )}
 
-          <div className="rounded-3xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 p-4 space-y-3">
+          <div className="rounded-3xl border border-border-subtle bg-surface-app p-4 space-y-3">
             <div>
-              <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{t.recentPapers}</div>
-              <p className="text-xs text-zinc-500 dark:text-zinc-400 mt-1">{t.recentDesc}</p>
+              <div className="text-sm font-semibold text-content-primary">{t.recentPapers}</div>
+              <p className="text-xs text-content-muted mt-1">{t.recentDesc}</p>
             </div>
             {recentDocs.length > 0 ? recentDocs.map((doc) => (
-              <div key={doc.id} className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 p-3 space-y-3">
+              <div key={doc.id} className="rounded-2xl border border-border-subtle bg-surface-panel p-3 space-y-3">
                 <div>
-                  <div className="text-sm font-medium text-zinc-900 dark:text-zinc-100 line-clamp-2">{doc.title}</div>
-                  <div className="text-xs text-zinc-500 dark:text-zinc-400 mt-1 line-clamp-2">{doc.authors.length > 0 ? doc.authors.join(", ") : t.unknownAuthors}</div>
+                  <div className="text-sm font-medium text-content-primary line-clamp-2">{doc.title}</div>
+                  <div className="text-xs text-content-muted mt-1 line-clamp-2">{doc.authors.length > 0 ? doc.authors.join(", ") : t.unknownAuthors}</div>
                 </div>
                 <div className="flex items-center gap-2 flex-wrap">
-                  <button onClick={() => addPaper(doc)} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 hover:bg-zinc-800 dark:hover:bg-white transition-colors"><Plus size={12} />{t.paperCard}</button>
-                  <button onClick={() => addPaperCluster(doc)} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"><LayoutTemplate size={12} />{t.researchCluster}</button>
-                  <button onClick={() => onOpenPdf(doc)} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-200 hover:bg-zinc-100 dark:hover:bg-zinc-800 transition-colors"><FileText size={12} />{t.open}</button>
+                  <button onClick={() => addPaper(doc)} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium bg-content-primary text-content-inverse hover:bg-content-primary-hover transition-colors"><Plus size={12} />{t.paperCard}</button>
+                  <button onClick={() => addPaperCluster(doc)} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border border-border-default bg-surface-panel text-content-secondary hover:bg-surface-hover transition-colors"><LayoutTemplate size={12} />{t.researchCluster}</button>
+                  <button onClick={() => onOpenPdf(doc)} className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-medium border border-border-default bg-surface-panel text-content-secondary hover:bg-surface-hover transition-colors"><FileText size={12} />{t.open}</button>
                 </div>
               </div>
             )) : (
-              <div className="rounded-2xl border border-dashed border-zinc-300 dark:border-zinc-700 p-4 text-sm text-zinc-500 dark:text-zinc-400">{t.importHint}</div>
+              <div className="rounded-2xl border border-dashed border-border-default p-4 text-sm text-content-muted">{t.importHint}</div>
             )}
           </div>
 
-          <div className="rounded-3xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-950 p-4">
-            <div className="text-sm font-semibold text-zinc-900 dark:text-zinc-100 mb-2">{t.boardSnapshot}</div>
-            <div className="grid grid-cols-2 gap-3 text-xs text-zinc-500 dark:text-zinc-400">
-              <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-3">{t.notes}: {stats.notes}</div>
-              <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-3">{t.papers}: {stats.papers}</div>
-              <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-3">{t.clusters}: {stats.groups}</div>
-              <div className="rounded-2xl border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 px-3 py-3">{t.links}: {stats.connections}</div>
+          <div className="rounded-3xl border border-border-subtle bg-surface-app p-4 space-y-3">
+            <div>
+              <div className="text-sm font-semibold text-content-primary">{t.readingNotes}</div>
+              <p className="text-xs text-content-muted mt-1">{t.readingNotesDesc}</p>
+            </div>
+            {readingNotes.length > 0 ? readingNotes.map(({ doc, note }) => (
+              <div key={`${doc.id}:${note.id}`} className="rounded-2xl border border-border-subtle bg-surface-panel p-3 space-y-2">
+                <div className="text-xs font-medium text-content-primary line-clamp-1">{doc.title}</div>
+                <div className="text-sm leading-6 text-content-secondary line-clamp-3">{note.content}</div>
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-[11px] text-content-muted">{t.sourcePage} {note.page}{note.blockId ? ` · ${t.sourceBlock}` : ""}</span>
+                  <button onClick={() => addReadingNote(doc, note)} className="inline-flex items-center gap-1.5 rounded-lg border border-border-default px-2 py-1 text-[11px] font-medium text-content-secondary hover:bg-surface-hover"><Plus size={12} />{t.addReadingNote}</button>
+                </div>
+              </div>
+            )) : <div className="rounded-2xl border border-dashed border-border-default p-4 text-xs text-content-muted">{t.noReadingNotes}</div>}
+          </div>
+
+          <div className="rounded-3xl border border-border-subtle bg-surface-app p-4">
+            <div className="text-sm font-semibold text-content-primary mb-2">{t.boardSnapshot}</div>
+            <div className="grid grid-cols-2 gap-3 text-xs text-content-muted">
+              <div className="rounded-2xl border border-border-subtle bg-surface-panel px-3 py-3">{t.notes}: {stats.notes}</div>
+              <div className="rounded-2xl border border-border-subtle bg-surface-panel px-3 py-3">{t.papers}: {stats.papers}</div>
+              <div className="rounded-2xl border border-border-subtle bg-surface-panel px-3 py-3">{t.clusters}: {stats.groups}</div>
+              <div className="rounded-2xl border border-border-subtle bg-surface-panel px-3 py-3">{t.links}: {stats.connections}</div>
             </div>
           </div>
         </div>
@@ -915,4 +764,3 @@ export function Whiteboards({ documents, onOpenPdf, language }: WhiteboardsProps
     </div>
   );
 }
-
