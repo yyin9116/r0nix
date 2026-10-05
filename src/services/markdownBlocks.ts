@@ -44,7 +44,7 @@ function normalizeTableAlign(value: unknown): Array<"left" | "center" | "right">
 export function parseMarkdownBlocks(markdown: string, documentId: string): PdfReadingBlock[] {
   const blocks: PdfReadingBlock[] = [];
   const occurrences = new Map<string, number>();
-  const add = (kind: PdfReadingBlockKind, text: string, sourcePath: string, options?: Pick<PdfReadingBlock, "depth" | "tableAlign">) => {
+  const add = (kind: PdfReadingBlockKind, text: string, sourcePath: string, options?: Pick<PdfReadingBlock, "depth" | "ordered" | "language" | "assetUrl" | "altText" | "tableAlign">) => {
     const normalized = kind === "code" ? text.replace(/\s+$/, "") : normalizeText(text);
     if (!normalized) return;
     const identity = `${kind}:${normalized}`;
@@ -62,12 +62,15 @@ export function parseMarkdownBlocks(markdown: string, documentId: string): PdfRe
     });
   };
 
-  const visitList = (token: LexedToken, sourcePath: string, depth: number) => {
+  const visitList = (token: LexedToken, sourcePath: string, depth: number, ordered: boolean) => {
     for (const [index, item] of asTokens(token.items).entries()) {
-      const itemText = typeof item.text === "string" ? item.text : "";
-      add("list", itemText, `${sourcePath}/item:${index}`, { depth });
+      const itemText = asTokens(item.tokens)
+        .filter((child) => child.type !== "list")
+        .map(tokenText)
+        .join(" ") || (typeof item.text === "string" ? item.text : "");
+      add("list", itemText, `${sourcePath}/item:${index}`, { depth, ordered });
       for (const child of asTokens(item.tokens)) {
-        if (child.type === "list") visitList(child, `${sourcePath}/item:${index}`, depth + 1);
+        if (child.type === "list") visitList(child, `${sourcePath}/item:${index}`, depth + 1, child.ordered === true);
       }
     }
   };
@@ -83,10 +86,12 @@ export function parseMarkdownBlocks(markdown: string, documentId: string): PdfRe
     const sourcePath = `token:${index}`;
     switch (token.type) {
       case "heading":
-        add("title", tokenText(token), sourcePath);
+        add("title", tokenText(token), sourcePath, { depth: typeof token.depth === "number" ? token.depth : 1 });
         break;
       case "code":
-        add("code", typeof token.text === "string" ? token.text : "", sourcePath);
+        add("code", typeof token.text === "string" ? token.text : "", sourcePath, {
+          language: typeof token.lang === "string" && token.lang.trim() ? token.lang.trim() : undefined,
+        });
         break;
       case "blockquote":
         add("quote", tokenText(token), sourcePath);
@@ -95,11 +100,34 @@ export function parseMarkdownBlocks(markdown: string, documentId: string): PdfRe
         add("table", tableRowsText(token), sourcePath, { tableAlign: normalizeTableAlign(token.align) });
         break;
       case "list":
-        visitList(token, sourcePath, 0);
+        for (const [index, item] of asTokens(token.items).entries()) {
+          const itemText = asTokens(item.tokens)
+            .filter((child) => child.type !== "list")
+            .map(tokenText)
+            .join(" ") || (typeof item.text === "string" ? item.text : "");
+          add("list", itemText, `${sourcePath}/item:${index}`, {
+            depth: 0,
+            ordered: token.ordered === true,
+          });
+          for (const child of asTokens(item.tokens)) {
+            if (child.type === "list") visitList(child, `${sourcePath}/item:${index}`, 1, child.ordered === true);
+          }
+        }
         break;
       case "paragraph":
       case "text":
         {
+          const inline = asTokens(token.tokens);
+          const image = inline.length === 1 && inline[0]?.type === "image" && typeof inline[0].href === "string"
+            ? inline[0]
+            : null;
+          if (image) {
+            add("image", typeof token.raw === "string" ? token.raw : tokenText(token), sourcePath, {
+              assetUrl: image.href as string,
+              altText: typeof image.text === "string" ? image.text : "",
+            });
+            break;
+          }
           const value = tokenText(token);
           const equation = /^\${2,3}\s*\n([\s\S]*?)\n\${2,3}\s*$/.exec(value);
           add(equation ? "equation" : "text", equation ? equation[1] : value, sourcePath);

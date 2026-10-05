@@ -228,11 +228,16 @@ export function buildDomPdfReadingBlocks(layer: HTMLElement, pageNo: number): Pd
     const previousLeft = previous ? Math.min(...previous.map((span) => span.rect.left)) : 0;
     const previousRight = previous ? Math.max(...previous.map((span) => span.rect.right)) : 0;
     const overlapsPreviousColumn = !previous || Math.min(lineRight, previousRight) - Math.max(lineLeft, previousLeft) > Math.min(lineRight - lineLeft, previousRight - previousLeft) * 0.36;
+    const indentationDelta = lineLeft - previousLeft;
+    // A fixed pixel indentation threshold breaks at different zoom levels
+    // and mistakes wrapped lines for new paragraphs. Treat indentation as a
+    // paragraph break only when the vertical gap also indicates separation.
+    const startsIndentedParagraph = indentationDelta > lineHeight * 2.5 && gap > lineHeight * 0.75;
     const startsNewParagraph =
       !previous ||
       !overlapsPreviousColumn ||
-      gap > lineHeight * 1.35 ||
-      lineLeft > previousLeft + 70;
+      gap > lineHeight * 1.45 ||
+      startsIndentedParagraph;
     if (startsNewParagraph) {
       blocks.push([...line]);
     } else {

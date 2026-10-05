@@ -1,4 +1,5 @@
 ﻿import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type SVGProps } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   ArrowLeft,
   ArrowRight,
@@ -24,10 +25,12 @@ import {
   showNativeWebviewTab,
   syncNativeWebviewTabBounds,
 } from "../services/nativeWebview";
+import { appendBrowserHistory } from "../services/browserHistory";
 import { normalizeHttpUrl, normalizeWebUrl } from "../services/urlPolicy";
 import { readVersionedLocalState, writeVersionedLocalState } from "../services/localStore";
 import { START_PAGE_URL } from "../constants/startPage";
 import { StartPage } from "./StartPage";
+import "./WebViewPanel.css";
 
 interface WebBrowserProps {
   tabId: string;
@@ -36,7 +39,7 @@ interface WebBrowserProps {
   language?: AppLanguage;
   initialUrl?: string;
   onUrlChange?: (url: string) => void;
-  onOpenPdfInApp?: (url: string) => void;
+  onOpenPdfInApp?: (url: string) => Promise<void> | void;
   onOpenExternal?: (url: string) => void;
   onDownloadCurrent?: (url: string, options?: { preferPdf?: boolean }) => Promise<void> | void;
   onShowMessage?: (message: string) => void;
@@ -246,13 +249,22 @@ export function WebBrowser({
         return START_PAGE_URL;
       });
       if (selfNavigatedUrlRef.current === START_PAGE_URL) {
+        lastInitialUrlRef.current = START_PAGE_URL;
         selfNavigatedUrlRef.current = null;
         return;
       }
       if (lastInitialUrlRef.current !== START_PAGE_URL) {
         lastInitialUrlRef.current = START_PAGE_URL;
-        setHistoryEntries([START_PAGE_URL]);
-        setHistoryIndex(0);
+        if (nativeMode) {
+          setHistoryEntries((previous) => {
+            const next = appendBrowserHistory(previous, historyIndex, START_PAGE_URL);
+            setHistoryIndex(next.index);
+            return next.entries;
+          });
+        } else {
+          setHistoryEntries([START_PAGE_URL]);
+          setHistoryIndex(0);
+        }
       }
       return;
     }
@@ -265,15 +277,24 @@ export function WebBrowser({
       return normalized;
     });
     if (selfNavigatedUrlRef.current === normalized) {
+      lastInitialUrlRef.current = normalized;
       selfNavigatedUrlRef.current = null;
       return;
     }
     if (lastInitialUrlRef.current !== normalized) {
       lastInitialUrlRef.current = normalized;
-      setHistoryEntries([normalized]);
-      setHistoryIndex(0);
+      if (nativeMode) {
+        setHistoryEntries((previous) => {
+          const next = appendBrowserHistory(previous, historyIndex, normalized);
+          setHistoryIndex(next.index);
+          return next.entries;
+        });
+      } else {
+        setHistoryEntries([normalized]);
+        setHistoryIndex(0);
+      }
     }
-  }, [initialUrl]);
+  }, [historyIndex, initialUrl, nativeMode]);
 
   useEffect(() => {
     writeVersionedLocalState(BOOKMARKS_KEY, BOOKMARKS_STATE_VERSION, bookmarks);
@@ -290,22 +311,30 @@ export function WebBrowser({
     }
   }, []);
 
+  const endLoadingNow = useCallback(() => {
+    clearLoadingTimers();
+    setLoading(false);
+    if (nativeMode && tabId && !isStartPage) {
+      void showNativeWebviewTab(tabId, false).catch(() => undefined);
+    }
+  }, [clearLoadingTimers, isStartPage, nativeMode, tabId]);
+
   const beginLoading = useCallback(
     (watchdogMs = 7000) => {
       clearLoadingTimers();
       setLoading(true);
+      // Native WebView is a child window and always paints above the DOM.
+      // Hide it during navigation so the in-app loading surface remains visible.
+      if (nativeMode && tabId) {
+        void hideNativeWebviewTab(tabId).catch(() => undefined);
+      }
       loadingWatchdogRef.current = window.setTimeout(() => {
         loadingWatchdogRef.current = null;
-        setLoading(false);
+        endLoadingNow();
       }, watchdogMs);
     },
-    [clearLoadingTimers]
+    [clearLoadingTimers, endLoadingNow, nativeMode, tabId]
   );
-
-  const endLoadingNow = useCallback(() => {
-    clearLoadingTimers();
-    setLoading(false);
-  }, [clearLoadingTimers]);
 
   const syncNativeBounds = useCallback(
     async (force = false) => {
@@ -376,6 +405,7 @@ export function WebBrowser({
     beginLoading(9000);
     void createOrShowNativeWebviewTab(tabId, url, shortHost(url), true)
       .catch(() => navigateNativeWebviewTab(tabId, url))
+      .then(() => hideNativeWebviewTab(tabId).catch(() => undefined))
       .then(() => syncNativeBounds(true))
       .finally(() => {
         window.setTimeout(() => endLoadingNow(), 260);
@@ -446,13 +476,29 @@ export function WebBrowser({
       return;
     }
     const handleVisibility = () => {
-      if (!document.hidden) {
+      if (!document.hidden && !loading) {
         void showNativeWebviewTab(tabId, false);
       }
     };
     document.addEventListener("visibilitychange", handleVisibility);
     return () => document.removeEventListener("visibilitychange", handleVisibility);
-  }, [isStartPage, nativeMode, tabId]);
+  }, [isStartPage, loading, nativeMode, tabId]);
+
+  useEffect(() => {
+    if (!nativeMode || !tabId) return;
+    let disposed = false;
+    let unlisten: UnlistenFn | null = null;
+    void listen<{ tabId: string }>("r0nix://webview-pdf-link", (event) => {
+      if (event.payload?.tabId === tabId) beginLoading(30_000);
+    }).then((dispose) => {
+      if (disposed) dispose();
+      else unlisten = dispose;
+    }).catch(() => undefined);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [beginLoading, nativeMode, tabId]);
 
   useEffect(() => {
     if (!nativeMode || !tabId) return;
@@ -514,6 +560,24 @@ export function WebBrowser({
 
     const normalized = normalizeUrl(raw);
     if (!normalized) return;
+
+    // A direct PDF address must never be handed to the native WebView first.
+    // WKWebView can briefly create a blank document for PDF navigation before
+    // the download callback arrives. Route explicit PDF navigations through
+    // the same guarded download/open path used by the PDF menu instead.
+    if (looksLikePdfUrl(normalized) && onOpenPdfInApp) {
+      setInputUrl(normalized);
+      // Hide the native surface before starting the guarded download path.
+      // Otherwise the old page can briefly expose a blank PDF document while
+      // the app downloads and opens the file.
+      if (nativeMode) {
+        void hideNativeWebviewTab(tabId);
+      }
+      beginLoading(30_000);
+      void Promise.resolve(onOpenPdfInApp(normalized)).finally(endLoadingNow);
+      return;
+    }
+
     selfNavigatedUrlRef.current = normalized;
     setUrl(normalized);
     setInputUrl(normalized);
@@ -615,17 +679,22 @@ export function WebBrowser({
     }
   };
 
-  const handleOpenPdfInApp = () => {
+  const handleOpenPdfInApp = async () => {
     if (!pdfLink) {
       showMessage(t.noPdfDetected);
       return;
     }
-    onOpenPdfInApp?.(pdfLink);
     setMenuOpen(false);
+    beginLoading(30_000);
+    try {
+      await onOpenPdfInApp?.(pdfLink);
+    } finally {
+      endLoadingNow();
+    }
   };
 
   const keepNativeVisible = () => {
-    if (!nativeMode || isStartPage) return;
+    if (!nativeMode || isStartPage || loading) return;
     void showNativeWebviewTab(tabId, false);
   };
 
@@ -637,15 +706,15 @@ export function WebBrowser({
   };
 
   const navButtonClass =
-    "inline-flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-900 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-[var(--chrome-surface-4)] dark:hover:text-zinc-100";
+    "inline-flex h-8 w-8 items-center justify-center rounded-lg text-content-muted transition-colors hover:bg-[var(--reader-accent-soft)] hover:text-[var(--reader-accent)] focus:outline-none focus:ring-2 focus:ring-[var(--reader-accent)]/30 disabled:opacity-40";
 
   return (
     <div
-      className="flex h-full flex-col bg-zinc-50 text-zinc-900 dark:bg-[var(--chrome-surface-1)] dark:text-zinc-100"
+      className="flex h-full flex-col bg-surface-app text-content-primary"
       onMouseDownCapture={keepNativeVisible}
       onPointerDownCapture={keepNativeVisible}
     >
-      <div className="z-10 shrink-0 border-b border-zinc-200 bg-white/95 px-3 py-2 shadow-sm backdrop-blur dark:border-[var(--chrome-border)] dark:bg-[var(--chrome-surface-1)]/95">
+      <div className="z-10 shrink-0 border-b border-border-subtle bg-surface-panel/95 px-3 py-2 shadow-sm backdrop-blur">
         <div className="flex items-center gap-2">
           <div className="flex items-center gap-1">
             <button className={navButtonClass} title={t.navBack} aria-label={t.navBack} onClick={navigateBack} disabled={historyIndex === 0 && !nativeMode}>
@@ -687,7 +756,7 @@ export function WebBrowser({
             }}
             className="relative mx-auto flex-1"
           >
-            <div className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-zinc-400 dark:text-zinc-500">
+            <div className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-content-muted">
               <Lock size={14} />
             </div>
             <input
@@ -695,11 +764,11 @@ export function WebBrowser({
               value={inputUrl}
               onChange={(event) => setInputUrl(event.target.value)}
               placeholder={t.addressPlaceholder}
-              className="w-full rounded-xl border border-zinc-200 bg-zinc-50 py-2 pl-9 pr-10 text-sm text-zinc-900 transition-all placeholder:text-zinc-400 focus:outline-none focus:ring-2 focus:ring-[var(--reader-accent)] dark:border-[var(--chrome-border)] dark:bg-[var(--chrome-surface-2)] dark:text-zinc-100 dark:placeholder:text-zinc-500"
+              className="w-full rounded-xl border border-border-subtle bg-surface-sunken py-2 pl-9 pr-10 text-sm text-content-primary transition-all placeholder:text-content-muted focus:outline-none focus:ring-2 focus:ring-[var(--reader-accent)]"
             />
             <button
               type="button"
-              className="absolute right-3 top-1/2 -translate-y-1/2 text-zinc-400 transition-colors dark:text-zinc-500"
+              className="absolute right-3 top-1/2 -translate-y-1/2 text-content-muted transition-colors"
               title={bookmarked ? t.bookmarkRemove : t.bookmarkAdd}
               aria-label={bookmarked ? t.bookmarkRemove : t.bookmarkAdd}
               onClick={toggleBookmark}
@@ -711,8 +780,8 @@ export function WebBrowser({
 
           <div className="ml-auto flex items-center gap-1.5">
             <button
-              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-[var(--chrome-border)] dark:bg-[var(--chrome-surface-2)] dark:text-zinc-200 dark:hover:bg-[var(--chrome-surface-4)]"
-              onClick={handleOpenPdfInApp}
+              className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border-subtle bg-surface-panel px-2.5 text-xs font-medium text-content-secondary transition-colors hover:bg-surface-hover"
+              onClick={() => void handleOpenPdfInApp()}
               title={looksLikePdfUrl(pdfLink) ? t.openPdfInAppHintDetected : t.openPdfInAppHintFallback}
               aria-label={t.openPdfInApp}
             >
@@ -736,12 +805,12 @@ export function WebBrowser({
               {actionBusy ? <Loader2 size={16} className="animate-spin" /> : <Download size={16} />}
             </button>
 
-            <div className="relative" ref={menuRef}>
+            <div className="relative z-50" ref={menuRef}>
               <button className={navButtonClass} title={t.more} aria-label={t.more} onClick={() => setMenuOpen((value) => !value)}>
                 <MoreVertical size={16} />
               </button>
               {menuOpen ? (
-                <div className="absolute right-0 top-10 z-30 w-64 rounded-2xl border border-zinc-200 bg-white p-2 shadow-sm dark:border-[var(--chrome-border)] dark:bg-[var(--chrome-surface-2)]">
+                <div className="absolute right-0 top-10 z-[90] w-64 rounded-2xl border border-border-subtle bg-surface-panel p-2 shadow-xl" onPointerDown={(event) => event.stopPropagation()}>
                   <MenuButton
                     icon={<Star size={14} />}
                     label={bookmarked ? t.bookmarkRemove : t.bookmarkAdd}
@@ -783,28 +852,29 @@ export function WebBrowser({
       </div>
 
       {showIframeCompatibilityNotice ? (
-        <div className="mx-4 mt-3 rounded-2xl border border-zinc-200 bg-white px-4 py-3 text-xs text-zinc-600 shadow-sm dark:border-[var(--chrome-border)] dark:bg-[var(--chrome-surface-2)] dark:text-zinc-300">
+        <div className="mx-4 mt-3 rounded-2xl border border-border-subtle bg-surface-panel px-4 py-3 text-xs text-content-secondary shadow-sm">
           {t.iframeNotice}
         </div>
       ) : null}
 
       <div
         ref={anchorRef}
-        className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-white dark:bg-[var(--chrome-surface-1)]"
+        className="relative min-h-0 min-w-0 flex-1 overflow-hidden bg-surface-panel"
         onMouseEnter={() => {
-          if (!nativeMode || isStartPage) return;
+          if (!nativeMode || isStartPage || loading) return;
           void showNativeWebviewTab(tabId, false);
         }}
         onMouseDown={() => {
-          if (!nativeMode || isStartPage) return;
+          if (!nativeMode || isStartPage || loading) return;
           void showNativeWebviewTab(tabId, true);
         }}
       >
         {loading ? (
-          <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/80 text-sm text-zinc-500 dark:bg-[var(--chrome-surface-1)]/70 dark:text-zinc-300">
-            <div className="inline-flex items-center gap-2 rounded-xl border border-zinc-200 bg-white px-3 py-2 shadow-sm dark:border-[var(--chrome-border)] dark:bg-[var(--chrome-surface-2)]">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              {t.loadingPage} {url || "page"}...
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-surface-app/80 text-sm text-content-muted">
+            <div className="web-loading-overlay" role="status" aria-label={`${t.loadingPage} ${url || "page"}`}>
+              <div className="loader" aria-hidden="true">
+              </div>
+              <span className="sr-only">{t.loadingPage} {url || "page"}</span>
             </div>
           </div>
         ) : null}
@@ -812,11 +882,11 @@ export function WebBrowser({
         {isStartPage ? (
           <StartPage quickLinks={quickLinks} onNavigate={navigateTo} language={language} />
         ) : nativeMode ? (
-          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-6 text-center text-zinc-400 dark:text-zinc-600">
+          <div className="pointer-events-none absolute inset-0 flex flex-col items-center justify-center px-6 text-center text-content-disabled">
             <GlobeIcon className="mb-4 h-16 w-16 opacity-20" />
-            <p className="text-xl font-semibold tracking-tight text-zinc-700 dark:text-zinc-300">{t.nativeActiveTitle}</p>
-            <p className="mt-2 max-w-lg text-sm text-zinc-500 dark:text-zinc-400">{t.nativeActiveDesc}</p>
-            <p className="mt-3 text-xs font-mono text-zinc-400 dark:text-zinc-500">{url}</p>
+            <p className="text-xl font-semibold tracking-tight text-content-secondary">{t.nativeActiveTitle}</p>
+            <p className="mt-2 max-w-lg text-sm text-content-muted">{t.nativeActiveDesc}</p>
+            <p className="mt-3 text-xs font-mono text-content-muted">{url}</p>
           </div>
         ) : url ? (
           <iframe
@@ -829,9 +899,9 @@ export function WebBrowser({
             onError={() => endLoadingNow()}
           />
         ) : (
-          <div className="absolute inset-0 flex flex-col items-center justify-center text-zinc-400 dark:text-zinc-600">
+          <div className="absolute inset-0 flex flex-col items-center justify-center text-content-disabled">
             <GlobeIcon className="mb-4 h-16 w-16 opacity-20" />
-            <p className="text-xl font-semibold tracking-tight text-zinc-700 dark:text-zinc-300">{t.emptyTitle}</p>
+            <p className="text-xl font-semibold tracking-tight text-content-secondary">{t.emptyTitle}</p>
           </div>
         )}
       </div>
@@ -842,7 +912,7 @@ export function WebBrowser({
 function MenuButton({ icon, label, onClick, disabled = false }: { icon: ReactNode; label: string; onClick: () => void; disabled?: boolean }) {
   return (
     <button
-      className="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-900"
+      className="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left text-sm text-content-secondary transition-colors hover:bg-surface-hover disabled:opacity-50"
       onClick={onClick}
       disabled={disabled}
     >

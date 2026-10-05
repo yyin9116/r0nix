@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type MouseEvent } from "react";
-import { X, FileText, Globe, Library, Settings, PanelLeft } from "lucide-react";
+import { X, FileText, Globe, Library, Settings, PanelLeft, Plus } from "lucide-react";
 import { AnimatePresence, motion } from "motion/react";
 import type { Tab } from "../types";
 import type { AppLanguage } from "../services/userSettings";
@@ -10,6 +10,7 @@ interface TabsProps {
   onTabClick: (id: string) => void;
   onTabClose: (id: string) => void;
   onToggleSidebar?: () => void;
+  onNewTab?: () => void;
   isSidebarOpen?: boolean;
   onTabContextMenu?: (tab: Tab, event: MouseEvent<HTMLDivElement>) => void;
   language: AppLanguage;
@@ -21,6 +22,7 @@ export function Tabs({
   onTabClick,
   onTabClose,
   onToggleSidebar,
+  onNewTab,
   isSidebarOpen = true,
   onTabContextMenu,
   language,
@@ -123,18 +125,19 @@ export function Tabs({
 
   const closeTabLabel = language === "zh-CN" ? "关闭标签" : "Close tab";
   const toggleSidebarLabel = language === "zh-CN" ? "切换侧边栏" : "Toggle Sidebar";
+  const newTabLabel = language === "zh-CN" ? "新建标签页" : "New tab";
 
   return (
-    <div className="flex h-10 bg-zinc-100 dark:bg-zinc-950 border-b border-zinc-200 dark:border-zinc-800 shrink-0 font-sans min-w-0">
-      <div className="h-full flex items-center px-2 shrink-0 border-r border-zinc-200/70 dark:border-zinc-800/70">
+    <div className="flex h-10 bg-surface-sunken border-b border-border-subtle shrink-0 font-sans min-w-0">
+      <div className="h-full flex items-center px-2 shrink-0 border-r border-border-subtle/70">
         <button
           onClick={onToggleSidebar}
           data-no-drag="true"
           aria-label={toggleSidebarLabel}
           className={`p-1.5 rounded-md transition-colors ${
             isSidebarOpen
-              ? "text-zinc-700 dark:text-zinc-300 hover:bg-zinc-200 dark:hover:bg-zinc-800"
-              : "text-zinc-400 dark:text-zinc-500 hover:bg-zinc-200 dark:hover:bg-zinc-800"
+              ? "text-content-secondary hover:bg-surface-hover"
+              : "text-content-muted hover:bg-surface-hover"
           }`}
           title={toggleSidebarLabel}
         >
@@ -143,8 +146,8 @@ export function Tabs({
       </div>
 
       <div className="relative min-w-0 flex-1 overflow-hidden">
-        <div className="pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-zinc-100 to-transparent dark:from-zinc-950 z-20" />
-        <div className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-zinc-100 to-transparent dark:from-zinc-950 z-20" />
+        <div className="pointer-events-none absolute inset-y-0 left-0 w-8 bg-gradient-to-r from-surface-sunken to-transparent z-20" />
+        <div className="pointer-events-none absolute inset-y-0 right-0 w-8 bg-gradient-to-l from-surface-sunken to-transparent z-20" />
 
         <div
           ref={scrollRef}
@@ -182,8 +185,8 @@ export function Tabs({
                   }}
                   className={`group relative box-border flex shrink-0 items-center gap-2 overflow-hidden px-4 h-full cursor-pointer motion-safe:transition-[background-color,color,border-color] motion-safe:duration-220 text-sm ${
                     isActive
-                      ? "bg-white dark:bg-zinc-900 text-zinc-900 dark:text-zinc-100 shadow-sm border-x border-zinc-200 dark:border-zinc-800 z-10"
-                      : "text-zinc-500 dark:text-zinc-400 hover:bg-zinc-200/50 dark:hover:bg-zinc-800/50 hover:text-zinc-800 dark:hover:text-zinc-200 border-x border-transparent"
+                      ? "bg-surface-panel text-content-primary shadow-sm border-x border-border-subtle z-10"
+                      : "text-content-muted hover:bg-surface-hover/50 hover:text-content-primary border-x border-transparent"
                   }`}
                   style={{ minWidth: tabWidth, maxWidth: tabWidth }}
                   initial={{ width: 0, opacity: 0 }}
@@ -202,10 +205,20 @@ export function Tabs({
                     />
                   ) : null}
 
-                  <Icon
-                    size={14}
-                    className={isActive ? "shrink-0 text-zinc-900 dark:text-zinc-100" : "shrink-0 text-zinc-400 dark:text-zinc-500"}
-                  />
+                  <span className="relative flex h-4 w-4 shrink-0 items-center justify-center">
+                    <Icon
+                      size={14}
+                      className={isActive ? "text-content-primary" : "text-content-muted"}
+                    />
+                    {tab.type === "web" && tab.url && tab.url !== "about:blank" ? (
+                      <img
+                        src={(() => { try { return `${new URL(tab.url).protocol}//${new URL(tab.url).host}/favicon.ico`; } catch { return ""; } })()}
+                        alt=""
+                        className="absolute inset-0 h-4 w-4 rounded-sm bg-surface-panel object-contain"
+                        onError={(event) => { event.currentTarget.style.display = "none"; }}
+                      />
+                    ) : null}
+                  </span>
                   <span className="truncate flex-1 font-serif font-medium text-base">{tab.title}</span>
 
                   {closable ? (
@@ -218,8 +231,8 @@ export function Tabs({
                       }}
                       className={`p-1 rounded-md transition-all ${
                         isActive
-                          ? "opacity-100 hover:bg-zinc-100 dark:hover:bg-zinc-800"
-                          : "opacity-0 group-hover:opacity-100 hover:bg-zinc-300/50 dark:hover:bg-zinc-700/50"
+                          ? "opacity-100 hover:bg-surface-hover"
+                          : "opacity-0 group-hover:opacity-100 hover:bg-surface-active/50"
                       }`}
                       title={closeTabLabel}
                     >
@@ -231,6 +244,18 @@ export function Tabs({
             })}
           </AnimatePresence>
         </div>
+      </div>
+      <div className="flex h-full shrink-0 items-center border-l border-border-subtle/70 px-1.5">
+        <button
+          type="button"
+          data-no-drag="true"
+          aria-label={newTabLabel}
+          title={newTabLabel}
+          onClick={onNewTab}
+          className="inline-flex h-7 w-7 items-center justify-center rounded-md text-content-muted transition-colors hover:bg-[var(--reader-accent-soft)] hover:text-[var(--reader-accent)]"
+        >
+          <Plus size={16} />
+        </button>
       </div>
     </div>
   );

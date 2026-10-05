@@ -10,17 +10,18 @@ export type CachedResourceLink = {
 export type ResourceIndexSnapshot = {
   images: Record<number, PDFImageInfo[]>;
   links: Record<number, CachedResourceLink[]>;
+  pageSizes: Record<number, { width: number; height: number }>;
   scannedPages: number[];
   textByPage: Record<number, string>;
 };
 
 type ResourceIndexEnvelope = ResourceIndexSnapshot & {
-  version: 3;
+  version: 5;
   updatedAt: string;
 };
 
 const CACHE_PREFIX = "r0nix:resource-index:";
-const CACHE_VERSION = 3 as const;
+const CACHE_VERSION = 5 as const;
 const MAX_CACHED_PAGES = 2000;
 const MAX_CACHE_BYTES = 2_000_000;
 
@@ -42,24 +43,49 @@ function sanitizeImages(value: unknown): Record<number, PDFImageInfo[]> {
     const items = rawItems
       .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object")
       .map((item): PDFImageInfo | null => {
+        const xref = Number(item.xref);
+        const width = Number(item.width);
+        const height = Number(item.height);
+        const pageWidth = item.pageWidth === undefined ? undefined : Number(item.pageWidth);
+        const pageHeight = item.pageHeight === undefined ? undefined : Number(item.pageHeight);
+        const extension = typeof item.extension === "string" ? item.extension.trim() : "";
+        const source = item.source;
         const bbox = Array.isArray(item.bbox) && item.bbox.length === 4
-          ? item.bbox.map((part) => finiteNumber(part)) as [number, number, number, number]
+          ? item.bbox.map((part) => Number(part)) as [number, number, number, number]
           : undefined;
-        const source = item.source === "vector" || item.source === "block" ? item.source : "xref";
+
+        if (
+          !Number.isInteger(xref) || xref < 0 ||
+          (source !== "xref" && source !== "block" && source !== "vector") ||
+          (source === "xref" && xref < 1) ||
+          !Number.isFinite(width) || width <= 0 ||
+          !Number.isFinite(height) || height <= 0 ||
+          extension.length === 0 ||
+          !bbox || !bbox.every(Number.isFinite) ||
+          (pageWidth !== undefined && (!Number.isFinite(pageWidth) || pageWidth <= 0)) ||
+          (pageHeight !== undefined && (!Number.isFinite(pageHeight) || pageHeight <= 0))
+        ) {
+          return null;
+        }
+
         return {
-          xref: Math.max(0, Math.round(finiteNumber(item.xref))),
+          xref,
           resourceId: typeof item.resourceId === "string" ? item.resourceId : undefined,
           documentId: typeof item.documentId === "string" ? item.documentId : undefined,
           pageNumber: page,
-          width: Math.max(0, Math.round(finiteNumber(item.width))),
-          height: Math.max(0, Math.round(finiteNumber(item.height))),
-          extension: typeof item.extension === "string" ? item.extension : "",
+          width,
+          height,
+          pageWidth,
+          pageHeight,
+          extension,
           bbox,
           source,
         };
       })
-      .filter((item): item is PDFImageInfo => Boolean(item));
-    if (items.length > 0) result[page] = items;
+      .filter((item): item is PDFImageInfo => item !== null);
+    // Keep an empty array: it distinguishes a scanned page with no images
+    // from a page that has not been indexed yet.
+    result[page] = items;
   }
   return result;
 }
@@ -83,7 +109,8 @@ function sanitizeLinks(value: unknown): Record<number, CachedResourceLink[]> {
         };
       })
       .filter((item): item is CachedResourceLink => Boolean(item));
-    if (items.length > 0) result[page] = items;
+    // Keep an empty array so a scanned page with no links is not rescanned.
+    result[page] = items;
   }
   return result;
 }
@@ -92,6 +119,7 @@ function trimPages(snapshot: ResourceIndexSnapshot): ResourceIndexSnapshot {
   const pages = Array.from(new Set([
     ...Object.keys(snapshot.images).map(Number),
     ...Object.keys(snapshot.links).map(Number),
+    ...Object.keys(snapshot.pageSizes).map(Number),
     ...snapshot.scannedPages,
     ...Object.keys(snapshot.textByPage).map(Number),
   ])).filter((page) => Number.isInteger(page) && page > 0).sort((a, b) => a - b);
@@ -99,6 +127,7 @@ function trimPages(snapshot: ResourceIndexSnapshot): ResourceIndexSnapshot {
   return {
     images: Object.fromEntries(Object.entries(snapshot.images).filter(([page]) => keep.has(Number(page)))),
     links: Object.fromEntries(Object.entries(snapshot.links).filter(([page]) => keep.has(Number(page)))),
+    pageSizes: Object.fromEntries(Object.entries(snapshot.pageSizes).filter(([page]) => keep.has(Number(page)))),
     scannedPages: pages.filter((page) => keep.has(page)),
     textByPage: Object.fromEntries(Object.entries(snapshot.textByPage).filter(([page]) => keep.has(Number(page)))),
   };
@@ -110,6 +139,21 @@ function sanitizeScannedPages(value: unknown): number[] {
     .map((page) => Number(page))
     .filter((page) => Number.isInteger(page) && page > 0)))
     .sort((left, right) => left - right);
+}
+
+function sanitizePageSizes(value: unknown): Record<number, { width: number; height: number }> {
+  if (!value || typeof value !== "object") return {};
+  const result: Record<number, { width: number; height: number }> = {};
+  for (const [pageKey, rawSize] of Object.entries(value)) {
+    const page = Number(pageKey);
+    if (!Number.isInteger(page) || page < 1 || !rawSize || typeof rawSize !== "object") continue;
+    const size = rawSize as Record<string, unknown>;
+    const width = finiteNumber(size.width);
+    const height = finiteNumber(size.height);
+    if (width <= 0 || height <= 0) continue;
+    result[page] = { width: Math.min(width, 20_000), height: Math.min(height, 20_000) };
+  }
+  return result;
 }
 
 function sanitizeTextByPage(value: unknown): Record<number, string> {
@@ -133,10 +177,12 @@ export function loadResourceIndex(key: string): ResourceIndexSnapshot | null {
     return trimPages({
       images: sanitizeImages(parsed.images),
       links: sanitizeLinks(parsed.links),
+      pageSizes: sanitizePageSizes(parsed.pageSizes),
       scannedPages: sanitizeScannedPages(parsed.scannedPages),
       textByPage: sanitizeTextByPage(parsed.textByPage),
     });
   } catch {
+    // Storage can be unavailable in restricted WebView/private contexts.
     return null;
   }
 }

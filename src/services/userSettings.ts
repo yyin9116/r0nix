@@ -2,7 +2,6 @@ import { START_PAGE_URL } from "../constants/startPage";
 import { readVersionedLocalState, writeVersionedLocalState } from "./localStore";
 
 export type ThemeMode = "system" | "light" | "dark";
-export type ThemePalette = "default" | "graphite" | "slate" | "indigo";
 export type ThemeAccent = "zinc" | "blue" | "green" | "orange" | "rose" | "violet";
 export type WebPdfOpenMode = "direct" | "download_then_open";
 export type WebPanelMode = "iframe" | "native_webview";
@@ -36,7 +35,6 @@ export interface UserSettings {
   proxyEnabled: boolean;
   proxyUrl: string;
   themeMode: ThemeMode;
-  themePalette: ThemePalette;
   themeAccent: ThemeAccent;
   webPdfOpenMode: WebPdfOpenMode;
   webPanelMode: WebPanelMode;
@@ -62,7 +60,6 @@ const DEFAULT_SETTINGS: UserSettings = {
   proxyEnabled: false,
   proxyUrl: "",
   themeMode: "system",
-  themePalette: "graphite",
   themeAccent: "zinc",
   webPdfOpenMode: "download_then_open",
   webPanelMode: "native_webview",
@@ -76,7 +73,8 @@ export function sanitizeUserSettings(raw: unknown): UserSettings {
   const defaultSaveDir = typeof parsed.defaultSaveDir === "string" ? parsed.defaultSaveDir : "";
   const aiModelPath = typeof parsed.aiModelPath === "string" ? parsed.aiModelPath : DEFAULT_SETTINGS.aiModelPath;
   const aiModelName = typeof parsed.aiModelName === "string" && parsed.aiModelName.trim() ? parsed.aiModelName : DEFAULT_SETTINGS.aiModelName;
-  const aiApiKey = typeof parsed.aiApiKey === "string" ? parsed.aiApiKey : DEFAULT_SETTINGS.aiApiKey;
+  // API keys are session-scoped. Never hydrate secrets from plain localStorage.
+  const aiApiKey = DEFAULT_SETTINGS.aiApiKey;
   const aiTemperature = typeof parsed.aiTemperature === "number" && Number.isFinite(parsed.aiTemperature)
     ? Math.max(0, Math.min(2, parsed.aiTemperature))
     : DEFAULT_SETTINGS.aiTemperature;
@@ -96,20 +94,21 @@ export function sanitizeUserSettings(raw: unknown): UserSettings {
   const proxyEnabled =
     typeof parsed.proxyEnabled === "boolean" ? parsed.proxyEnabled : DEFAULT_SETTINGS.proxyEnabled;
   const proxyUrl = typeof parsed.proxyUrl === "string" ? parsed.proxyUrl : DEFAULT_SETTINGS.proxyUrl;
-  const legacyAccentMigration = parsed.themeAccent === "blue" && (parsed.themePalette === undefined || parsed.themePalette === "default");
+  // 历史遗留字段 themePalette（default | graphite | slate | indigo）已从设置面板移除，
+  // 新版也不再写入。这里只把「磁盘上尚未被新版覆盖过的旧值」读出来做一次性判断：
+  // 老版本的默认强调色是 blue，而现在的默认是 zinc。只要 themePalette 还是
+  // undefined（更老的 schema）或 "default"，就认为这个 blue 是属于当年默认值的，
+  // 而不是用户主动选的，于是迁到 zinc。若已落盘过 graphite/slate/indigo，
+  // 视为用户主动选择，blue 保持不动。
+  // 用 (parsed as ...) 读而非声明进 UserSettings：这个字段已不属于当前 schema，
+  // 保留只是因为老用户机器上的 localStorage 里还留着它。
+  const legacyPalette = (parsed as { themePalette?: unknown }).themePalette;
+  const legacyAccentMigration =
+    parsed.themeAccent === "blue" && (legacyPalette === undefined || legacyPalette === "default");
   const themeMode: ThemeMode =
     parsed.themeMode === "light" || parsed.themeMode === "dark" || parsed.themeMode === "system"
       ? parsed.themeMode
       : DEFAULT_SETTINGS.themeMode;
-  const themePalette: ThemePalette =
-    parsed.themePalette === "default" ||
-    parsed.themePalette === "slate" ||
-    parsed.themePalette === "indigo" ||
-    parsed.themePalette === "graphite"
-      ? legacyAccentMigration && parsed.themePalette === "default"
-        ? "graphite"
-        : parsed.themePalette
-      : DEFAULT_SETTINGS.themePalette;
   const themeAccent: ThemeAccent =
     parsed.themeAccent === "zinc" ||
     parsed.themeAccent === "green" ||
@@ -156,7 +155,6 @@ export function sanitizeUserSettings(raw: unknown): UserSettings {
     proxyEnabled,
     proxyUrl,
     themeMode,
-    themePalette,
     themeAccent,
     webPdfOpenMode,
     webPanelMode,
@@ -170,8 +168,11 @@ export function loadUserSettings(): UserSettings {
   const settings = readVersionedLocalState(USER_SETTINGS_KEY, USER_SETTINGS_VERSION, DEFAULT_SETTINGS, (raw) => {
     const parsed = raw as Partial<UserSettings>;
     const settings = sanitizeUserSettings(parsed);
+    const hasPersistedApiKey = typeof parsed.aiApiKey === "string" && parsed.aiApiKey.length > 0;
     if (parsed.webPanelMode === "iframe") {
       settings.webPanelMode = "native_webview";
+    }
+    if (parsed.webPanelMode === "iframe" || hasPersistedApiKey) {
       saveUserSettings(settings);
     }
     return settings;
@@ -181,7 +182,8 @@ export function loadUserSettings(): UserSettings {
 
 export function saveUserSettings(next: UserSettings): void {
   if (typeof window === "undefined") return;
-  writeVersionedLocalState(USER_SETTINGS_KEY, USER_SETTINGS_VERSION, next);
+  const persisted = { ...next, aiApiKey: "" };
+  writeVersionedLocalState(USER_SETTINGS_KEY, USER_SETTINGS_VERSION, persisted);
   window.dispatchEvent(new CustomEvent(USER_SETTINGS_EVENT, { detail: next }));
 }
 

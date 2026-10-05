@@ -1,9 +1,14 @@
+import { invoke } from "@tauri-apps/api/core";
+
 const isTauriRuntime =
   typeof window !== "undefined" &&
   ("__TAURI__" in window || "__TAURI_INTERNALS__" in window);
 
+// invoke 静态引入：@tauri-apps/api/core 早已进入入口 chunk（debugLogger /
+// nativeFiles / rustPdf 都是静态引入），原来的 await import() 拿不到任何代码
+// 分割收益，只会让 Rollup 报 "dynamic import will not move module into another
+// chunk"。这里保留 async 签名只是为了不改调用方的 await 语义。
 async function invokeNative<T>(command: string, payload: Record<string, unknown>): Promise<T> {
-  const { invoke } = await import("@tauri-apps/api/core");
   return invoke<T>(command, payload);
 }
 

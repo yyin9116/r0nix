@@ -18,6 +18,9 @@ export interface Tab {
   filePath?: string;
   fileId?: string;
   content?: string;
+  /** Persisted Markdown draft state. */
+  contentDirty?: boolean;
+  contentBase?: string;
   filter?: LibraryFilter;
   pinned?: boolean;
   pdfViewState?: PdfViewState;
@@ -29,6 +32,8 @@ export interface PdfViewState {
   zoom: number;
   scrollTop: number;
   scrollLeft: number;
+  /** One-shot source focus used when opening a saved citation. */
+  focusRect?: ReaderAnnotationRect;
   updatedAt: string;
 }
 
@@ -46,6 +51,10 @@ export interface ReaderDocument {
   isFavorite: boolean;
   progress: number;
   pageCount: number;
+  /** Byte size of the source when available; used to invalidate derived caches. */
+  fileSize?: number;
+  /** Stable import timestamp; unlike lastOpenedAt this does not change while reading. */
+  addedAt?: string;
   lastOpenedAt: string;
   trashedAt?: string;
   fileId?: string;
@@ -84,6 +93,7 @@ export interface ReaderAnnotationRect {
 export interface ReaderAnnotation {
   id: string;
   documentId?: string;
+  blockId?: string;
   page: number;
   kind: ReaderAnnotationKind;
   rect: ReaderAnnotationRect;
@@ -112,5 +122,9 @@ export interface PdfReadingBlock {
   source: "mineru" | "pdfjs-dom" | "pymupdf" | "markdown";
   sourcePath?: string;
   depth?: number;
+  ordered?: boolean;
+  language?: string;
+  assetUrl?: string;
+  altText?: string;
   tableAlign?: Array<"left" | "center" | "right">;
 }

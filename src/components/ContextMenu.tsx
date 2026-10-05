@@ -41,13 +41,13 @@ export function ContextMenu({ x, y, isOpen, title, actions, onClose }: ContextMe
   return (
     <div
       style={{ top: adjustedY, left: adjustedX }}
-      className="fixed z-[120] w-64 bg-white/95 dark:bg-zinc-900/95 backdrop-blur-xl border border-zinc-200/80 dark:border-zinc-800/80 shadow-2xl rounded-xl overflow-hidden font-sans text-[13px] text-zinc-800 dark:text-zinc-200"
+      className="fixed z-[120] w-64 bg-surface-panel/95 backdrop-blur-xl border border-border-subtle/80 shadow-2xl rounded-xl overflow-hidden font-sans text-[13px] text-content-primary"
       onMouseDown={(event) => event.stopPropagation()}
     >
       <div className="p-1.5 flex flex-col gap-0.5">
-        <div className="px-2 py-1.5 text-[11px] font-semibold text-zinc-400 dark:text-zinc-500 uppercase tracking-wider flex items-center justify-between">
+        <div className="px-2 py-1.5 text-[11px] font-semibold text-content-muted uppercase tracking-wider flex items-center justify-between">
           <span>{title || "Actions"}</span>
-          <button className="p-1 rounded hover:bg-zinc-100 dark:hover:bg-zinc-800 text-zinc-400 dark:text-zinc-500" onClick={onClose} title="Close">
+          <button className="p-1 rounded hover:bg-surface-hover text-content-muted" onClick={onClose} title="Close">
             <X size={12} />
           </button>
         </div>
@@ -61,9 +61,9 @@ export function ContextMenu({ x, y, isOpen, title, actions, onClose }: ContextMe
               onClose();
             }}
             disabled={action.disabled}
-            className="w-full flex items-center justify-between px-2 py-1.5 hover:bg-zinc-100 dark:hover:bg-zinc-800 rounded-md transition-colors text-left group disabled:opacity-40 disabled:cursor-not-allowed"
+            className="w-full flex items-center justify-between px-2 py-1.5 hover:bg-surface-hover rounded-md transition-colors text-left group disabled:opacity-40 disabled:cursor-not-allowed"
           >
-            <div className="flex items-center gap-2.5 text-zinc-700 dark:text-zinc-300 group-hover:text-zinc-900 dark:group-hover:text-zinc-100">
+            <div className="flex items-center gap-2.5 text-content-secondary group-hover:text-content-primary">
               {action.icon || <Download size={14} />}
               <span className="font-medium">{action.label}</span>
             </div>
@@ -78,6 +78,7 @@ export function buildViewerContextActions(options: {
   onCopyPageLabel: () => void;
   onAddNote: () => void;
   onExportPng: () => void;
+  onExportImageCrop?: () => void;
   onExportSvg?: () => void;
   onClose: () => void;
   labels?: {
@@ -86,6 +87,7 @@ export function buildViewerContextActions(options: {
     exportCurrentPng: string;
     exportCurrentSvg?: string;
     exportImagePng?: string;
+    exportImageCropPng?: string;
     exportImageSvg?: string;
     cancel: string;
   };
@@ -113,6 +115,14 @@ export function buildViewerContextActions(options: {
       onSelect: options.onExportPng,
     },
   ];
+  if (options.imageTarget && options.onExportImageCrop) {
+    actions.push({
+      id: "export-image-crop-png",
+      label: options.labels?.exportImageCropPng || "Export image crop PNG",
+      icon: <FileImage size={14} />,
+      onSelect: options.onExportImageCrop,
+    });
+  }
   if (options.onExportSvg) {
     actions.push({
       id: "export-svg",

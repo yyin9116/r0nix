@@ -67,6 +67,21 @@ assert.equal(singleColumnBlocks.length, 1, "wide single-column text must remain 
 assert.ok(singleColumnBlocks[0].text.includes("right edge"), "wide single-column block must retain its right edge");
 assert.ok(singleColumnBlocks[0].rect && singleColumnBlocks[0].rect.width > 0.8, "wide single-column bbox must retain its full width");
 
+const indentedContinuation = [
+  new TestSpan("A paragraph starts here", rect(24, 30, 220, 12)),
+  new TestSpan("and continues on the next line", rect(104, 47, 260, 12)),
+  new TestSpan("with the final sentence.", rect(24, 64, 220, 12)),
+];
+const indentedBlocks = buildDomPdfReadingBlocks(new TestLayer(indentedContinuation, rect(0, 0, 540, 700)), 9);
+assert.equal(indentedBlocks.length, 1, "wrapped lines with a modest indent must stay in one paragraph");
+
+const separatedParagraphs = [
+  new TestSpan("First paragraph.", rect(24, 30, 180, 12)),
+  new TestSpan("Second paragraph.", rect(24, 72, 180, 12)),
+];
+const separatedBlocks = buildDomPdfReadingBlocks(new TestLayer(separatedParagraphs, rect(0, 0, 540, 700)), 10);
+assert.equal(separatedBlocks.length, 2, "a real vertical paragraph gap must create a new block");
+
 const highlightRects = groupPdfTextHighlightRects([
   { left: 20, top: 20, right: 100, bottom: 32 },
   { left: 104, top: 20, right: 180, bottom: 32 },

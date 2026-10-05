@@ -110,18 +110,19 @@ export function Sidebar({
 
   return (
     <div
-      className={`${isOpen ? "w-72" : "w-0"} transition-[width] duration-300 ease-in-out overflow-hidden bg-zinc-50 dark:bg-zinc-950 border-r border-zinc-200 dark:border-zinc-800 flex flex-col h-full text-sm font-sans text-zinc-800 dark:text-zinc-200 shrink-0`}
+      aria-hidden={!isOpen}
+      className={`${isOpen ? "w-72 visible pointer-events-auto" : "w-0 invisible pointer-events-none"} transition-[width] duration-300 ease-in-out overflow-hidden bg-surface-app border-r border-border-subtle flex flex-col h-full text-sm font-sans text-content-primary shrink-0`}
     >
       <div className="w-72 flex flex-col h-full">
-        <div className="p-4 flex items-center justify-between border-b border-zinc-200 dark:border-zinc-800">
-          <div className="flex items-center gap-2 font-serif font-bold text-xl text-zinc-900 dark:text-zinc-100">
-            <div className="w-7 h-7 bg-zinc-900 dark:bg-zinc-100 rounded-md flex items-center justify-center text-white dark:text-zinc-900 text-sm font-bold font-sans">
+        <div className="p-4 flex items-center justify-between border-b border-border-subtle">
+          <div className="flex items-center gap-2 font-serif font-bold text-xl text-content-primary">
+            <div className="w-7 h-7 bg-content-primary rounded-md flex items-center justify-center text-content-inverse text-sm font-bold font-sans">
               r0
             </div>
             r0nix
           </div>
           <button
-            className="p-1 hover:bg-zinc-200 dark:hover:bg-zinc-800 rounded-md text-zinc-500 dark:text-zinc-400 transition-colors"
+            className="p-1 hover:bg-surface-hover rounded-md text-content-muted transition-colors"
             title={text.searchWorkspace}
             aria-label={text.searchWorkspace}
             onClick={onSearchWorkspace}
@@ -193,10 +194,10 @@ export function Sidebar({
           </div>
 
           <div className="px-3 mb-2 mt-6">
-            <div className="flex items-center justify-between text-xs font-serif font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-widest mb-2 px-2">
+            <div className="flex items-center justify-between text-xs font-serif font-semibold text-content-muted uppercase tracking-widest mb-2 px-2">
               <span>{text.collections}</span>
               <button
-                className="hover:text-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                className="hover:text-content-secondary transition-colors"
                 title={text.createCollection}
                 aria-label={text.createCollection}
                 onClick={onCreateCollection}
@@ -222,14 +223,14 @@ export function Sidebar({
                 );
               })
             ) : (
-              <div className="px-2 py-1.5 text-[12px] text-zinc-400 dark:text-zinc-500 italic">{text.noCollections}</div>
+              <div className="px-2 py-1.5 text-[12px] text-content-muted italic">{text.noCollections}</div>
             )}
           </div>
 
           <div className="px-3 mb-2 mt-6">
-            <div className="mb-2 flex items-center justify-between gap-2 px-2 text-xs font-serif font-semibold uppercase tracking-widest text-zinc-500 dark:text-zinc-400">
+            <div className="mb-2 flex items-center justify-between gap-2 px-2 text-xs font-serif font-semibold uppercase tracking-widest text-content-muted">
               <button
-                className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md py-1 text-left transition-colors hover:text-zinc-700 dark:hover:text-zinc-300"
+                className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md py-1 text-left transition-colors hover:text-content-secondary"
                 type="button"
                 aria-expanded={quickLinksOpen}
                 aria-label={text.quickLinks}
@@ -242,7 +243,7 @@ export function Sidebar({
                 <span className="truncate">{text.quickLinks}</span>
               </button>
               <button
-                className="shrink-0 rounded-md px-1 py-1 normal-case tracking-normal text-[11px] transition-colors hover:text-zinc-700 dark:hover:text-zinc-300"
+                className="shrink-0 rounded-md px-1 py-1 normal-case tracking-normal text-[11px] transition-colors hover:text-content-secondary"
                 title={text.manageQuickLinks}
                 aria-label={text.manageQuickLinks}
                 onClick={onManageQuickLinks}
@@ -261,7 +262,7 @@ export function Sidebar({
                   <NavItem key={item.id} icon={<Link2 size={16} />} label={item.title} onClick={() => onOpenQuickLink(item.url)} />
                 ))
               ) : (
-                <div className="px-2 py-1.5 text-[12px] text-zinc-400 dark:text-zinc-500 italic">{text.quickLinksHint}</div>
+                <div className="px-2 py-1.5 text-[12px] text-content-muted italic">{text.quickLinksHint}</div>
               )}
             </div>
           </div>
@@ -274,7 +275,7 @@ export function Sidebar({
           </div>
         </div>
 
-        <div className="p-3 border-t border-zinc-200 dark:border-zinc-800">
+        <div className="p-3 border-t border-border-subtle">
           <NavItem icon={<Settings size={16} />} label={text.settings} onClick={onOpenSettings} />
         </div>
       </div>
@@ -283,7 +284,7 @@ export function Sidebar({
 }
 
 function SectionTitle({ label }: { label: string }) {
-  return <div className="text-xs font-serif font-semibold text-zinc-500 dark:text-zinc-400 uppercase tracking-widest mb-2 px-2">{label}</div>;
+  return <div className="text-xs font-serif font-semibold text-content-muted uppercase tracking-widest mb-2 px-2">{label}</div>;
 }
 
 function NavItem({
@@ -309,8 +310,8 @@ function NavItem({
       onDoubleClick={onDoubleClick}
       className={`w-full flex items-center gap-3 px-2 py-1.5 rounded-md transition-colors text-left text-[13px] ${
         active
-          ? "text-zinc-900 dark:text-zinc-100 font-medium"
-          : "text-zinc-600 dark:text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800/50 hover:text-zinc-900 dark:hover:text-zinc-200 font-medium"
+          ? "text-content-primary font-medium"
+          : "text-content-secondary hover:bg-surface-hover/50 hover:text-content-primary font-medium"
       }`}
       style={active ? { backgroundColor: "var(--reader-accent-soft)" } : undefined}
       title={onDoubleClick ? pinHint : undefined}
@@ -318,7 +319,7 @@ function NavItem({
     >
       {icon}
       <span className="truncate flex-1">{label}</span>
-      {suffix ? <span className="text-[11px] text-zinc-400 dark:text-zinc-500">{suffix}</span> : null}
+      {suffix ? <span className="text-[11px] text-content-muted">{suffix}</span> : null}
     </button>
   );
 }

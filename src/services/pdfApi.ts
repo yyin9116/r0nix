@@ -9,7 +9,7 @@
 import * as rustPdf from './rustPdf';
 import { loadPdfDocument, getCachedDocument, closePdfDocument } from './pdfJsService';
 import { debugError, debugLog, debugWarn } from './debugLogger';
-import { readNativeTextFile, writeNativeTempFile, writeNativeTextFile } from './nativeFiles';
+import { isManagedImportTempPath, readNativeTextFile, removeManagedImportTemp, writeNativeTempFile, writeNativeTextFile } from './nativeFiles';
 import type { PdfReadingBlock, PdfReadingBlockKind, ReaderAnnotationRect } from '../types';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 
@@ -20,9 +20,17 @@ const isTauri =
 debugLog('api.adapter', 'initialized', { runtime: isTauri ? 'tauri' : 'browser' });
 
 const BROWSER_API_BASE = 'http://localhost:8000';
+const BROWSER_REQUEST_TIMEOUT_MS = 30_000;
 const browserLocalFiles = new Map<string, FileInfo>();
 const browserLocalMarkdown = new Map<string, string>();
 const nativeMarkdownPaths = new Map<string, string>();
+export const MAX_IMPORT_FILE_BYTES = 512 * 1024 * 1024;
+
+function assertImportFileSize(file: File) {
+  if (file.size > MAX_IMPORT_FILE_BYTES) {
+    throw new Error(`文件超过 ${Math.ceil(MAX_IMPORT_FILE_BYTES / 1024 / 1024)} MiB 限制，无法导入。`);
+  }
+}
 
 function cacheBrowserMarkdown(fileId: string, path: string, content: string) {
   browserLocalMarkdown.set(fileId, content);
@@ -69,9 +77,10 @@ function createExportCancellation(signal?: AbortSignal) {
   };
 }
 
-function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string, onTimeout?: () => void): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = window.setTimeout(() => {
+      onTimeout?.();
       reject(new Error(`${label} timed out after ${ms}ms`));
     }, ms);
 
@@ -121,9 +130,10 @@ async function uploadFileInBrowserLocal(file: File): Promise<FileInfo> {
     name: file.name,
     type: 'pdf',
     path: file.name,
-    meta: {
-      pages: doc.numPages,
-      size: `${(file.size / 1024 / 1024).toFixed(1)} MB`,
+      meta: {
+        pages: doc.numPages,
+        fileSize: file.size,
+        size: `${(file.size / 1024 / 1024).toFixed(1)} MB`,
     },
   };
   browserLocalFiles.set(fileId, info);
@@ -139,6 +149,7 @@ export interface FileInfo {
   path: string;
   meta: {
     pages?: number;
+    fileSize?: number;
     words?: number;
     readTime?: number;
     size?: string;
@@ -152,9 +163,26 @@ export interface PDFImageInfo {
   pageNumber: number;
   width: number;
   height: number;
+  pageWidth?: number;
+  pageHeight?: number;
   extension: string;
   bbox?: number[];
   source?: "xref" | "block" | "vector";
+}
+
+async function fetchBrowserRequest(input: RequestInfo | URL, init: RequestInit = {}, timeoutMs = BROWSER_REQUEST_TIMEOUT_MS): Promise<Response> {
+  const controller = new AbortController();
+  const parentSignal = init.signal;
+  const forwardAbort = () => controller.abort(parentSignal?.reason);
+  if (parentSignal?.aborted) forwardAbort();
+  else parentSignal?.addEventListener("abort", forwardAbort, { once: true });
+  const timer = window.setTimeout(() => controller.abort(new Error("Browser backend request timed out.")), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timer);
+    parentSignal?.removeEventListener("abort", forwardAbort);
+  }
 }
 
 export interface ExtractedPdfImage {
@@ -239,7 +267,17 @@ export async function openFile(path: string): Promise<FileInfo> {
     debugLog('api.openFile', 'rust open_pdf success', info);
     let pages = info.page_count;
     try {
-      const data = await withTimeout(rustPdf.readOpenedPdfBytes(info.file_id), 30000, 'Rust read_opened_pdf_bytes');
+      const requestId = generateRuntimeId("pdf-read");
+      const data = await withTimeout(
+        rustPdf.readOpenedPdfBytes(info.file_id, requestId),
+        30000,
+        'Rust read_opened_pdf_bytes',
+        () => {
+          void rustPdf.cancelPdfByteRead(requestId).catch((cancelError) => {
+            debugWarn('api.openFile', 'failed to cancel timed-out PDF byte read', cancelError);
+          });
+        },
+      );
       const doc = await loadPdfDocument(info.file_id, data);
       pages = doc.numPages;
       debugLog('api.openFile', 'pdfjs loaded', { pages });
@@ -261,12 +299,13 @@ export async function openFile(path: string): Promise<FileInfo> {
       path: info.path,
       meta: {
         pages: pages > 0 ? pages : undefined,
+        fileSize: info.file_size,
         size: `${(info.file_size / 1024 / 1024).toFixed(1)} MB`,
       },
     };
   } else {
     try {
-      const response = await fetch(`${BROWSER_API_BASE}/api/files/open`, {
+      const response = await fetchBrowserRequest(`${BROWSER_API_BASE}/api/files/open`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ path }),
@@ -309,7 +348,7 @@ export async function openMarkdownFile(path: string): Promise<FileInfo> {
     };
   }
 
-  const response = await fetch(`${BROWSER_API_BASE}/api/files/open`, {
+  const response = await fetchBrowserRequest(`${BROWSER_API_BASE}/api/files/open`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path }),
@@ -330,7 +369,7 @@ export async function readMarkdownText(path: string): Promise<string> {
     return localContent;
   }
 
-  const response = await fetch(`${BROWSER_API_BASE}/api/markdown/by-path`, {
+  const response = await fetchBrowserRequest(`${BROWSER_API_BASE}/api/markdown/by-path`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path }),
@@ -338,28 +377,41 @@ export async function readMarkdownText(path: string): Promise<string> {
   if (!response.ok) {
     throw new Error(`Failed to read markdown: ${response.statusText}`);
   }
-  const payload = (await response.json()) as { content?: string };
-  return payload.content || '';
+  const payload = (await response.json()) as unknown;
+  if (!payload || typeof payload !== "object" || typeof (payload as { content?: unknown }).content !== "string") {
+    throw new Error("Markdown service returned an invalid content payload.");
+  }
+  return (payload as { content: string }).content;
 }
 
 export async function uploadFile(file: File): Promise<FileInfo> {
+  assertImportFileSize(file);
   if (isTauri) {
     const ext = file.name.split('.').pop()?.toLowerCase();
     if (ext === 'md' || ext === 'markdown') {
       const content = await file.text();
       const tempPath = await writeNativeTempFile(file.name, new TextEncoder().encode(content));
-      return openMarkdownFile(tempPath);
+      try {
+        return await openMarkdownFile(tempPath);
+      } catch (error) {
+        await removeManagedImportTemp(tempPath).catch(() => undefined);
+        throw error;
+      }
     }
 
     const arrayBuffer = await file.arrayBuffer();
     const tempPath = await writeNativeTempFile(file.name, new Uint8Array(arrayBuffer));
-
-    return openFile(tempPath);
+    try {
+      return await openFile(tempPath);
+    } catch (error) {
+      await removeManagedImportTemp(tempPath).catch(() => undefined);
+      throw error;
+    }
   } else {
     const formData = new FormData();
     formData.append('file', file);
     try {
-      const response = await fetch(`${BROWSER_API_BASE}/api/files/upload`, {
+      const response = await fetchBrowserRequest(`${BROWSER_API_BASE}/api/files/upload`, {
         method: 'POST',
         body: formData,
       });
@@ -404,7 +456,7 @@ export async function listFiles(): Promise<{ files: FileInfo[] }> {
     return { files };
   } else {
     try {
-      const response = await fetch(`${BROWSER_API_BASE}/api/files`);
+      const response = await fetchBrowserRequest(`${BROWSER_API_BASE}/api/files`);
       if (!response.ok) {
         throw new Error(`Failed to list files: ${response.statusText}`);
       }
@@ -418,8 +470,12 @@ export async function listFiles(): Promise<{ files: FileInfo[] }> {
 
 export async function closeFile(fileId: string): Promise<{ success: boolean }> {
   if (isTauri) {
-    if (nativeMarkdownPaths.has(fileId)) {
+    const markdownPath = nativeMarkdownPaths.get(fileId);
+    if (markdownPath) {
       nativeMarkdownPaths.delete(fileId);
+      if (isManagedImportTempPath(markdownPath)) {
+        await removeManagedImportTemp(markdownPath).catch(() => undefined);
+      }
       return { success: true };
     }
     try {
@@ -439,7 +495,7 @@ export async function closeFile(fileId: string): Promise<{ success: boolean }> {
       await closePdfDocument(fileId);
       return { success: true };
     }
-    const response = await fetch(`${BROWSER_API_BASE}/api/files/${fileId}`, {
+    const response = await fetchBrowserRequest(`${BROWSER_API_BASE}/api/files/${fileId}`, {
       method: 'DELETE',
     });
     if (!response.ok) {
@@ -618,7 +674,7 @@ export async function getPDFInfo(fileId: string): Promise<{
         size: local.meta.size || 'Unknown',
       };
     }
-    const response = await fetch(`${BROWSER_API_BASE}/api/pdf/${fileId}/info`);
+    const response = await fetchBrowserRequest(`${BROWSER_API_BASE}/api/pdf/${fileId}/info`);
     if (!response.ok) {
       throw new Error(`Failed to get PDF info: ${response.statusText}`);
     }
@@ -665,35 +721,108 @@ export async function getPDFImages(
             if (!item || typeof item !== 'object') return null;
             const obj = item as Record<string, unknown>;
             const bboxRaw = obj.bbox;
-            const bbox =
-              Array.isArray(bboxRaw) && bboxRaw.length === 4
-                ? bboxRaw.map((v) => Number(v)).filter((v) => Number.isFinite(v))
-                : undefined;
+            const bbox = Array.isArray(bboxRaw) && bboxRaw.length === 4
+              ? bboxRaw.map((value) => Number(value))
+              : undefined;
+            const pageNumberValue = Number(obj.pageNumber);
+            const width = Number(obj.width);
+            const height = Number(obj.height);
+            const pageWidthValue = Number(obj.pageWidth);
+            const pageHeightValue = Number(obj.pageHeight);
+            const xref = Number(obj.xref);
+            const extension = typeof obj.extension === 'string' ? obj.extension.trim() : '';
+            const source = obj.source;
+
+            if (
+              !Number.isInteger(pageNumberValue) || pageNumberValue !== pageNumber ||
+              !Number.isFinite(width) || width <= 0 ||
+              !Number.isFinite(height) || height <= 0 ||
+              extension.length === 0 ||
+              !Array.isArray(bbox) || bbox.length !== 4 || !bbox.every(Number.isFinite) ||
+              (source !== 'xref' && source !== 'block' && source !== 'vector') ||
+              (source === 'xref' && (!Number.isInteger(xref) || xref < 1)) ||
+              (source !== 'xref' && (!Number.isInteger(xref) || xref < 0)) ||
+              (obj.pageWidth !== undefined && (!Number.isFinite(pageWidthValue) || pageWidthValue <= 0)) ||
+              (obj.pageHeight !== undefined && (!Number.isFinite(pageHeightValue) || pageHeightValue <= 0))
+            ) {
+              return null;
+            }
+
             return {
-              xref: Number(obj.xref) || 0,
-              pageNumber: Number(obj.pageNumber) || pageNumber,
-              width: Number(obj.width) || 0,
-              height: Number(obj.height) || 0,
-              extension: typeof obj.extension === 'string' ? obj.extension : '',
-              bbox: bbox && bbox.length === 4 ? bbox : undefined,
-              source: obj.source === "vector" ? "vector" : "xref",
+              xref,
+              pageNumber: pageNumberValue,
+              width,
+              height,
+              pageWidth: obj.pageWidth === undefined ? undefined : pageWidthValue,
+              pageHeight: obj.pageHeight === undefined ? undefined : pageHeightValue,
+              extension,
+              bbox,
+              source,
             };
           })
-          .filter((item): item is PDFImageInfo => Boolean(item))
+          .filter((item): item is PDFImageInfo => item !== null)
         : [];
       return { images };
     }
 
-    const response = await fetch(`http://localhost:8000/api/pdf/${fileId}/images`, { signal });
+    const response = await fetchBrowserRequest(`${BROWSER_API_BASE}/api/pdf/${fileId}/images`, { signal });
     if (!response.ok) {
       throw new Error(`Failed to get PDF images: ${response.statusText}`);
     }
 
-    const payload = (await response.json()) as { images?: PDFImageInfo[] };
-    const images = Array.isArray(payload.images) ? payload.images : [];
+    const payload = (await response.json()) as unknown;
+    const rawImages = payload && typeof payload === "object" && Array.isArray((payload as { images?: unknown }).images)
+      ? (payload as { images: unknown[] }).images
+      : [];
+    const images = rawImages
+      .map((item): PDFImageInfo | null => {
+        if (!item || typeof item !== "object") return null;
+        const obj = item as Record<string, unknown>;
+        const xref = Number(obj.xref);
+        const itemPage = Number(obj.pageNumber);
+        const width = Number(obj.width);
+        const height = Number(obj.height);
+        const pageWidth = obj.pageWidth === undefined ? undefined : Number(obj.pageWidth);
+        const pageHeight = obj.pageHeight === undefined ? undefined : Number(obj.pageHeight);
+        const extension = typeof obj.extension === "string" ? obj.extension.trim() : "";
+        const bbox = Array.isArray(obj.bbox) && obj.bbox.length === 4
+          ? obj.bbox.map((value) => Number(value))
+          : undefined;
+        const source = obj.source === "block" || obj.source === "vector" || obj.source === "xref"
+          ? obj.source
+          : xref > 0
+            ? "xref"
+            : undefined;
+        if (
+          !Number.isInteger(xref) || xref < 0 ||
+          !Number.isInteger(itemPage) || itemPage < 1 || (pageNumber !== undefined && itemPage !== pageNumber) ||
+          !Number.isFinite(width) || width <= 0 ||
+          !Number.isFinite(height) || height <= 0 ||
+          extension.length === 0 ||
+          (bbox !== undefined && (bbox.length !== 4 || !bbox.every(Number.isFinite))) ||
+          !source ||
+          (source === "xref" && xref < 1) ||
+          (pageWidth !== undefined && (!Number.isFinite(pageWidth) || pageWidth <= 0)) ||
+          (pageHeight !== undefined && (!Number.isFinite(pageHeight) || pageHeight <= 0))
+        ) {
+          return null;
+        }
+        return {
+          xref,
+          pageNumber: itemPage,
+          width,
+          height,
+          pageWidth,
+          pageHeight,
+          extension,
+          bbox,
+          source,
+        };
+      })
+      .filter((item): item is PDFImageInfo => item !== null);
     if (!pageNumber) return { images };
     return {
-      images: images.filter((img) => Number(img.pageNumber) === pageNumber),
+      images,
     };
   } finally {
     signal?.removeEventListener("abort", cancelNativeTask);
@@ -715,6 +844,9 @@ export async function getPDFReadingBlocks(
   const requestId = isTauri ? generateRuntimeId("pdf-blocks") : undefined;
   const cancelNativeTask = () => {
     if (!requestId) return;
+    void rustPdf.cancelPdfPageCount(requestId).catch((error) => {
+      debugWarn("api.getPDFReadingBlocks", "failed to cancel native page count", error);
+    });
     void rustPdf.cancelPdfReadingBlocks(requestId).catch((error) => {
       debugWarn("api.getPDFReadingBlocks", "failed to cancel native reading block task", error);
     });
@@ -722,7 +854,7 @@ export async function getPDFReadingBlocks(
   signal?.addEventListener("abort", cancelNativeTask, { once: true });
   if (isTauri) {
     try {
-      const total = await rustPdf.getPageCount(fileId);
+      const total = await rustPdf.getPageCount(fileId, requestId);
       throwIfAborted();
       const chunkSize = 24;
       const blocks: PdfReadingBlock[] = [];
@@ -758,51 +890,55 @@ export async function getPDFReadingBlocks(
     for (let pageNo = firstPage; pageNo <= lastPage; pageNo += 1) {
       throwIfAborted();
       const page = await doc.getPage(pageNo);
-      const viewport = page.getViewport({ scale: 1 });
-      const content = await page.getTextContent();
-      throwIfAborted();
-      const items = content.items as Array<Record<string, unknown>>;
-      const text = items
-        .map((item) => (typeof item.str === "string" ? item.str : ""))
-        .join(" ")
-        .replace(/\s+/g, " ")
-        .trim();
-      if (!text) continue;
+      try {
+        const viewport = page.getViewport({ scale: 1 });
+        const content = await page.getTextContent();
+        throwIfAborted();
+        const items = content.items as Array<Record<string, unknown>>;
+        const text = items
+          .map((item) => (typeof item.str === "string" ? item.str : ""))
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim();
+        if (!text) continue;
 
-      const rects = items
-        .map((item) => {
-          const transform = Array.isArray(item.transform) ? item.transform.map(Number) : [];
-          const x = Number(transform[4]);
-          const baseline = Number(transform[5]);
-          const width = Number(item.width);
-          const height = Number(item.height) || Math.abs(Number(transform[3]));
-          if (![x, baseline, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
-          return {
-            left: x,
-            top: viewport.height - baseline - height,
-            right: x + width,
-            bottom: viewport.height - baseline,
-          };
-        })
-        .filter((rect): rect is { left: number; top: number; right: number; bottom: number } => Boolean(rect));
-      const left = rects.length > 0 ? Math.max(0, Math.min(...rects.map((rect) => rect.left))) : 0;
-      const top = rects.length > 0 ? Math.max(0, Math.min(...rects.map((rect) => rect.top))) : 0;
-      const right = rects.length > 0 ? Math.min(viewport.width, Math.max(...rects.map((rect) => rect.right))) : viewport.width;
-      const bottom = rects.length > 0 ? Math.min(viewport.height, Math.max(...rects.map((rect) => rect.bottom))) : viewport.height;
-      blocks.push({
-        id: `pdfjs-${pageNo}-text`,
-        page: pageNo,
-        kind: "text",
-        text,
-        rect: {
-          x: left / Math.max(1, viewport.width),
-          y: top / Math.max(1, viewport.height),
-          width: Math.max(0.01, (right - left) / Math.max(1, viewport.width)),
-          height: Math.max(0.01, (bottom - top) / Math.max(1, viewport.height)),
-        },
-        source: "pdfjs-dom",
-      });
-      onProgress?.(pageNo, doc.numPages);
+        const rects = items
+          .map((item) => {
+            const transform = Array.isArray(item.transform) ? item.transform.map(Number) : [];
+            const x = Number(transform[4]);
+            const baseline = Number(transform[5]);
+            const width = Number(item.width);
+            const height = Number(item.height) || Math.abs(Number(transform[3]));
+            if (![x, baseline, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
+            return {
+              left: x,
+              top: viewport.height - baseline - height,
+              right: x + width,
+              bottom: viewport.height - baseline,
+            };
+          })
+          .filter((rect): rect is { left: number; top: number; right: number; bottom: number } => Boolean(rect));
+        const left = rects.length > 0 ? Math.max(0, Math.min(...rects.map((rect) => rect.left))) : 0;
+        const top = rects.length > 0 ? Math.max(0, Math.min(...rects.map((rect) => rect.top))) : 0;
+        const right = rects.length > 0 ? Math.min(viewport.width, Math.max(...rects.map((rect) => rect.right))) : viewport.width;
+        const bottom = rects.length > 0 ? Math.min(viewport.height, Math.max(...rects.map((rect) => rect.bottom))) : viewport.height;
+        blocks.push({
+          id: `pdfjs-${pageNo}-text`,
+          page: pageNo,
+          kind: "text",
+          text,
+          rect: {
+            x: left / Math.max(1, viewport.width),
+            y: top / Math.max(1, viewport.height),
+            width: Math.max(0.01, (right - left) / Math.max(1, viewport.width)),
+            height: Math.max(0.01, (bottom - top) / Math.max(1, viewport.height)),
+          },
+          source: "pdfjs-dom",
+        });
+        onProgress?.(pageNo, doc.numPages);
+      } finally {
+        page.cleanup();
+      }
     }
     return blocks;
   } finally {
@@ -822,7 +958,7 @@ export async function saveMarkdown(
     await writeNativeTextFile(path, content);
     return { success: true };
   }
-  const response = await fetch(`http://localhost:8000/api/markdown/${fileId}/save`, {
+  const response = await fetchBrowserRequest(`${BROWSER_API_BASE}/api/markdown/${fileId}/save`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content }),

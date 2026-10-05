@@ -2,11 +2,13 @@ export const PERSISTENCE_WARNING_EVENT = "r0nix:persistence-warning";
 
 export interface PersistenceWarning {
   key: string;
+  kind: "read" | "write";
   message: string;
   backupKey?: string;
 }
 
 const pendingWarnings: PersistenceWarning[] = [];
+const forwardIncompatibleKeys = new Set<string>();
 
 function emitWarning(warning: PersistenceWarning) {
   pendingWarnings.push(warning);
@@ -26,7 +28,18 @@ export function readVersionedLocalState<T>(
   sanitize: (raw: unknown) => T
 ): T {
   if (typeof window === "undefined") return fallback;
-  const raw = window.localStorage.getItem(key);
+  let raw: string | null;
+  try {
+    raw = window.localStorage.getItem(key);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    emitWarning({
+      key,
+      kind: "read",
+      message: `Local data for ${key} could not be accessed. The fallback value was preserved. ${reason}`,
+    });
+    return fallback;
+  }
   if (!raw) return fallback;
 
   try {
@@ -40,10 +53,13 @@ export function readVersionedLocalState<T>(
     if (hasEnvelope) {
       const storedVersion = (parsed as { version: number }).version;
       if (storedVersion > version) {
+        forwardIncompatibleKeys.add(key);
         emitWarning({
           key,
+          kind: "read",
           message: `Local data for ${key} was saved by a newer schema version (${storedVersion}).`,
         });
+        return fallback;
       }
     }
     const data = hasEnvelope ? (parsed as { data: unknown }).data : parsed;
@@ -59,6 +75,7 @@ export function readVersionedLocalState<T>(
     const reason = error instanceof Error ? error.message : String(error);
     emitWarning({
       key,
+      kind: "read",
       backupKey,
       message: `Local data for ${key} could not be read and was isolated. ${reason}`,
     });
@@ -68,12 +85,22 @@ export function readVersionedLocalState<T>(
 
 export function writeVersionedLocalState<T>(key: string, version: number, data: T): void {
   if (typeof window === "undefined") return;
-  window.localStorage.setItem(
-    key,
-    JSON.stringify({
-      version,
-      updatedAt: new Date().toISOString(),
-      data,
-    })
-  );
+  if (forwardIncompatibleKeys.has(key)) return;
+  try {
+    window.localStorage.setItem(
+      key,
+      JSON.stringify({
+        version,
+        updatedAt: new Date().toISOString(),
+        data,
+      })
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    emitWarning({
+      key,
+      kind: "write",
+      message: `Local data for ${key} could not be written. The previous value was preserved. ${reason}`,
+    });
+  }
 }

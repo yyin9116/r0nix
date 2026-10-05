@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { save } from "@tauri-apps/plugin-dialog";
 import { writeNativeBinaryFile, writeNativeTextFile } from "./nativeFiles";
 
 export interface PdfInfo {
@@ -48,16 +49,16 @@ export async function getPdfInfo(fileId: string): Promise<PdfInfo> {
   return await invoke<PdfInfo>('get_pdf_info', { fileId });
 }
 
-export async function getPageCount(fileId: string): Promise<number> {
-  return await invoke<number>('get_page_count', { fileId });
+export async function getPageCount(fileId: string, requestId?: string): Promise<number> {
+  return await invoke<number>('get_page_count', { fileId, requestId });
 }
 
 export async function listPdfs(): Promise<string[]> {
   return await invoke<string[]>('list_pdfs');
 }
 
-export async function readOpenedPdfBytes(fileId: string): Promise<Uint8Array> {
-  const raw = await invoke<unknown>('read_opened_pdf_bytes', { fileId });
+export async function readOpenedPdfBytes(fileId: string, requestId?: string): Promise<Uint8Array> {
+  const raw = await invoke<unknown>('read_opened_pdf_bytes', { fileId, requestId });
   if (raw instanceof Uint8Array) return raw;
   if (Array.isArray(raw)) return Uint8Array.from(raw as number[]);
   throw new Error('read_opened_pdf_bytes returned invalid payload');
@@ -92,6 +93,14 @@ export async function exportPagePng(
   requestId?: string,
 ): Promise<string> {
   return await invoke<string>("export_page_png", { fileId, pageNo, zoom, requestId });
+}
+
+export async function cancelPdfByteRead(requestId: string): Promise<void> {
+  await invoke('cancel_pdf_byte_read', { requestId });
+}
+
+export async function cancelPdfPageCount(requestId: string): Promise<void> {
+  await invoke('cancel_pdf_page_count', { requestId });
 }
 
 export async function extractPdfImage(
@@ -179,8 +188,6 @@ export async function saveBinaryToFile(
   defaultFilename: string,
   extensions: string[]
 ): Promise<void> {
-  const { save } = await import("@tauri-apps/plugin-dialog");
-
   const filePath = await save({
     defaultPath: defaultFilename,
     filters: [
@@ -200,8 +207,6 @@ export async function saveSvgToFile(
   svgContent: string,
   defaultFilename: string
 ): Promise<void> {
-  const { save } = await import('@tauri-apps/plugin-dialog');
-
   const filePath = await save({
     defaultPath: defaultFilename,
     filters: [

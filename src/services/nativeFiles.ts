@@ -30,6 +30,15 @@ export async function writeNativeTempFile(fileName: string, bytes: Uint8Array): 
   return invoke<string>("write_temp_file", { fileName, dataBase64: bytesToBase64(bytes) });
 }
 
+export async function removeManagedImportTemp(path: string): Promise<void> {
+  await invoke("remove_managed_import_temp", { path });
+}
+
+export function isManagedImportTempPath(path: string): boolean {
+  const fileName = path.split(/[\\/]/).pop() || "";
+  return /^r0nix-import-[^\\/]+\.(?:pdf|md|markdown)$/i.test(fileName);
+}
+
 export async function collectNativeImportablePaths(root: string): Promise<string[]> {
   return invoke<string[]>("collect_importable_paths", { root });
 }

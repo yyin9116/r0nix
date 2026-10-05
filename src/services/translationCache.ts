@@ -54,7 +54,10 @@ export function loadTranslationCache(kind: "pdf" | "markdown", documentId: strin
   if (!documentId.trim() || blocks.length === 0) return null;
   const all = readVersionedLocalState<Record<string, TranslationCacheEntry>>(STORAGE_KEY, STORAGE_VERSION, {}, (raw) => raw && typeof raw === "object" ? raw as Record<string, TranslationCacheEntry> : {});
   const entry = all[cacheKey(kind, documentId, config)];
-  if (!entry || entry.fingerprint !== fingerprint(blocks) || !Array.isArray(entry.results)) return null;
+  // A document edit must invalidate only changed blocks. The document
+  // fingerprint remains diagnostic; block identity and source text below are
+  // the authoritative reuse boundary.
+  if (!entry || !Array.isArray(entry.results)) return null;
   const blockById = new Map(blocks.map((block) => [block.id, block]));
   const results = entry.results
     .map(sanitizeResult)
