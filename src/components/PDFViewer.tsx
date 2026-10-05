@@ -58,7 +58,7 @@ import {
 } from"../services/readingAssistant";
 import { loadTranslationCache, saveTranslationCache } from"../services/translationCache";
 import { loadResourceIndex, saveResourceIndex } from"../services/resourceIndexCache";
-import { debugLog } from"../services/debugLogger";
+import { isPinchGesture, pinchZoomFactor } from"../services/pdfZoomGesture";
 import"./PDFViewer.css";
 import { PageCanvas } from"./pdfReader/PageCanvas";
 import { PageThumbnail } from"./pdfReader/PageThumbnail";
@@ -940,8 +940,8 @@ export function PDFViewer({
     scheduleRenderZoomCommit(settledZoom);
   }, [scheduleRenderZoomCommit]);
 
-  const smoothZoomBy = useCallback(
-    (delta: number, options?: { pageNo?: number; clientX?: number; clientY?: number }) => {
+  const applyZoomTarget = useCallback(
+    (nextZoom: number, options?: { pageNo?: number; clientX?: number; clientY?: number }) => {
       const anchorPage = clampPage(
         options?.pageNo ?? lockedZoomPageRef.current ?? lockedZoomPage ?? visiblePage,
         totalPages,
@@ -960,12 +960,34 @@ export function PDFViewer({
         setActivePages(nextActive);
       }
       captureZoomAnchor(anchorPage, options?.clientX, options?.clientY);
-      zoomTargetRef.current = clampZoomValue(zoomTargetRef.current + delta);
+      zoomTargetRef.current = clampZoomValue(nextZoom);
       zoomRenderReadyRef.current = false;
       scheduleRenderZoomCommit(zoomTargetRef.current);
       animateZoomToTarget();
     },
     [animateZoomToTarget, captureZoomAnchor, lockedZoomPage, scheduleRenderZoomCommit, totalPages, visiblePage],
+  );
+
+  /** 滚轮 / 按钮：离散的一步，用增量（zoom + delta）。 */
+  const smoothZoomBy = useCallback(
+    (delta: number, options?: { pageNo?: number; clientX?: number; clientY?: number }) => {
+      applyZoomTarget(zoomTargetRef.current + delta, options);
+    },
+    [applyZoomTarget],
+  );
+
+  /**
+   * 捏合：连续的位移，用倍率（zoom × factor）。
+   *
+   * 一次捏合会派发几十个事件，每个事件的 deltaY 都很小。若按增量理解，
+   * 每个事件至少 +7%（WHEEL_ZOOM_MIN_STEP 兜底），一次手势就翻倍 ——
+   * 实测单窗口 13~15 个事件，正是这样爆掉的。倍率没有这个问题。
+   */
+  const smoothZoomByFactor = useCallback(
+    (factor: number, options?: { pageNo?: number; clientX?: number; clientY?: number }) => {
+      applyZoomTarget(zoomTargetRef.current * factor, options);
+    },
+    [applyZoomTarget],
   );
 
   // ★ wheel 必须走原生 non-passive 监听 —— 不能沿用 React 的 onWheel prop。
@@ -976,50 +998,28 @@ export function PDFViewer({
   isGestureRightDownRef.current = isGestureRightDown;
   const smoothZoomByRef = useRef(smoothZoomBy);
   smoothZoomByRef.current = smoothZoomBy;
+  const smoothZoomByFactorRef = useRef(smoothZoomByFactor);
+  smoothZoomByFactorRef.current = smoothZoomByFactor;
 
   useEffect(() => {
     const root = scrollRef.current;
     if (!root) return;
 
-    // ---- 捏合探测窗口（临时代码，结论出来即拆）----
-    // 要回答的唯一问题：macOS 触控板捏合在 WKWebView 里到底派不派发 wheel 事件。
-    // 「没有日志」有两种可能：事件没来 / 监听压根没挂上。后者会被误判成前者，
-    // 所以窗口必须连普通滚动一起统计 —— total > 0 证明监听是活的，
-    // ctrl > 0 才证明捏合真的以 wheel + ctrlKey 的形态到达。
-    let total = 0;
-    let ctrl = 0;
-    let maxAbs = 0;
-    let mode = -1;
-    let flush = 0;
-    let timer: number | null = null;
-
-    const flushProbe = () => {
-      timer = null;
-      if (total === 0) return;
-      flush += 1;
-      // 常态只打前 3 个窗口（证明监听活着），一旦出现捏合就每次都打。
-      if (ctrl > 0 || flush <= 3) {
-        debugLog("wheel.probe", "window", {
-          total,
-          ctrl,
-          maxAbsDeltaY: Math.round(maxAbs * 10) / 10,
-          deltaMode: mode,
-        });
-      }
-      total = 0;
-      ctrl = 0;
-      maxAbs = 0;
-      mode = -1;
-    };
-
     const onWheel = (event: WheelEvent) => {
-      total += 1;
-      if (event.ctrlKey || event.metaKey) ctrl += 1;
-      maxAbs = Math.max(maxAbs, Math.abs(event.deltaY));
-      mode = Math.max(mode, event.deltaMode);
-      if (timer === null) timer = window.setTimeout(flushProbe, 500);
+      // 触控板捏合：WebKit / Chromium 把它合成为 wheel + ctrlKey。
+      // 实测（WKWebView）：100% 带 ctrlKey，deltaMode 恒为 0，|deltaY| 只有 3~14。
+      // 必须 preventDefault —— 否则 WKWebView 会顺手做一次原生页面放大，
+      // 整个界面（含工具栏、侧栏）跟着一起变形并变模糊。
+      if (isPinchGesture(event)) {
+        event.preventDefault();
+        smoothZoomByFactorRef.current(pinchZoomFactor(event.deltaY, event.deltaMode), {
+          clientX: event.clientX,
+          clientY: event.clientY,
+        });
+        return;
+      }
 
-      // 既有行为不变：只有右键手势才缩放。捏合此刻仍不缩放 —— 先取证再动手。
+      // 既有行为：只有右键手势才用滚轮缩放。
       if (!isGestureRightDownRef.current) return;
       event.preventDefault();
       const wheelMagnitude = Math.max(
@@ -1031,10 +1031,7 @@ export function PDFViewer({
     };
 
     root.addEventListener("wheel", onWheel, { passive: false });
-    return () => {
-      root.removeEventListener("wheel", onWheel);
-      if (timer !== null) window.clearTimeout(timer);
-    };
+    return () => root.removeEventListener("wheel", onWheel);
   }, []);
 
   const scheduleSync = useCallback(() => {
