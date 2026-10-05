@@ -29,7 +29,8 @@
 | §3.6 设置字段 | ✅ **已完成** | `userSettings.ts` 4 个必填字段 + `USER_SETTINGS_VERSION` 3 → 4 |
 | §3.4 密度档位 `deriveIntensity` | ✅ **已完成** | 同上模块，单测含 26244 条单调性样本 |
 | §3.4 行为信号**采集**（dwell / revisits） | ⬜ **未做** | 类型 `CompanionDwellSample` 已定义，采集端（PageCanvas 的可见性观测）未接 |
-| §3.5 / §3.6 / §5 气泡 + §6 LLM 契约 | ⬜ **未做** | 仍是本单的施工内容 |
+| §6 `suggestReadingCompanion` + 解析降级 | ✅ **已完成** | `readingAssistant.ts` 走既有 `requestChatCompletionText`；纯逻辑（prompt + 解析）在 **`src/services/companionSuggestion.ts`**，见 §6 下的偏离说明 |
+| §5 气泡三态 | ⬜ **未做** | 仍是本单的施工内容 |
 
 ### ⚠️ 与原方案的一处主动偏离 —— 不要改回去
 
@@ -353,6 +354,33 @@ export function deriveIntensity(stats: CompanionLearningStats): CompanionIntensi
 
 ---
 
+### ⚠️ 与 §6 的一处主动偏离 —— 位置分成了两个文件
+
+§6 原本写「位置：`src/services/readingAssistant.ts`」。落地时分成两处：
+
+| 职责 | 位置 | 理由 |
+|---|---|---|
+| 网络调用 `suggestReadingCompanion` | `src/services/readingAssistant.ts` | 复用既有通道 |
+| prompt 构造 + 响应解析（纯逻辑） | **`src/services/companionSuggestion.ts`** | 见下 |
+
+**拆出来的理由是可测性边界**：`readingAssistant.ts` import 了 `@tauri-apps/api/core`，
+`node --experimental-strip-types` 加载不了它，于是写在里面的任何逻辑都只能靠
+`readFileSync` + `includes` 的字符串断言兜住 —— 而「模型返回垃圾时会不会崩」
+恰恰是最需要**行为断言**的地方（§6 解析纪律第 1 条）。
+`companionSuggestion.ts` 零本地 value import，可被 node 直接加载并单测。
+
+另外，`postChatCompletion` 对结构化响应**不适用**：它的 `parseAssistantResponse`
+只认 `answer` / `content` / `choices`，遇到 `{"blockId": …}` 会直接抛错
+「没有 answer/content/choices 字段」。所以取原文走 `requestChatCompletionText`
+（该函数为此新增了 `export`），再自己解析。超时 / abort / 响应体上限 / HTML 误判
+仍然全部复用既有实现，**没有另写一份 fetch**。
+
+失败降级的一个细节：网络错误 / 超时 / 模型不可用一律返回 `[]`（本页不提示），
+但**调用方主动取消（`signal.aborted`）仍会往上抛** ——
+吞掉取消会让调用方在已取消的请求上继续 setState。
+
+---
+
 ## 6. 候选提示的 LLM 契约
 
 - 位置：`src/services/readingAssistant.ts`，新增 `suggestReadingCompanion()`
@@ -533,7 +561,7 @@ if (false && target) {          // ← 永远不会执行
 | 2 | ✅ 已抽 `services/readerAnnotations.ts` + 2 条单测（wavy / origin 存活） | ✅ 已过。单测绿；3 个变异测试全部会红 |
 | 3 | §3.5 否定集合 + 「删标注同时写否定」+ §3.6 设置字段 | ✅ 已过。`deriveIntensity` 与其单测一并提前落地（原属批次 4）；7 个变异测试全部会红 |
 | 4 | §3.4 本地信号采集（dwell / revisits 观测端） | 单测覆盖四档边界 + 单调性（档位部分已完成，采集端待做） |
-| 5 | §6 `suggestReadingCompanion` + 解析降级 | 用错格式的假响应验证「本页不提示」而不抛错 |
+| 5 | §6 `suggestReadingCompanion` + 解析降级 | ✅ 已过。29 组畸形输入的解析降级全部不抛错；3 个变异测试全部会红 |
 | 6 | §5 气泡三态 + ~~§8 钳制修复~~（§8 已完成） | 视觉核验 + 靠近下缘时的翻转行为 |
 | 7 | §9 守卫 + 变异测试 | 每条守卫都证明过会红；#3 / #4 与「删标注写否定」已提前落地 |
 

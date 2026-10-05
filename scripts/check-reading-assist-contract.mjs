@@ -9,6 +9,7 @@ const viewer = readerView();
 const app = view(readFileSync("src/App.tsx", "utf8"));
 const viewerCss = view(readFileSync("src/components/PDFViewer.css", "utf8"));
 const service = view(readFileSync("src/services/readingAssistant.ts", "utf8"));
+const serviceRaw = readFileSync("src/services/readingAssistant.ts", "utf8");
 const settings = view(readFileSync("src/components/Settings.tsx", "utf8"));
 // 批注水合已从 App.tsx 抽到独立模块（既可单测，也让 App.tsx 不再承担数据契约）。
 const annotations = view(readFileSync("src/services/readerAnnotations.ts", "utf8"));
@@ -108,6 +109,31 @@ assert(
 assert(
   companion.includes("export function dismissalForRemovedAnnotation"),
   "the dismissal decision must live in services/readingCompanion.ts where it is covered by behaviour tests."
+);
+
+// ── 伴读候选提示（§6）：不得另开网络通道，解析必须在纯逻辑层 ──
+// 「不新增 Rust 命令、不另写一份 fetch + 超时 + 截断」的可验证代理：
+// suggestReadingCompanion 的函数体内不许出现自己的 fetch / invoke，
+// 它只能走既有的 requestChatCompletionText。
+const suggMarker = "export async function suggestReadingCompanion";
+const suggStart = serviceRaw.indexOf(suggMarker);
+assert(suggStart >= 0, "readingAssistant.ts must export suggestReadingCompanion.");
+const suggBody = serviceRaw.slice(suggStart);
+assert(
+  !suggBody.includes("fetch(") && !suggBody.includes("invoke("),
+  "companion suggestions must reuse the existing LLM channel, not open a second network path."
+);
+assert(
+  suggBody.includes("requestChatCompletionText") &&
+    suggBody.includes("parseCompanionSuggestions") &&
+    suggBody.includes("limitCompanionSuggestions"),
+  "companion suggestions must go through the shared request helper and the tested parser."
+);
+// 解析不放 readingAssistant.ts 是因为那里 import 了 @tauri-apps/api，node 加载不了，
+// 于是解析只能靠字符串断言 —— 而「模型返回垃圾时会不会崩」最需要行为断言。
+assert(
+  serviceRaw.includes('from "./companionSuggestion"'),
+  "companion suggestion parsing must live in services/companionSuggestion.ts where it can be unit tested."
 );
 
 console.log("reading-assist-contract: ok");

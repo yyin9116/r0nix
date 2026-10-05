@@ -1,5 +1,12 @@
 import { normalizeHttpUrl } from "./urlPolicy";
 import type { PdfReadingBlock } from "../types";
+import type { CompanionIntensity } from "./readingCompanion";
+import {
+  buildCompanionSuggestionMessages,
+  limitCompanionSuggestions,
+  parseCompanionSuggestions,
+  type CompanionSuggestion,
+} from "./companionSuggestion";
 import { invoke } from "@tauri-apps/api/core";
 
 export const READING_ASSIST_MAX_EXCERPT_CHARS = 6000;
@@ -229,7 +236,16 @@ async function postChatCompletion(
   }
 }
 
-async function requestChatCompletionText(
+/**
+ * 取模型返回的**原文**，不做 JSON 解析。
+ *
+ * ⚠️ 新增 `export` 是为了结构化响应（伴读候选提示）：`postChatCompletion` 里的
+ * `parseAssistantResponse` 只认 answer/content/choices，遇到 `{"blockId": …}` 这种
+ * 自定义结构会直接抛错。需要自定义结构时走这里，再自己解析。
+ *
+ * 调用方仍然共用同一套超时 / abort / 响应体上限 / HTML 误判 —— 不要另写一份 fetch。
+ */
+export async function requestChatCompletionText(
   config: Required<LlmServiceConfig>,
   messages: Array<{ role: "system" | "user"; content: string }>,
   signal?: AbortSignal,
@@ -447,4 +463,58 @@ export async function translateReadingBlock(request: TranslateSingleBlockRequest
     signal: request.signal,
   });
   return { block: request.block, translation: result.answer };
+}
+
+export interface CompanionSuggestionRequest {
+  config: LlmServiceConfig;
+  documentTitle: string;
+  page: number;
+  /** 本页文本块。整体长度受 READING_ASSIST_MAX_EXCERPT_CHARS 约束。 */
+  blocks: PdfReadingBlock[];
+  intensity: CompanionIntensity;
+  signal?: AbortSignal;
+}
+
+/** 伴读输出很短（一条疑问 + 两句预览 + 一句理由），给一个紧一点的上限即可。 */
+const COMPANION_SUGGESTION_MAX_TOKENS = 600;
+
+/**
+ * 向模型要本页的伴读候选提示。
+ *
+ * **不要新增 Rust 命令** —— 走的是既有的 `llm_chat_completion`，
+ * 超时 / abort / 响应体上限 / HTML 误判全部复用 `requestChatCompletionText`。
+ *
+ * 失败一律**降级为「本页不提示」而不是抛错**：伴读是锦上添花的功能，
+ * 它不该有能力让整个阅读器中断。唯一例外是调用方主动取消 ——
+ * 那种情况要让调用方知道，否则它会在已取消的请求上继续 setState。
+ * 解析纪律见 `services/companionSuggestion.ts`。
+ */
+export async function suggestReadingCompanion(
+  request: CompanionSuggestionRequest
+): Promise<CompanionSuggestion[]> {
+  if (request.blocks.length === 0) return [];
+  const config = configFromRequest({ config: request.config });
+  if (!isModelEndpointConfigured(config)) return [];
+
+  const messages = buildCompanionSuggestionMessages({
+    documentTitle: request.documentTitle,
+    page: request.page,
+    blocks: request.blocks,
+    intensity: request.intensity,
+    maxExcerptChars: READING_ASSIST_MAX_EXCERPT_CHARS,
+  });
+
+  let text: string;
+  try {
+    text = await requestChatCompletionText(config, messages, request.signal, {
+      maxTokens: COMPANION_SUGGESTION_MAX_TOKENS,
+      timeoutMs: READING_ASSIST_TIMEOUT_MS,
+    });
+  } catch (error) {
+    if (request.signal?.aborted) throw error;
+    // 网络错误 / 超时 / 模型不可用 —— 都当作「本页不提示」。
+    return [];
+  }
+
+  return limitCompanionSuggestions(parseCompanionSuggestions(text, request.blocks));
 }
