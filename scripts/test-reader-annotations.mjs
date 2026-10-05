@@ -43,8 +43,14 @@ function annotation(overrides = {}) {
   };
 }
 
-// 1) 白名单的四个 kind 全部必须存活。
-assert.deepEqual([...KNOWN_ANNOTATION_KINDS].sort(), ["highlight", "strike", "text", "underline"]);
+// 1) 白名单必须包含全部 kind —— 含 AI-only 的 `wavy`。
+//    注意：这份清单在源码里由 `Record<ReaderAnnotationKind, true>` 穷举表派生，
+//    因此「往类型里加了 kind 却没同步白名单」是 tsc 的 TS2741（编译错误），
+//    而不是运行时才发现。下面这条断言钉的是**清单内容**，防的是被无意拓宽。
+assert.deepEqual(
+  [...KNOWN_ANNOTATION_KINDS].sort(),
+  ["highlight", "strike", "text", "underline", "wavy"]
+);
 for (const kind of KNOWN_ANNOTATION_KINDS) {
   assert.ok(isKnownAnnotationKind(kind), `${kind} 必须被认作已知 kind`);
   const out = sanitizeStoredAnnotations({ doc: [annotation({ kind })] });
@@ -52,23 +58,37 @@ for (const kind of KNOWN_ANNOTATION_KINDS) {
   assert.equal(out.doc[0].kind, kind);
 }
 
-// 2) 未知 kind 被**静默丢弃** —— 这是加新 kind 时最贵的坑：
-//    标注写进去了、刷新后没了，症状与「保存失败」无法区分。
-//    加 `wavy` 而忘了同步白名单时，这条断言会红。
-assert.ok(!isKnownAnnotationKind("wavy"));
+// 1b) ★ 施工单 §9 的强证据之一：`wavy` 必须**存活**。
+//     它是 AI-only 的标注；一旦在这条链路上被丢掉，症状是
+//     「AI 划完标了、刷新就没了」，与「保存失败」无法区分。
+const wavy = sanitizeStoredAnnotations({ doc: [annotation({ kind: "wavy" })] }).doc;
+assert.equal(wavy.length, 1, "wavy 标注必须能通过水合，不能被静默丢弃");
+assert.equal(wavy[0].kind, "wavy");
+
+// 2) 真正未知的 kind 仍然必须被**静默丢弃**（不抛错、也不原样带出）。
+//    这里刻意**不再用** `wavy` 当样本 —— 它现在是合法 kind。
+assert.equal(isKnownAnnotationKind("squiggle"), false);
 assert.equal(isKnownAnnotationKind(undefined), false);
 assert.equal(isKnownAnnotationKind(7), false);
-assert.deepEqual(sanitizeStoredAnnotations({ doc: [annotation({ kind: "wavy" })] }), { doc: [] });
+assert.deepEqual(sanitizeStoredAnnotations({ doc: [annotation({ kind: "squiggle" })] }), { doc: [] });
 
-// 3) 逐字段重建会吞掉任何未列出的字段。这是「origin 存活」那条需求的机械依据：
-//    不改这里，AI 标注的来源标记永远读不回来。
+// 3) ★ 施工单 §9 的强证据之二：`origin` 必须**存活**。
+//    这里也是「tsc 抓不到」的接触点：返回对象逐字段构造，漏列就静默吞掉。
 const withOrigin = sanitizeStoredAnnotations({ doc: [annotation({ origin: "ai", strength: "medium" })] }).doc[0];
-assert.equal("origin" in withOrigin, false);
-assert.equal("strength" in withOrigin, false);
+assert.equal(withOrigin.origin, "ai", "origin 必须存活，否则 AI 标注在刷新后被当成人工标注");
+assert.equal("strength" in withOrigin, false, "未定义的字段仍必须被丢掉（重建不能退化成浅拷贝）");
 assert.deepEqual(
   Object.keys(withOrigin).sort(),
-  ["blockId", "content", "createdAt", "documentId", "id", "kind", "page", "rect"]
+  ["blockId", "content", "createdAt", "documentId", "id", "kind", "origin", "page", "rect"]
 );
+
+// 3b) origin 缺省必须归一到 "manual"，而不是留 undefined。
+//     老数据没有这个字段，把它们一律当成人工标注，
+//     「被删掉的不再重生」才能从第一天就成立。
+const defaultedOrigins = sanitizeStoredAnnotations({
+  doc: [annotation({ id: "no-origin" }), annotation({ id: "bogus-origin", origin: "robot" })],
+}).doc;
+assert.deepEqual(defaultedOrigins.map((item) => item.origin), ["manual", "manual"]);
 
 // 4) localStorage 里存的是 JSON —— 断言必须走一遍真实的序列化往返。
 const stored = {

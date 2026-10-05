@@ -81,7 +81,15 @@ export interface ReaderNote {
   createdAt: string;
 }
 
-export type ReaderAnnotationKind = "highlight" | "underline" | "strike" | "text";
+/**
+ * `wavy` 是 **AI-only** 的标注：它表示「AI 判断这里可能难懂，可在此唤出伴读」。
+ * 它刻意**不在 `ToolType` 里** —— 用户不能手动画波浪线，否则「形状承载语义」这条
+ * 就退化成「比谁手快」。见 docs/design-system.md §11.8。
+ *
+ * ⚠️ 波浪线在 Word / 浏览器里的通用含义是「这里有问题」，不是「这里难懂」。
+ * 消歧**只能靠「波浪线旁必有伴读锚点」**，所以锚点不是装饰，是语义的一部分。
+ */
+export type ReaderAnnotationKind = "highlight" | "underline" | "strike" | "text" | "wavy";
 
 export interface ReaderAnnotationRect {
   x: number;
@@ -99,6 +107,12 @@ export interface ReaderAnnotation {
   rect: ReaderAnnotationRect;
   content?: string;
   createdAt: string;
+  /**
+   * `"ai"` = 由自动标注写入；缺省视为 `"manual"`。
+   * 缺省即 manual 是有意的：老用户机器上已有的标注没有这个字段，
+   * 把它们一律当成人工标注，才能让「被删掉的不重生」从第一天就成立。
+   */
+  origin?: "manual" | "ai";
 }
 
 export type PdfReadingBlockKind =

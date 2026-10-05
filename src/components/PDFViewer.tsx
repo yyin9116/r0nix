@@ -227,8 +227,9 @@ export function PDFViewer({
       underline: t.underline,
       strike: t.strikethrough,
       text: t.addText,
+      wavy: t.wavy,
     }),
-    [t.addText, t.highlight, t.strikethrough, t.underline],
+    [t.addText, t.highlight, t.strikethrough, t.underline, t.wavy],
   );
   const gestureStartRef = useRef<{ x: number; y: number } | null>(null);
   const rightDragRef = useRef<{ active: boolean; moved: boolean; pointerId: number | null; pageNo: number | null }>({

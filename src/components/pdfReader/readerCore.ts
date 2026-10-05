@@ -19,7 +19,9 @@ import { groupPdfTextHighlightRects } from "../../services/pdfBlocks";
 import type { CachedResourceLink } from "../../services/resourceIndexCache";
 
 export type SidebarTab ="outline" |"thumbs";
-export type ToolType ="select" |"hand" |"highlight" |"underline" |"strike" |"text";
+/** 用户能主动绘制的标注工具 —— 是 ReaderAnnotationKind 去掉 AI-only 的 `wavy`。 */
+export type ReaderAnnotationTool = Exclude<ReaderAnnotationKind, "wavy">;
+export type ToolType ="select" |"hand" | ReaderAnnotationTool;
 
 export type PageSize = {
   width: number;
@@ -34,7 +36,8 @@ export function imageTargetKey(target: ImageContextTarget | null | undefined) {
 
 export type DraftAnnotation = {
   page: number;
-  kind: ReaderAnnotationKind;
+  /** 草稿只可能由用户主动绘制 —— 因此是 ReaderAnnotationTool，不含 AI-only 的 `wavy`。 */
+  kind: ReaderAnnotationTool;
   startX: number;
   startY: number;
   currentX: number;
@@ -183,6 +186,7 @@ export const I18N = {
     highlight:"高亮",
     underline:"下划线",
     strikethrough:"删除线",
+    wavy:"波浪线",
     addText:"文本批注",
     zoomOut:"缩小",
     zoomIn:"放大",
@@ -284,6 +288,7 @@ export const I18N = {
     highlight:"Highlight",
     underline:"Underline",
     strikethrough:"Strikethrough",
+    wavy:"Wavy",
     addText:"Text Note",
     zoomOut:"Zoom out",
     zoomIn:"Zoom in",
@@ -658,7 +663,7 @@ export function equalSet(left: Set<number>, right: Set<number>) {
   return true;
 }
 
-export function isAnnotationTool(tool: ToolType): tool is ReaderAnnotationKind {
+export function isAnnotationTool(tool: ToolType): tool is ReaderAnnotationTool {
   return tool ==="highlight" || tool ==="underline" || tool ==="strike" || tool ==="text";
 }
 
@@ -713,6 +718,13 @@ export function createTextRect(x: number, y: number) {
   };
 }
 
+/**
+ * 波浪线的波形标记。SVG data URI 而非 border：需要波形，直线画不出「波浪」。
+ * 颜色写死 #b91c1c 的理由见下面 case"wavy" 的注释（纸面不随主题反色）。
+ */
+const WAVY_MARKER_IMAGE =
+  "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='6'><path d='M0 4.5 Q 3 1 6 4.5 T 12 4.5' fill='none' stroke='%23b91c1c' stroke-width='1.6' stroke-linecap='round'/></svg>\")";
+
 export function getAnnotationBadgeStyle(kind: ReaderAnnotationKind): CSSProperties {
   switch (kind) {
     case"highlight":
@@ -723,6 +735,11 @@ export function getAnnotationBadgeStyle(kind: ReaderAnnotationKind): CSSProperti
       return { backgroundColor:"rgba(220, 38, 38, 0.12)", color:"#b91c1c" };
     case"text":
       return { backgroundColor:"var(--reader-accent-soft)", color:"var(--reader-accent)" };
+    case"wavy":
+      // 波浪线是 **AI 划的**，不是用户划的。用「虚线描边」而不是实心底色，
+      // 是为了与实心的 strike 区分：形状承载语义（这是 AI 的推测），
+      // 颜色只承载强度。见 docs/design-system.md §11.8。
+      return { backgroundColor:"transparent", color:"#b91c1c", border:"1px dashed rgba(185, 28, 28, 0.55)" };
   }
 }
 
@@ -767,11 +784,23 @@ export function getAnnotationOverlayStyle(annotation: ReaderAnnotation, selected
         border:"1px solid rgba(255,255,255,0.14)",
         color:"#ffffff",
       };
+    case"wavy":
+      // 波浪线【刻意】在两主题下都是同一个 #b91c1c，理由与上面的 case"text" 相同：
+      // 它落在 PDF 纸面上，而纸面不随 UI 主题反色（见 tokens.css 的 --surface-paper）。
+      // 这里用 SVG data URI 而不是 border —— 需要的是「波形」，直线做不到。
+      return {
+        ...base,
+        backgroundImage: WAVY_MARKER_IMAGE,
+        backgroundRepeat:"repeat-x",
+        backgroundPosition:"left bottom",
+        backgroundSize:"12px 6px",
+        pointerEvents:"none",
+      };
   }
 }
 
 export function getDraftOverlayStyle(
-  kind: ReaderAnnotationKind,
+  kind: ReaderAnnotationTool,
   rect: { x: number; y: number; width: number; height: number },
 ): CSSProperties {
   const draftAnnotation: ReaderAnnotation = {

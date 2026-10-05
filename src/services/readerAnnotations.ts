@@ -37,6 +37,7 @@ const ANNOTATION_KIND_COVERAGE: Record<ReaderAnnotationKind, true> = {
   underline: true,
   strike: true,
   text: true,
+  wavy: true,
 };
 
 export const KNOWN_ANNOTATION_KINDS: readonly ReaderAnnotationKind[] = Object.keys(
@@ -89,6 +90,12 @@ export function sanitizeStoredAnnotations(raw: unknown): Record<string, ReaderAn
           content: typeof item.content === "string" ? item.content : undefined,
           createdAt:
             typeof item.createdAt === "string" && item.createdAt ? item.createdAt : new Date().toISOString(),
+          /**
+           * ⚠️ 本模块第二个「tsc 抓不到」的接触点：返回对象是**逐字段构造**的，
+           * 漏掉 `origin` 不会报错，只会「写进去了、读不回来」。
+           * 缺省归一到 `"manual"` 而不是留 `undefined`，理由见 types.ts 的字段注释。
+           */
+          origin: item.origin === "ai" ? "ai" : "manual",
         };
       })
       .filter((item): item is ReaderAnnotation => Boolean(item))
