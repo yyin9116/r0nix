@@ -2146,6 +2146,7 @@ export default function App() {
                 fileId={activeTab.fileId}
                 language={settings.language}
                 companionEnabled={settings.companionEnabled}
+                companionIntensity={settings.companionIntensity}
                 notes={activeNotes}
                 annotations={activeAnnotations}
                 onOpenFileDialog={() => {

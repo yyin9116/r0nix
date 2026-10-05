@@ -46,8 +46,10 @@ import type { PDFImageInfo } from"../services/pdfApi";
 import { ContextMenu, buildViewerContextActions } from"./ContextMenu";
 import { ReadingAssistMenu, type ReadingAssistSelection } from"./ReadingAssistMenu";
 import { useCompanionDwell } from "./pdfReader/useCompanionDwell";
-import { isBlockDismissed, loadDismissedBlocks } from "../services/readingCompanion";
+import { isBlockDismissed, loadDismissedBlocks, dismissCompanionBlock, type CompanionIntensity } from "../services/readingCompanion";
+import { pickSuggestionForBlock, type CompanionSuggestion } from "../services/companionSuggestion";
 import {
+  suggestReadingCompanion,
   translateReadingBlock,
   translateReadingBlocks,
   translateReadingSelection,
@@ -135,6 +137,11 @@ interface PDFViewerProps {
   aiModelConfig: LlmServiceConfig;
   /** 伴读总开关（settings.companionEnabled）。关闭时采集端不注册任何监听。 */
   companionEnabled?: boolean;
+  /**
+   * 密度档位（settings.companionIntensity）。`off` 档下**连停留采集都不启动** ——
+   * 采集了又不提示，等于白跑一个计时器。
+   */
+  companionIntensity?: CompanionIntensity;
 }
 
 export function PDFViewer({
@@ -159,6 +166,7 @@ export function PDFViewer({
   aiModelConfig,
   documentFileSize,
   companionEnabled = false,
+  companionIntensity = "medium",
 }: PDFViewerProps) {
   const [zoom, setZoom] = useState(() => clampZoomValue(initialViewState?.zoom ?? 100));
   const [renderZoom, setRenderZoom] = useState(() => clampZoomValue(initialViewState?.zoom ?? 100));
@@ -282,14 +290,57 @@ export function PDFViewer({
   const readingBlocksByPageRef = useRef<Map<number, PdfReadingBlock[]>>(new Map());
   /** 伴读触发的辅助气泡要以内联浮层呈现，与「划词后的面板」区分开。 */
   const [assistFromCompanion, setAssistFromCompanion] = useState(false);
+  /** 模型给的伴读提示。null = 本轮不提示（见 ReadingAssistMenu 的 companion 注释）。 */
+  const [companionSuggestion, setCompanionSuggestion] = useState<CompanionSuggestion | null>(null);
+  const [companionPending, setCompanionPending] = useState(false);
+  const companionAbortRef = useRef<AbortController | null>(null);
+
   /**
-   * 伴读采集端：停留 2.5s 后对当前焦点块打开辅助气泡。
+   * 向模型要「这一块该怎么问」，并把结果筛到停留块上。
+   *
+   * **三种失败形态在 UI 上完全一致**：不显示提示卡，气泡退化成普通阅读辅助工具栏。
+   * 未配置 / 网络错 / 超时 / 模型说这页没什么可问的 / 模型挑了别的块 —— 都不提示。
+   * 理由：伴读是主动找上门的，它失败时不该再占用一次注意力去报错；
+   * 而「提示挂在错误的块上」比不提示更坏，所以最后一道过滤放在这里。
+   */
+  const requestCompanionSuggestion = (block: PdfReadingBlock) => {
+    companionAbortRef.current?.abort();
+    const controller = new AbortController();
+    companionAbortRef.current = controller;
+    setCompanionPending(true);
+    setCompanionSuggestion(null);
+    void (async () => {
+      try {
+        const suggestions = await suggestReadingCompanion({
+          config: aiModelConfig,
+          documentTitle: title,
+          page: block.page,
+          blocks: readingBlocksByPageRef.current.get(block.page) ?? [],
+          intensity: companionIntensity,
+          focusedBlockId: block.id,
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted || companionAbortRef.current !== controller) return;
+        setCompanionSuggestion(pickSuggestionForBlock(suggestions, block.id) ?? null);
+      } catch {
+        if (companionAbortRef.current === controller) setCompanionSuggestion(null);
+      } finally {
+        if (companionAbortRef.current === controller) {
+          companionAbortRef.current = null;
+          setCompanionPending(false);
+        }
+      }
+    })();
+  };
+
+  /**
+   * 伴读采集端：停留 2.5s 后对当前焦点块打开辅助气泡，并向模型要一句提示。
    *
    * 判定全在 `services/companionDwell.ts`（纯函数、有单测），这里只做 DOM 测量与计时。
    * 关闭开关时 hook 内部不注册任何 scroll 监听，也不起 interval。
    */
   useCompanionDwell({
-    enabled: companionEnabled,
+    enabled: companionEnabled && companionIntensity !== "off",
     scrollRef,
     pageRefs,
     blocksByPageRef: readingBlocksByPageRef,
@@ -310,8 +361,12 @@ export function PDFViewer({
         blockId: block.id,
         sourceRect: block.rect,
       });
+      requestCompanionSuggestion(block);
     },
   });
+
+  // 卸载时收掉在途请求：否则它会在没有组件承接的时候继续 setState。
+  useEffect(() => () => companionAbortRef.current?.abort(), []);
   const readingBlocksInFlightRef = useRef<Map<string, Promise<PdfReadingBlock[]>>>(new Map());
   const readingBlocksAbortRef = useRef<Map<string, AbortController>>(new Map());
   const pdfImagesByPageRef = useRef<Record<number, PDFImageInfo[]>>({});
@@ -2482,11 +2537,29 @@ export function PDFViewer({
         language={language}
         modelConfig={aiModelConfig}
         onClose={() => {
+          companionAbortRef.current?.abort();
+          setCompanionSuggestion(null);
+          setCompanionPending(false);
           setAssistSelection(null);
           setAssistFromCompanion(false);
         }}
         onHint={showActionHint}
         onTranslate={openTranslationPreview}
+        companion={assistFromCompanion ? companionSuggestion : null}
+        companionPending={assistFromCompanion && companionPending}
+        onDismissCompanion={() => {
+          // 「暂不提示」写入否定集合 —— 这是打扰度判据（施工单 §11）唯一的输入，
+          // 没有它这套功能就关不掉：关掉总开关是全局的，而读者只是不想看**这一块**。
+          const blockId = assistSelection?.blockId;
+          if (documentId && blockId) {
+            dismissCompanionBlock(loadDismissedBlocks(), documentId, blockId);
+          }
+          companionAbortRef.current?.abort();
+          setCompanionSuggestion(null);
+          setCompanionPending(false);
+          setAssistSelection(null);
+          setAssistFromCompanion(false);
+        }}
         onSaveQuote={(selection, quote) =>
           onAddNote?.(page, quote,"highlight", selection.reference, {
             documentId,

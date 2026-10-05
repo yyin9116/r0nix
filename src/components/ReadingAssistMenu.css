@@ -57,6 +57,76 @@
   color: var(--reader-accent);
 }
 
+/* 伴读提示卡。三个层级刻意分明：疑问 > 预览 > 理由，
+   理由最弱 —— 它只是自报家门，不该盖过内容本身。 */
+.reading-assist-companion {
+  border-top: 1px solid var(--border-default);
+  padding: 10px 12px 11px;
+  background: color-mix(in srgb, var(--reader-accent-soft) 22%, transparent);
+}
+
+.reading-assist-companion-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--reader-accent);
+}
+
+.reading-assist-companion-question {
+  margin-top: 6px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+  color: var(--content-primary);
+}
+
+.reading-assist-companion-preview {
+  margin-top: 5px;
+  font-size: 12px;
+  line-height: 1.65;
+  color: var(--content-secondary);
+}
+
+.reading-assist-companion-reason {
+  margin-top: 7px;
+  font-size: 11px;
+  line-height: 1.55;
+  color: var(--content-muted);
+}
+
+.reading-assist-companion-reason b {
+  margin-right: 4px;
+  font-weight: 700;
+  color: var(--content-secondary);
+}
+
+.reading-assist-companion-dismiss {
+  height: 26px;
+  margin-top: 8px;
+  border-radius: 8px;
+  padding: 0 9px;
+  border: 1px solid var(--border-default);
+  background: var(--surface-sunken);
+  color: var(--content-secondary);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.reading-assist-companion-dismiss:hover {
+  color: var(--content-primary);
+  border-color: color-mix(in srgb, var(--reader-accent) 34%, var(--border-default));
+}
+
+.reading-assist-companion-pending {
+  border-top: 1px solid var(--border-default);
+  padding: 10px 12px;
+  font-size: 11px;
+  color: var(--content-muted);
+}
+
 .reading-assist-toolbar-panel {
   border-top: 1px solid var(--border-default);
   padding: 10px;

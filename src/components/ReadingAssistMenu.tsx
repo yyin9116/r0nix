@@ -7,6 +7,7 @@ import {
   isModelEndpointConfigured,
   type LlmServiceConfig,
 } from "../services/readingAssistant";
+import type { CompanionSuggestion } from "../services/companionSuggestion";
 import {
   clampOverlayPoint,
   resolveOverlayPoint,
@@ -38,6 +39,16 @@ interface ReadingAssistMenuProps {
   onTranslate?: (selection: ReadingAssistSelection) => void;
   onSaveQuote?: (selection: ReadingAssistSelection, quote: string) => void;
   variant?: "panel" | "inline-toolbar";
+  /**
+   * 伴读提示 —— 由「在某块上停留」触发、由模型给出的那句话。
+   * `null` = 本轮没有提示（未配置模型 / 请求失败 / 模型说这页没什么可问的）。
+   * 这三种失败形态在 UI 上**完全一致**：不显示提示卡，气泡退化成普通阅读辅助工具栏。
+   */
+  companion?: CompanionSuggestion | null;
+  /** 伴读提示正在生成。加载中要给一行状态，否则气泡看起来像卡住了。 */
+  companionPending?: boolean;
+  /** 「暂不提示」。仅当有提示卡时出现 —— 没有提示可暂缓时不应出现这个按钮。 */
+  onDismissCompanion?: () => void;
 }
 
 const I18N = {
@@ -67,6 +78,10 @@ const I18N = {
     timedOut: "模型服务请求超时",
     privacyHint: "提问会发送选中段落、引用位置和问题到已配置的模型服务。",
     truncated: `摘录会限制在 ${READING_ASSIST_MAX_EXCERPT_CHARS} 个字符内。`,
+    companionTitle: "伴读",
+    companionWhy: "为什么在这里出现",
+    companionDismiss: "暂不提示",
+    companionPending: "正在生成提示…",
   },
   "en-US": {
     title: "Reading Assist",
@@ -94,6 +109,10 @@ const I18N = {
     timedOut: "Model service request timed out",
     privacyHint: "Asking sends the selected paragraph, reference, and question to your configured model service.",
     truncated: `Excerpt is capped at ${READING_ASSIST_MAX_EXCERPT_CHARS} characters.`,
+    companionTitle: "Companion",
+    companionWhy: "Why this appeared",
+    companionDismiss: "Not now",
+    companionPending: "Thinking…",
   },
 } as const;
 
@@ -101,7 +120,19 @@ async function copyText(text: string) {
   await navigator.clipboard.writeText(text);
 }
 
-export function ReadingAssistMenu({ selection, language, modelConfig, onClose, onHint, onTranslate, onSaveQuote, variant = "panel" }: ReadingAssistMenuProps) {
+export function ReadingAssistMenu({
+  selection,
+  language,
+  modelConfig,
+  onClose,
+  onHint,
+  onTranslate,
+  onSaveQuote,
+  variant = "panel",
+  companion = null,
+  companionPending = false,
+  onDismissCompanion,
+}: ReadingAssistMenuProps) {
   const t = I18N[language];
   const [question, setQuestion] = useState("");
   const [answer, setAnswer] = useState("");
@@ -313,7 +344,7 @@ export function ReadingAssistMenu({ selection, language, modelConfig, onClose, o
     return (
       <div
         ref={menuRef}
-        className={`reading-assist-toolbar ${isExpanded || answer || status ? "expanded" : ""}`}
+        className={`reading-assist-toolbar ${isExpanded || answer || status || companion || companionPending ? "expanded" : ""}`}
         style={{ left: position.left, top: position.top }}
       >
         <div className="reading-assist-toolbar-row">
@@ -336,6 +367,34 @@ export function ReadingAssistMenu({ selection, language, modelConfig, onClose, o
             {t.askAi}
           </button>
         </div>
+
+        {companionPending ? (
+          // 只给一行淡色状态，不转圈：伴读是主动找上门的，不该比读者更抢戏。
+          <div className="reading-assist-companion-pending">{t.companionPending}</div>
+        ) : companion ? (
+          /**
+           * 提示卡三件套是有意的顺序：疑问（你要想什么）→ 预览（凭什么这么说）
+           * → reason（为什么是我打断你）。第 3 条是 design-system 的先例结论：
+           * 无法自报理由的主动行为 = 干扰。
+           */
+          <div className="reading-assist-companion">
+            <div className="reading-assist-companion-head">
+              <Sparkles size={11} />
+              {t.companionTitle}
+            </div>
+            <div className="reading-assist-companion-question">{companion.question}</div>
+            <div className="reading-assist-companion-preview">{companion.preview}</div>
+            <div className="reading-assist-companion-reason">
+              <b>{t.companionWhy}</b>
+              {companion.reason}
+            </div>
+            {onDismissCompanion ? (
+              <button type="button" className="reading-assist-companion-dismiss" onClick={onDismissCompanion}>
+                {t.companionDismiss}
+              </button>
+            ) : null}
+          </div>
+        ) : null}
 
         {isExpanded || answer || status ? (
           <div className="reading-assist-toolbar-panel">

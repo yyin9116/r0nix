@@ -472,6 +472,12 @@ export interface CompanionSuggestionRequest {
   /** 本页文本块。整体长度受 READING_ASSIST_MAX_EXCERPT_CHARS 约束。 */
   blocks: PdfReadingBlock[];
   intensity: CompanionIntensity;
+  /**
+   * 触发这次提示的块（读者停留的那块）。prompt 会点名它，
+   * 且它的正文会被排到摘要第一位。调用方负责用 `pickSuggestionForBlock`
+   * 把结果筛到这一块上 —— service 层只给候选，不做这个决定。
+   */
+  focusedBlockId?: string;
   signal?: AbortSignal;
 }
 
@@ -501,6 +507,7 @@ export async function suggestReadingCompanion(
     page: request.page,
     blocks: request.blocks,
     intensity: request.intensity,
+    focusedBlockId: request.focusedBlockId,
     maxExcerptChars: READING_ASSIST_MAX_EXCERPT_CHARS,
   });
 
