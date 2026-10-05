@@ -743,6 +743,19 @@ export function PDFViewer({
     [fileId, onViewStateChange, page, totalPages, zoom],
   );
   const isTranslationReader = readerMode ==="translation";
+  /**
+   * 左键是否归「文本选中」。这与右键分工无关 —— 拖拽页面走右键（handleViewerPointerDown
+   * 里 button === 2 的分支），左键从来不负责平移。左键的争夺发生在**批注 overlay** 上：
+   *   select  → overlay 让路（pointer-events: none），左键穿透到 pdf.js 文本层
+   *   hand    → overlay 收事件，左键用来点已有批注、打开笔记
+   *   （这是 Acrobat 的 Hand / Select 分工：Hand 下选不中文字是约定，不是缺陷）
+   *   批注工具 → 左键画批注
+   *
+   * ★ 这个判定有两个消费方：PageCanvas 的 enableTextLayer 与 overlay 的 pointer-events。
+   * 它们必须同源 —— 只改一处会得到「文本层渲染了、但被 overlay 挡住」，看得见却选不中，
+   * 且不报任何错，是这类分层里最难排查的形态。
+   */
+  const textSelectionEnabled = activeTool ==="select" || isTranslationReader;
   const isImageLabelReader = readerMode ==="image-label";
   const handleAssistSelection = useCallback(
     (selection: Omit<ReadingAssistSelection,"id" |"sourceTitle">) => {
@@ -3170,7 +3183,7 @@ export function PDFViewer({
                             pageNo={pageNo}
                             renderZoomScale={renderZoomScale}
                             active={active}
-                            enableTextLayer={activeTool ==="select" || isTranslationReader}
+                            enableTextLayer={textSelectionEnabled}
                             enableAssistBlocks={isTranslationReader}
                             linksEnabled={!isTranslationReader}
                             onSize={updatePageSize}
@@ -3189,7 +3202,7 @@ export function PDFViewer({
                             className="absolute inset-0"
                             style={{
                               pointerEvents:
-                                (activeTool ==="select" || isTranslationReader) && !isGestureRightDown
+                                textSelectionEnabled && !isGestureRightDown
                                   ?"none"
                                   :"auto",
                             }}

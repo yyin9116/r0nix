@@ -188,4 +188,22 @@ assert(tileTask.includes("tile viewport is too large to render safely"), "Tile r
 assert(native.includes("const MAX_RENDER_ZOOM: f32 = 8.0"), "Native PDF rendering must cap the requested zoom.");
 assert(native.includes("SVG crop rectangle must contain finite positive dimensions"), "SVG crop exports must reject invalid rectangles.");
 
+// 文本选中能力必须同源：PageCanvas 的 enableTextLayer 与批注 overlay 的 pointer-events
+// 消费同一个判定。分开写会得到「文本层渲染了、但被 overlay 挡住」——
+// 看得见却选不中，且不报任何错，是这类分层里最难排查的形态。
+assert(
+  viewer.includes("enableTextLayer={textSelectionEnabled}"),
+  "Text layer enablement must read the shared textSelectionEnabled predicate.",
+);
+assert(
+  viewer.includes("textSelectionEnabled && !isGestureRightDown"),
+  "Annotation overlay must yield pointer events using the same predicate that enables the text layer.",
+);
+// 反证：判定式本身只允许在变量定义处出现一次，否则两处会各自漂移。
+const selectPredicate = 'activeTool ==="select" || isTranslationReader';
+assert(
+  viewer.split(selectPredicate).length - 1 === 1,
+  "The text-selection predicate must be defined once, not duplicated at each consumer.",
+);
+
 console.log("pdf-virtualization: ok");
