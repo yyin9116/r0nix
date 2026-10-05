@@ -473,11 +473,11 @@ export interface CompanionSuggestion {
 
 | # | 断言 | 为什么 |
 |---|---|---|
-| 1 | `READER_ANNOTATION_KINDS` 含 `"wavy"`，且 `ToolType` **不含** `"wavy"` | 前者防漏改，后者防「AI-only」这条不变量被破坏 |
+| 1 | ✅ 已落地，**拆成两半**：含 `wavy` 的一半仍是守卫断言；`ToolType` 不含 `wavy` 的一半改成了**编译期断言**（见下） | 前者防漏改，后者防「AI-only」这条不变量被破坏 |
 | 2 | `App.tsx` 的标注还原路径**不再含**逐字 `!== "text"` 式白名单 | 防第 4 类静默丢弃回归 |
 | 3 | `readingCompanion.ts` 源码中**不含** `invoke(` / `fetch(` | 「永不上传」的唯一可机械验证代理 |
 | 4 | `readingCompanion.ts` 的 `deriveIntensity` 不含 `Date.now` / `Math.random` | 纯函数约束，不是洁癖 —— 含随机源就无法单测 |
-| 5 | 气泡不新增独立内联浮层组件 | 即 `design-system.md` §14 的「不得新建第二套内联浮层」 |
+| 5 | ✅ 已落地。只匹配 `import` / `<Component` 形式，不匹配裸名字 | 即 `design-system.md` §14 的「不得新建第二套内联浮层」。不匹配裸名字是因为 `view()` 不剥注释，否则将来有人在注释里写「不要新建 CompanionBubble」会被误判 |
 | 6 | `App.tsx` 的删除路径调用 `dismissalForRemovedAnnotation` | ⚠️ **弱证据**，只能证明「这行字还在」，见下方实证 |
 
 **★ 实证：字符串守卫抓不到「永假条件」—— 这是本轮最该记住的一条。**
@@ -501,6 +501,24 @@ if (false && target) {          // ← 永远不会执行
 
 **推论（适用于后面所有批次）**：凡是「某个动作必须发生」的约束，
 都要问一句「这个约束写在能被 node 执行的地方吗」。写不进去的，就别指望它能防住回归。
+
+### ★ 更进一步：能用类型系统守的，就不要用守卫脚本
+
+`#1` 的后半句（`ToolType` 不含 `wavy`）**没有写成守卫**，而是做成编译期断言：
+
+```ts
+// src/components/pdfReader/readerCore.ts
+export type WavyIsNotAUserTool = "wavy" extends ReaderAnnotationTool ? never : true;
+export const WAVY_IS_NOT_A_USER_TOOL: WavyIsNotAUserTool = true;
+```
+
+一旦有人把 `wavy` 加回 `ReaderAnnotationTool`（例如把 `ToolType` 改成手写完整联合、忘了 `Exclude`），
+`WavyIsNotAUserTool` 退化成 `never`，那句 `= true` 当场报
+`TS2322: Type 'true' is not assignable to type 'never'`，**构建就红** —— 已用变异测试验证。
+
+这比任何脚本守卫都强：它不需要有人记得跑守卫，也不需要维护一份「禁止清单」的字符串。
+**判断顺序：能编译期 → 编译期；只能运行时 → 单测；连单测都够不着 → 才用字符串守卫，
+并且要在注释里写明它是弱证据。**
 
 **★ 变异测试是必做项，不是可选项。** 本仓纪律：从未失败过的守卫等于没有守卫。
 逐条临时破坏 → 确认守卫变红 → 回滚 → 确认复绿。至少对 #1 与 #3 做一遍。

@@ -136,4 +136,30 @@ assert(
   "companion suggestion parsing must live in services/companionSuggestion.ts where it can be unit tested."
 );
 
+// #1 的那半句「`wavy` 不在 ToolType 里」**不在这里守** —— 它已经变成编译期断言
+// （`readerCore.ts` 的 `WAVY_IS_NOT_A_USER_TOOL`：类型退化成 never 时构建当场红）。
+// 这里只守类型系统看不见的那半句：白名单必须含 wavy。
+assert(
+  annotations.includes('wavy: true'),
+  "the annotation kind whitelist must include the AI-only wavy kind."
+);
+// #5 不得出现第二个内联浮层组件：会出现两个「AI 在这儿说话」的位置，
+// 锚点 / 钳制 / abort 各写一份。伴读气泡必须复用 ReadingAssistMenu 的 inline-toolbar 变体。
+// 只匹配**引用形式**（import / 组件用法），不匹配裸名字 ——
+// 否则将来有人在注释里写「不要新建 CompanionBubble」会被误判（view() 不剥注释）。
+const secondOverlayRef = (source, name) =>
+  new RegExp(`(from\\s*"[^"]*${name}"|<${name}[\\s/>])`).test(source);
+
+assert(
+  menu.includes('variant === "inline-toolbar"') || menu.includes('variant: "panel" | "inline-toolbar"'),
+  "ReadingAssistMenu must keep its inline toolbar variant for the companion bubble to reuse."
+);
+
+for (const name of ["CompanionBubble", "CompanionPopover", "CompanionOverlay"]) {
+  assert(
+    !secondOverlayRef(viewer.raw, name) && !secondOverlayRef(app.raw, name),
+    `a second inline overlay component (${name}) must not be introduced; reuse ReadingAssistMenu.`
+  );
+}
+
 console.log("reading-assist-contract: ok");

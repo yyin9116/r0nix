@@ -23,6 +23,20 @@ export type SidebarTab ="outline" |"thumbs";
 export type ReaderAnnotationTool = Exclude<ReaderAnnotationKind, "wavy">;
 export type ToolType ="select" |"hand" | ReaderAnnotationTool;
 
+/**
+ * 编译期断言：`wavy` **绝不能**进入用户可用的工具集。
+ *
+ * 这条**不用守卫脚本里的字符串匹配**来守 —— 字符串只能证明「源码里还有这行字」，
+ * 而本仓已经实测过这类守卫抓不到「永假条件」（见 docs/companion-reading-plan.md §9）。
+ * 让类型系统自己守：一旦有人把 `wavy` 加回 `ReaderAnnotationTool`
+ * （例如把 ToolType 改成手写的完整联合、忘了 Exclude），这个类型会退化成 `never`，
+ * 下面那句 `= true` 当场报 TS2322，**构建就红**。
+ *
+ * `wavy` 是 AI-only 的：用户不能手动画波浪线，否则「形状承载语义」会退化成「比谁手快」。
+ */
+export type WavyIsNotAUserTool = "wavy" extends ReaderAnnotationTool ? never : true;
+export const WAVY_IS_NOT_A_USER_TOOL: WavyIsNotAUserTool = true;
+
 export type PageSize = {
   width: number;
   height: number;
