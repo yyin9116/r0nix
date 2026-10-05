@@ -45,6 +45,8 @@ import type {
 import type { PDFImageInfo } from"../services/pdfApi";
 import { ContextMenu, buildViewerContextActions } from"./ContextMenu";
 import { ReadingAssistMenu, type ReadingAssistSelection } from"./ReadingAssistMenu";
+import { useCompanionDwell } from "./pdfReader/useCompanionDwell";
+import { isBlockDismissed, loadDismissedBlocks } from "../services/readingCompanion";
 import {
   translateReadingBlock,
   translateReadingBlocks,
@@ -131,6 +133,8 @@ interface PDFViewerProps {
   onOpenExternal?: (url: string) => void;
   onOpenLinkInApp?: (url: string) => void;
   aiModelConfig: LlmServiceConfig;
+  /** 伴读总开关（settings.companionEnabled）。关闭时采集端不注册任何监听。 */
+  companionEnabled?: boolean;
 }
 
 export function PDFViewer({
@@ -154,6 +158,7 @@ export function PDFViewer({
   onOpenLinkInApp,
   aiModelConfig,
   documentFileSize,
+  companionEnabled = false,
 }: PDFViewerProps) {
   const [zoom, setZoom] = useState(() => clampZoomValue(initialViewState?.zoom ?? 100));
   const [renderZoom, setRenderZoom] = useState(() => clampZoomValue(initialViewState?.zoom ?? 100));
@@ -275,6 +280,38 @@ export function PDFViewer({
   } | null>(null);
   const lockedZoomPageRef = useRef<number | null>(null);
   const readingBlocksByPageRef = useRef<Map<number, PdfReadingBlock[]>>(new Map());
+  /** 伴读触发的辅助气泡要以内联浮层呈现，与「划词后的面板」区分开。 */
+  const [assistFromCompanion, setAssistFromCompanion] = useState(false);
+  /**
+   * 伴读采集端：停留 2.5s 后对当前焦点块打开辅助气泡。
+   *
+   * 判定全在 `services/companionDwell.ts`（纯函数、有单测），这里只做 DOM 测量与计时。
+   * 关闭开关时 hook 内部不注册任何 scroll 监听，也不起 interval。
+   */
+  useCompanionDwell({
+    enabled: companionEnabled,
+    scrollRef,
+    pageRefs,
+    blocksByPageRef: readingBlocksByPageRef,
+    isDismissed: (blockId) =>
+      documentId ? isBlockDismissed(loadDismissedBlocks(), documentId, blockId) : false,
+    onFire: (block) => {
+      const element = pageRefs.current.get(block.page);
+      const rect = element?.getBoundingClientRect();
+      if (!rect) return;
+      setAssistFromCompanion(true);
+      setAssistSelection({
+        id: `companion-${block.id}`,
+        text: block.text,
+        reference: `${title} / page ${block.page}`,
+        sourceTitle: title,
+        x: rect.left + (block.rect?.x ?? 0) * rect.width,
+        y: rect.top + (block.rect?.y ?? 0) * rect.height,
+        blockId: block.id,
+        sourceRect: block.rect,
+      });
+    },
+  });
   const readingBlocksInFlightRef = useRef<Map<string, Promise<PdfReadingBlock[]>>>(new Map());
   const readingBlocksAbortRef = useRef<Map<string, AbortController>>(new Map());
   const pdfImagesByPageRef = useRef<Record<number, PDFImageInfo[]>>({});
@@ -2444,7 +2481,10 @@ export function PDFViewer({
         selection={assistSelection}
         language={language}
         modelConfig={aiModelConfig}
-        onClose={() => setAssistSelection(null)}
+        onClose={() => {
+          setAssistSelection(null);
+          setAssistFromCompanion(false);
+        }}
         onHint={showActionHint}
         onTranslate={openTranslationPreview}
         onSaveQuote={(selection, quote) =>
@@ -2454,7 +2494,7 @@ export function PDFViewer({
             sourceRect: selection.sourceRect,
           })
         }
-        variant={isTranslationReader ?"inline-toolbar" :"panel"}
+        variant={isTranslationReader || assistFromCompanion ?"inline-toolbar" :"panel"}
       />
 
       <div

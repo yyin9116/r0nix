@@ -162,4 +162,14 @@ for (const name of ["CompanionBubble", "CompanionPopover", "CompanionOverlay"]) 
   );
 }
 
+// 停留采集模块同样必须纯且离线：它跑在滚动回调里，任何 IO 或不确定性都会
+// 既拖慢滚动、又让「停留多久触发」变得不可复现。
+const dwell = view(readFileSync("src/services/companionDwell.ts", "utf8"));
+for (const forbidden of ["Date.now", "Math.random", "fetch(", "invoke(", "XMLHttpRequest", "localStorage"]) {
+  assert(
+    !dwell.includes(forbidden),
+    `companion dwell must stay a pure, offline module; found ${forbidden}.`
+  );
+}
+
 console.log("reading-assist-contract: ok");

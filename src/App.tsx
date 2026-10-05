@@ -2145,6 +2145,7 @@ export default function App() {
                 documentFileSize={activeDocument?.fileSize}
                 fileId={activeTab.fileId}
                 language={settings.language}
+                companionEnabled={settings.companionEnabled}
                 notes={activeNotes}
                 annotations={activeAnnotations}
                 onOpenFileDialog={() => {

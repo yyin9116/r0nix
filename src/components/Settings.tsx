@@ -97,6 +97,9 @@ const I18N = {
 "\u5173\u95ed\u540e\uff0c\u5feb\u6377\u94fe\u63a5\u548c\u7f51\u9875\u64cd\u4f5c\u4f1a\u5728\u7cfb\u7edf\u6d4f\u89c8\u5668\u4e2d\u6253\u5f00\u3002",
     insideApp:"\u5e94\u7528\u5185",
     externalBrowser:"\u5916\u90e8\u6d4f\u89c8\u5668",
+    companion:"\u4f34\u8bfb",
+    companionDesc:
+"\u505c\u7559\u7ea6 2.5 \u79d2\u540e\u81ea\u52a8\u5c55\u5f00\u9605\u8bfb\u8f85\u52a9\u3002\u884c\u4e3a\u4fe1\u53f7\u4e0d\u4f1a\u79bb\u5f00\u672c\u673a\u3002",
     language:"\u8bed\u8a00",
     languageDesc:"\u5728\u4e2d\u6587\u4e0e\u82f1\u6587\u4e4b\u95f4\u5207\u6362\u754c\u9762\u8bed\u8a00\u3002",
     newTabDefaultUrl:"\u65b0\u6807\u7b7e\u9ed8\u8ba4 URL",
@@ -168,6 +171,8 @@ const I18N = {
     openLinksInsideAppDesc:"If disabled, quick links and browser actions open in the system browser.",
     insideApp:"Inside App",
     externalBrowser:"External Browser",
+    companion:"Companion",
+    companionDesc:"Open reading assist automatically after dwelling on a paragraph for about 2.5s. Behaviour signals never leave this machine.",
     language:"Language",
     languageDesc:"Switch UI language between Chinese and English.",
     newTabDefaultUrl:"New tab default URL",
@@ -432,6 +437,16 @@ export function Settings({
                 onClick={() => updateSettings({ openLinksInsideApp: !settings.openLinksInsideApp })}
               >
                 {settings.openLinksInsideApp ? t.insideApp : t.externalBrowser}
+              </Button>
+            </SettingsRow>
+
+            <SettingsRow icon={<BookOpen size={15} />} title={t.companion} description={t.companionDesc}>
+              <Button
+                size="sm"
+                variant={settings.companionEnabled ? "accent" : "neutral"}
+                onClick={() => updateSettings({ companionEnabled: !settings.companionEnabled })}
+              >
+                {settings.companionEnabled ? t.enabled : t.disabled}
               </Button>
             </SettingsRow>
 
