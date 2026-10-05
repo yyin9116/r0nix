@@ -42,7 +42,7 @@ r0nix 是一个面向科研阅读的本地桌面应用：打开 PDF，顺手查�
 - Windows：`.exe` 或 `.msi`
 - macOS：`.dmg`
 
-安装后启动 `r0nix`。当前版本为 `0.0.6`。macOS 在配置 Developer ID 签名和 Apple 公证凭据时会发布正式签名包；缺少这些凭据时，Release 会生成 ad-hoc 签名的可用 DMG，首次打开可能需要在 macOS“隐私与安全性”里手动允许。
+安装后启动 `r0nix`。macOS DMG 内含标准的 `Applications` 拖拽入口。当前版本为 `0.0.6`。macOS 在配置 Developer ID 签名和 Apple 公证凭据时会发布正式签名包；手动触发 workflow 且缺少这些凭据时，只生成用于测试的 ad-hoc DMG，首次打开可能需要在 macOS“隐私与安全性”里手动允许。
 
 ## 🔐 阅读辅助和隐私
 
@@ -71,6 +71,20 @@ npm run dev
 ```bash
 npm run tauri dev
 ```
+
+macOS 桌面包使用经过运行时修补和启动检查的入口，避免直接 `tauri build` 生成无法启动的未修补包：
+
+```bash
+npm run tauri:build:macos:debug
+```
+
+发布包使用：
+
+```bash
+npm run tauri:build:macos
+```
+
+这两个命令都会先构建 `.app`，再修补内置 PyMuPDF 动态库路径，执行 bundle smoke，并生成经过 DMG 校验的安装包。未配置 Developer ID 时，产物为可运行但需要系统手动放行的 ad-hoc 包。
 
 运行本地验证：
 
@@ -101,4 +115,4 @@ npm run check:release
 - `APPLE_PASSWORD`
 - `APPLE_TEAM_ID`
 
-缺少这些签名和公证凭据时，release workflow 会改用 ad-hoc signing 打出 macOS DMG。这个包可以用于测试和临时分发，但不等同于 Developer ID 公证包；面向普通用户稳定分发前，应补齐上述 Secrets 后重新发布。
+缺少这些签名和公证凭据时，workflow 会生成并发布 ad-hoc DMG；该包未经过 Apple 公证，首次打开可能需要在 macOS“隐私与安全性”中手动允许。面向普通用户分发时，应补齐上述 Secrets 后重新发布正式签名包。

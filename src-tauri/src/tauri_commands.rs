@@ -9,32 +9,64 @@ use image::{imageops, ColorType, ImageEncoder, RgbaImage};
 use pdf_core::{plan_visible_tiles, PdfInfo, TileReadyPayload, TileRequestAck, TileViewport};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{
-    webview::WebviewBuilder, AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position,
-    Size, Url, WebviewUrl,
+    webview::{DownloadEvent, WebviewBuilder},
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size, Url, WebviewUrl,
 };
-use tokio::sync::Mutex;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 static CANCELED_REQUESTS: once_cell::sync::Lazy<Mutex<HashSet<String>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashSet::new()));
+static CANCELED_NOTIFY: once_cell::sync::Lazy<tokio::sync::Notify> =
+    once_cell::sync::Lazy::new(tokio::sync::Notify::new);
 static PDF_BLOCK_CANCEL_FLAGS: once_cell::sync::Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 static PDF_IMAGE_CANCEL_FLAGS: once_cell::sync::Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
 static PDF_EXPORT_CANCEL_FLAGS: once_cell::sync::Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
+static PDF_BYTE_READ_CANCEL_FLAGS: once_cell::sync::Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
+static PDF_PAGE_COUNT_CANCEL_FLAGS: once_cell::sync::Lazy<Mutex<HashMap<String, Arc<AtomicBool>>>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
+static PDF_PYTHON_TASK_PERMITS: once_cell::sync::Lazy<Arc<Semaphore>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Semaphore::new(2)));
 static WEBVIEW_TABS: once_cell::sync::Lazy<Mutex<HashMap<String, String>>> =
     once_cell::sync::Lazy::new(|| Mutex::new(HashMap::new()));
-const DEFAULT_NATIVE_WEBVIEW_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 Edg/132.0.0.0";
+// Match the actual macOS WebKit engine. A Windows Edge UA on WebKit causes
+// search sites to serve incompatible challenge/advertising variants.
+const DEFAULT_NATIVE_WEBVIEW_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.5 Safari/605.1.15";
 const MAX_PROXY_DOWNLOAD_BYTES: usize = 64 * 1024 * 1024;
+const MAX_LLM_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PDF_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_RENDER_ZOOM: f32 = 8.0;
+const MANAGED_WEB_PDF_PREFIX: &str = "r0nix-web-";
+const MANAGED_IMPORT_PREFIX: &str = "r0nix-import-";
 const PDF_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+const PDF_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(60);
+const PYTHON_PERMIT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(5);
+const STALE_TEMP_FILE_AGE: Duration = Duration::from_secs(24 * 60 * 60);
+const CANCELED_REQUEST_TTL: Duration = Duration::from_secs(600);
+const MAX_IMPORT_SCAN_DIRS: usize = 10_000;
+const IMPORT_SCAN_TIMEOUT: Duration = Duration::from_secs(30);
+const IMPORTABLE_EXTENSIONS: &[&str] = &["pdf", "md", "markdown"];
+const PDF_EXTENSIONS: &[&str] = &["pdf"];
+const MARKDOWN_EXTENSIONS: &[&str] = &["md", "markdown"];
+const TEXT_WRITE_EXTENSIONS: &[&str] = &["md", "markdown", "csv", "json", "svg", "txt"];
+const BINARY_WRITE_EXTENSIONS: &[&str] = &[
+    "pdf", "png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "jp2", "jpx", "jbig2",
+    "ccitt",
+];
 const NATIVE_WEBVIEW_NAV_PATCH_SCRIPT: &str = r#"(function () {
   if ((window).__r0nixNavPatchInstalled) return;
   (window).__r0nixNavPatchInstalled = true;
@@ -44,7 +76,9 @@ const NATIVE_WEBVIEW_NAV_PATCH_SCRIPT: &str = r#"(function () {
     const value = raw.trim();
     if (!value) return "";
     try {
-      return new URL(value, window.location.href).toString();
+      const next = new URL(value, window.location.href);
+      if (next.protocol !== "http:" && next.protocol !== "https:") return "";
+      return next.toString();
     } catch {
       return "";
     }
@@ -57,17 +91,9 @@ const NATIVE_WEBVIEW_NAV_PATCH_SCRIPT: &str = r#"(function () {
     return true;
   };
 
-  const originalOpen = window.open ? window.open.bind(window) : null;
   window.open = function (url, target, features) {
     if (navigateCurrent(String(url || ""))) {
       return window;
-    }
-    if (originalOpen) {
-      try {
-        return originalOpen(url, target, features);
-      } catch {
-        return window;
-      }
     }
     return window;
   };
@@ -91,6 +117,18 @@ const NATIVE_WEBVIEW_NAV_PATCH_SCRIPT: &str = r#"(function () {
   );
 })();"#;
 
+// Navigation and download callbacks can run inside WebKit's callback stack.
+// Queue the hide on Tauri's main thread so the PDF surface never flashes as a
+// blank document, without mutating the child WebView re-entrantly.
+fn hide_webview_after_pdf_interception(app: &AppHandle, label: String) {
+    let app_handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(webview) = app_handle.get_webview(&label) {
+            let _ = webview.hide();
+        }
+    });
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyDownloadPayload {
@@ -99,6 +137,14 @@ pub struct ProxyDownloadPayload {
     pub content_type: Option<String>,
     pub content_disposition: Option<String>,
     pub status_code: u16,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct NativePdfDownloadPayload {
+    pub path: String,
+    pub file_name: String,
+    pub final_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,7 +197,23 @@ fn native_webview_label(tab_id: &str) -> String {
 }
 
 fn parse_webview_url(url: &str) -> Result<Url, String> {
-    Url::parse(url).map_err(|err| format!("invalid webview url: {err}"))
+    let parsed = Url::parse(url.trim()).map_err(|err| format!("invalid webview url: {err}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("native webview only supports http:// and https:// URLs".to_string());
+    }
+    if parsed.host_str().is_none() {
+        return Err("native webview URL must include a host".to_string());
+    }
+    Ok(parsed)
+}
+
+async fn registered_webview_label(tab_id: &str) -> Result<String, String> {
+    WEBVIEW_TABS
+        .lock()
+        .await
+        .get(tab_id)
+        .cloned()
+        .ok_or_else(|| format!("native webview tab is not registered: {tab_id}"))
 }
 
 fn ensure_non_empty_path(path: &str) -> Result<PathBuf, String> {
@@ -163,23 +225,74 @@ fn ensure_non_empty_path(path: &str) -> Result<PathBuf, String> {
 }
 
 fn ensure_importable_extension(path: &Path) -> bool {
+    ensure_extension_allowed(path, IMPORTABLE_EXTENSIONS)
+}
+
+fn ensure_pdf_extension(path: &Path) -> bool {
+    ensure_extension_allowed(path, PDF_EXTENSIONS)
+}
+
+fn ensure_extension_allowed(path: &Path, allowed_extensions: &[&str]) -> bool {
     path.extension()
         .and_then(|value| value.to_str())
-        .map(|ext| {
-            let ext = ext.to_ascii_lowercase();
-            ext == "pdf" || ext == "md" || ext == "markdown"
+        .is_some_and(|extension| {
+            allowed_extensions
+                .iter()
+                .any(|allowed| extension.eq_ignore_ascii_case(allowed))
         })
-        .unwrap_or(false)
+}
+
+fn is_managed_web_pdf_path(temp_dir: &Path, path: &Path) -> bool {
+    path.parent() == Some(temp_dir)
+        && ensure_pdf_extension(path)
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(MANAGED_WEB_PDF_PREFIX))
+}
+
+fn is_managed_import_temp_path(temp_dir: &Path, path: &Path) -> bool {
+    path.parent() == Some(temp_dir)
+        && ensure_importable_extension(path)
+        && path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(MANAGED_IMPORT_PREFIX))
+}
+
+fn is_managed_temp_path(temp_dir: &Path, path: &Path) -> bool {
+    is_managed_web_pdf_path(temp_dir, path) || is_managed_import_temp_path(temp_dir, path)
+}
+
+pub fn cleanup_stale_web_pdf_temp_files(app: &AppHandle) -> Result<usize, String> {
+    let temp_dir = app
+        .path()
+        .temp_dir()
+        .map_err(|err| format!("temporary directory unavailable: {err}"))?;
+    let now = SystemTime::now();
+    let entries = std::fs::read_dir(&temp_dir)
+        .map_err(|err| format!("failed to scan temporary directory: {err}"))?;
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !is_managed_temp_path(&temp_dir, &path) {
+            continue;
+        }
+        let is_stale = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= STALE_TEMP_FILE_AGE);
+        if is_stale && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    Ok(removed)
 }
 
 fn ensure_markdown_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|value| value.to_str())
-        .map(|ext| {
-            let ext = ext.to_ascii_lowercase();
-            ext == "md" || ext == "markdown"
-        })
-        .unwrap_or(false)
+    ensure_extension_allowed(path, MARKDOWN_EXTENSIONS)
 }
 
 fn sanitize_file_name(file_name: &str) -> Result<String, String> {
@@ -289,52 +402,24 @@ pub async fn frontend_log(
 }
 
 fn ensure_allowed_text_write_path(path: &Path) -> Result<(), String> {
-    let allowed = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(|ext| {
-            let ext = ext.to_ascii_lowercase();
-            matches!(
-                ext.as_str(),
-                "md" | "markdown" | "csv" | "json" | "svg" | "txt"
-            )
-        })
-        .unwrap_or(false);
-    if allowed {
+    if ensure_extension_allowed(path, TEXT_WRITE_EXTENSIONS) {
         Ok(())
     } else {
-        Err("text write only supports md, markdown, csv, json, svg, or txt files".to_string())
+        Err(format!(
+            "text write only supports {} files",
+            TEXT_WRITE_EXTENSIONS.join(", ")
+        ))
     }
 }
 
 fn ensure_allowed_binary_write_path(path: &Path) -> Result<(), String> {
-    let allowed = path
-        .extension()
-        .and_then(|value| value.to_str())
-        .map(|ext| {
-            let ext = ext.to_ascii_lowercase();
-            matches!(
-                ext.as_str(),
-                "pdf"
-                    | "png"
-                    | "jpg"
-                    | "jpeg"
-                    | "gif"
-                    | "webp"
-                    | "bmp"
-                    | "tif"
-                    | "tiff"
-                    | "jp2"
-                    | "jpx"
-                    | "jbig2"
-                    | "ccitt"
-            )
-        })
-        .unwrap_or(false);
-    if allowed {
+    if ensure_extension_allowed(path, BINARY_WRITE_EXTENSIONS) {
         Ok(())
     } else {
-        Err("binary write only supports pdf, png, jpg, or jpeg files".to_string())
+        Err(format!(
+            "binary write only supports {} files",
+            BINARY_WRITE_EXTENSIONS.join(", ")
+        ))
     }
 }
 
@@ -384,15 +469,29 @@ pub async fn write_temp_file(
     data_base64: String,
 ) -> Result<String, String> {
     let file_name = sanitize_file_name(&file_name)?;
+    let max_base64_len = MAX_PDF_BYTES.div_ceil(3) as usize * 4;
+    if data_base64.len() > max_base64_len {
+        return Err(format!(
+            "temporary file exceeds the safe {} MiB limit",
+            MAX_PDF_BYTES / (1024 * 1024)
+        ));
+    }
     let mut path = app
         .path()
         .temp_dir()
         .map_err(|err| format!("temp directory unavailable: {err}"))?;
-    path.push(file_name);
+    let unique = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+    path.push(format!("{MANAGED_IMPORT_PREFIX}{unique}-{file_name}"));
     if !ensure_importable_extension(&path) {
         return Err("temporary files only support pdf, md, or markdown files".to_string());
     }
     let bytes = decode_base64_bytes(&data_base64)?;
+    if bytes.len() as u64 > MAX_PDF_BYTES {
+        return Err(format!(
+            "temporary file exceeds the safe {} MiB limit",
+            MAX_PDF_BYTES / (1024 * 1024)
+        ));
+    }
     let output_path = path.clone();
     tokio::task::spawn_blocking(move || {
         std::fs::write(&path, bytes)
@@ -407,21 +506,42 @@ pub async fn write_temp_file(
 pub async fn collect_importable_paths(root: String) -> Result<Vec<String>, String> {
     let root = ensure_non_empty_path(&root)?;
     tokio::task::spawn_blocking(move || {
+        let root = root
+            .canonicalize()
+            .map_err(|err| format!("failed to access import folder: {err}"))?;
         let mut results = Vec::new();
         let mut visited_dirs = HashSet::new();
         let mut stack = vec![root];
+        let started_at = Instant::now();
         while let Some(current) = stack.pop() {
-            let current = match current.canonicalize() {
-                Ok(path) if visited_dirs.insert(path.clone()) => path,
-                _ => continue,
-            };
+            if started_at.elapsed() >= IMPORT_SCAN_TIMEOUT {
+                return Err(format!(
+                    "import folder scan timed out after {} seconds",
+                    IMPORT_SCAN_TIMEOUT.as_secs()
+                ));
+            }
+            if visited_dirs.len() >= MAX_IMPORT_SCAN_DIRS {
+                return Err(format!(
+                    "import folder contains more than {MAX_IMPORT_SCAN_DIRS} directories"
+                ));
+            }
+            if !visited_dirs.insert(current.clone()) {
+                continue;
+            }
             let entries = match std::fs::read_dir(&current) {
                 Ok(entries) => entries,
                 Err(_) => continue,
             };
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_dir() {
+                let file_type = match entry.file_type() {
+                    Ok(file_type) => file_type,
+                    Err(_) => continue,
+                };
+                if file_type.is_symlink() {
+                    continue;
+                }
+                if file_type.is_dir() {
                     stack.push(path);
                     continue;
                 }
@@ -528,12 +648,24 @@ async fn is_request_canceled(request_id: &str) -> bool {
     canceled.contains(request_id)
 }
 
+async fn mark_request_canceled(request_id: String) {
+    CANCELED_REQUESTS.lock().await.insert(request_id.clone());
+    CANCELED_NOTIFY.notify_waiters();
+    tokio::spawn(async move {
+        tokio::time::sleep(CANCELED_REQUEST_TTL).await;
+        CANCELED_REQUESTS.lock().await.remove(&request_id);
+    });
+}
+
 async fn wait_for_request_canceled(request_id: &str) {
     loop {
+        let notified = CANCELED_NOTIFY.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         if is_request_canceled(request_id).await {
             return;
         }
-        tokio::time::sleep(Duration::from_millis(40)).await;
+        notified.await;
     }
 }
 
@@ -545,6 +677,21 @@ async fn resolve_file_path(file_id: &str) -> Result<String, String> {
     Ok(info.path)
 }
 
+async fn acquire_python_task_permit(label: &'static str) -> Result<OwnedSemaphorePermit, String> {
+    match tokio::time::timeout(
+        PYTHON_PERMIT_ACQUIRE_TIMEOUT,
+        PDF_PYTHON_TASK_PERMITS.clone().acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err(format!("{label} concurrency gate is unavailable")),
+        Err(_) => Err(format!(
+            "{label} is busy; try again after the current PDF task finishes"
+        )),
+    }
+}
+
 async fn run_pdf_export_blocking<T, F>(
     label: &'static str,
     request_id: Option<String>,
@@ -554,6 +701,7 @@ where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {
+    let python_permit = acquire_python_task_permit(label).await?;
     let cancel_flag = Arc::new(AtomicBool::new(false));
     if let Some(request_id) = request_id.as_deref() {
         if request_id.trim().is_empty() {
@@ -567,6 +715,7 @@ where
 
     let task_flag = cancel_flag.clone();
     let task = tokio::task::spawn_blocking(move || {
+        let _python_permit = python_permit;
         if task_flag.load(Ordering::Acquire) {
             return Err("r0nix-cancelled".to_string());
         }
@@ -596,6 +745,14 @@ where
 
 #[tauri::command]
 pub async fn open_pdf(file_id: String, path: String) -> Result<PdfInfo, String> {
+    let path = ensure_non_empty_path(&path)?;
+    if !ensure_pdf_extension(&path) {
+        return Err("only PDF files can be opened by open_pdf".to_string());
+    }
+    if file_id.trim().is_empty() {
+        return Err("file id is empty".to_string());
+    }
+    let path = path.to_string_lossy().into_owned();
     eprintln!("[open_pdf] file_id={} path={}", file_id, path);
     let mut manager = PDF_MANAGER.lock().await;
     let info = manager
@@ -609,12 +766,67 @@ pub async fn open_pdf(file_id: String, path: String) -> Result<PdfInfo, String> 
     Ok(info)
 }
 
-#[tauri::command]
-pub async fn close_pdf(file_id: String) -> Result<(), String> {
+// Core document lifecycle is kept separate from Tauri so it can be tested
+// without constructing an application handle. The command wrapper below owns
+// only managed temporary-file cleanup.
+pub async fn close_pdf_document(file_id: String) -> Result<Option<PathBuf>, String> {
     let mut manager = PDF_MANAGER.lock().await;
+    let path = manager
+        .get_document_info(&file_id)
+        .ok()
+        .map(|info| PathBuf::from(info.path));
     manager
         .close_document(&file_id)
+        .map(|_| path)
         .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub async fn close_pdf(app: AppHandle, file_id: String) -> Result<(), String> {
+    let path = close_pdf_document(file_id).await?;
+
+    if let Some(path) = path {
+        if let Ok(temp_dir) = app.path().temp_dir() {
+            if is_managed_temp_path(&temp_dir, &path) {
+                let _ = tokio::fs::remove_file(path).await;
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn remove_managed_web_pdf_temp(app: AppHandle, path: String) -> Result<(), String> {
+    let path = ensure_non_empty_path(&path)?;
+    let temp_dir = app
+        .path()
+        .temp_dir()
+        .map_err(|err| format!("temporary directory unavailable: {err}"))?;
+    if !is_managed_web_pdf_path(&temp_dir, &path) {
+        return Err("refusing to remove an unmanaged PDF temp path".to_string());
+    }
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("failed to remove temporary PDF: {error}")),
+    }
+}
+
+#[tauri::command]
+pub async fn remove_managed_import_temp(app: AppHandle, path: String) -> Result<(), String> {
+    let path = ensure_non_empty_path(&path)?;
+    let temp_dir = app
+        .path()
+        .temp_dir()
+        .map_err(|err| format!("temporary directory unavailable: {err}"))?;
+    if !is_managed_import_temp_path(&temp_dir, &path) {
+        return Err("refusing to remove an unmanaged import temp path".to_string());
+    }
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("failed to remove temporary import: {error}")),
+    }
 }
 
 #[tauri::command]
@@ -626,7 +838,7 @@ pub async fn get_pdf_info(file_id: String) -> Result<PdfInfo, String> {
 }
 
 #[tauri::command]
-pub async fn get_page_count(file_id: String) -> Result<usize, String> {
+pub async fn get_page_count(file_id: String, request_id: Option<String>) -> Result<usize, String> {
     let (known_page_count, path) = {
         let manager = PDF_MANAGER.lock().await;
         let info = manager
@@ -638,12 +850,54 @@ pub async fn get_page_count(file_id: String) -> Result<usize, String> {
         return Ok(known_page_count);
     }
 
-    let page_count_task = tokio::task::spawn_blocking(move || get_pdf_page_count(&path));
-    let page_count = match tokio::time::timeout(Duration::from_secs(30), page_count_task).await {
-        Ok(result) => result
-            .map_err(|err| format!("page count task failed: {err}"))?
-            .map_err(|err| format!("page count failed: {err}"))?,
-        Err(_) => return Err("page count timed out after 30 seconds".to_string()),
+    let request_id = request_id
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| {
+            format!(
+                "page-count-{}",
+                REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+            )
+        });
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    PDF_PAGE_COUNT_CANCEL_FLAGS
+        .lock()
+        .await
+        .insert(request_id.clone(), cancel_flag.clone());
+    let python_permit = match acquire_python_task_permit("page count").await {
+        Ok(permit) => permit,
+        Err(error) => {
+            PDF_PAGE_COUNT_CANCEL_FLAGS.lock().await.remove(&request_id);
+            return Err(error);
+        }
+    };
+    let task_flag = cancel_flag.clone();
+    let page_count_task = tokio::task::spawn_blocking(move || {
+        let _python_permit = python_permit;
+        if task_flag.load(Ordering::Acquire) {
+            return Err("r0nix-cancelled".to_string());
+        }
+        let result = get_pdf_page_count(&path);
+        if task_flag.load(Ordering::Acquire) {
+            Err("r0nix-cancelled".to_string())
+        } else {
+            result
+        }
+    });
+    let page_count = match tokio::time::timeout(PDF_OPERATION_TIMEOUT, page_count_task).await {
+        Ok(result) => {
+            PDF_PAGE_COUNT_CANCEL_FLAGS.lock().await.remove(&request_id);
+            result
+                .map_err(|err| format!("page count task failed: {err}"))?
+                .map_err(|err| format!("page count failed: {err}"))?
+        }
+        Err(_) => {
+            cancel_flag.store(true, Ordering::Release);
+            PDF_PAGE_COUNT_CANCEL_FLAGS.lock().await.remove(&request_id);
+            return Err(format!(
+                "page count timed out after {} seconds",
+                PDF_OPERATION_TIMEOUT.as_secs()
+            ));
+        }
     };
     let mut manager = PDF_MANAGER.lock().await;
     manager
@@ -663,12 +917,95 @@ pub async fn list_pdfs() -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-pub async fn read_opened_pdf_bytes(file_id: String) -> Result<Vec<u8>, String> {
+pub async fn read_opened_pdf_bytes(
+    file_id: String,
+    request_id: Option<String>,
+) -> Result<Vec<u8>, String> {
     let path = resolve_file_path(&file_id).await?;
-    tokio::task::spawn_blocking(move || std::fs::read(path))
-        .await
-        .map_err(|err| format!("read pdf bytes task failed: {err}"))?
-        .map_err(|err| format!("failed to read pdf bytes: {err}"))
+    let request_id = request_id.filter(|value| !value.trim().is_empty());
+    let cancel_flag = Arc::new(AtomicBool::new(false));
+    if let Some(request_id) = request_id.as_deref() {
+        PDF_BYTE_READ_CANCEL_FLAGS
+            .lock()
+            .await
+            .insert(request_id.to_string(), cancel_flag.clone());
+    }
+    let task_flag = cancel_flag.clone();
+    let task = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, String> {
+        let mut file =
+            File::open(path).map_err(|err| format!("failed to open pdf bytes: {err}"))?;
+        let file_size = file
+            .metadata()
+            .map_err(|err| format!("failed to inspect pdf bytes: {err}"))?
+            .len();
+        if file_size > MAX_PDF_BYTES {
+            return Err(format!(
+                "pdf is too large to open safely ({} MiB limit)",
+                MAX_PDF_BYTES / (1024 * 1024)
+            ));
+        }
+        let mut bytes = Vec::with_capacity(file_size as usize);
+        let mut buffer = [0_u8; 1024 * 1024];
+        loop {
+            if task_flag.load(Ordering::Acquire) {
+                return Err("r0nix-cancelled".to_string());
+            }
+            let read = file
+                .read(&mut buffer)
+                .map_err(|err| format!("failed to read pdf bytes: {err}"))?;
+            if read == 0 {
+                break;
+            }
+            if bytes.len().saturating_add(read) > MAX_PDF_BYTES as usize {
+                return Err(format!(
+                    "pdf grew beyond the safe {} MiB limit while reading",
+                    MAX_PDF_BYTES / (1024 * 1024)
+                ));
+            }
+            bytes.extend_from_slice(&buffer[..read]);
+        }
+        if task_flag.load(Ordering::Acquire) {
+            return Err("r0nix-cancelled".to_string());
+        }
+        Ok(bytes)
+    });
+    let result = match tokio::time::timeout(PDF_OPERATION_TIMEOUT, task).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(err)) => Err(format!("read pdf bytes task failed: {err}")),
+        Err(_) => {
+            cancel_flag.store(true, Ordering::Release);
+            Err(format!(
+                "read pdf bytes timed out after {} seconds",
+                PDF_OPERATION_TIMEOUT.as_secs()
+            ))
+        }
+    };
+    if let Some(request_id) = request_id.as_deref() {
+        PDF_BYTE_READ_CANCEL_FLAGS.lock().await.remove(request_id);
+    }
+    result
+}
+
+#[tauri::command]
+pub async fn cancel_pdf_byte_read(request_id: String) -> Result<(), String> {
+    if request_id.trim().is_empty() {
+        return Err("pdf byte read request id cannot be empty".to_string());
+    }
+    if let Some(flag) = PDF_BYTE_READ_CANCEL_FLAGS.lock().await.get(&request_id) {
+        flag.store(true, Ordering::Release);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn cancel_pdf_page_count(request_id: String) -> Result<(), String> {
+    if request_id.trim().is_empty() {
+        return Err("page count request id cannot be empty".to_string());
+    }
+    if let Some(flag) = PDF_PAGE_COUNT_CANCEL_FLAGS.lock().await.get(&request_id) {
+        flag.store(true, Ordering::Release);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -681,6 +1018,21 @@ pub async fn request_tiles(
     tile_size: Option<u32>,
     render_scale: Option<f32>,
 ) -> Result<TileRequestAck, String> {
+    if page_no == 0 {
+        return Err("tile page number must be at least 1".to_string());
+    }
+    if !viewport.x.is_finite()
+        || !viewport.y.is_finite()
+        || !viewport.width.is_finite()
+        || !viewport.height.is_finite()
+        || viewport.width <= 0.0
+        || viewport.height <= 0.0
+    {
+        return Err("tile viewport must contain finite positive dimensions".to_string());
+    }
+    if !zoom.is_finite() || zoom <= 0.0 {
+        return Err("tile zoom must be finite and positive".to_string());
+    }
     eprintln!(
         "[request_tiles] file_id={} page={} zoom={:.2} viewport=({}, {}, {}, {})",
         file_id, page_no, zoom, viewport.x, viewport.y, viewport.width, viewport.height
@@ -688,11 +1040,17 @@ pub async fn request_tiles(
     let path = resolve_file_path(&file_id).await?;
 
     let tile_size = tile_size.unwrap_or(512).clamp(128, 1024);
-    let safe_zoom = zoom.max(0.1);
-    let render_zoom = render_scale.unwrap_or(safe_zoom).max(safe_zoom);
+    let safe_zoom = zoom.clamp(0.1, MAX_RENDER_ZOOM);
+    let render_zoom = render_scale
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(safe_zoom)
+        .clamp(safe_zoom, MAX_RENDER_ZOOM);
     let render_scale_factor = (render_zoom / safe_zoom).max(1.0);
     let request_id = format!("req-{}", REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed));
     let tile_plan = plan_visible_tiles(&viewport, tile_size, 1);
+    if tile_plan.is_empty() {
+        return Err("tile viewport is too large to render safely".to_string());
+    }
     let ack = TileRequestAck {
         request_id: request_id.clone(),
         total_tiles: tile_plan.len(),
@@ -713,9 +1071,31 @@ pub async fn request_tiles(
             return;
         }
 
+        let python_permit = match acquire_python_task_permit("tile render").await {
+            Ok(permit) => permit,
+            Err(error) => {
+                eprintln!(
+                    "[tile] concurrency gate rejected {} p{}: {}",
+                    file_id_for_task, page_no, error
+                );
+                let _ = app_handle.emit("pdf://request_done", request_id_for_task.clone());
+                let mut canceled = CANCELED_REQUESTS.lock().await;
+                canceled.remove(&request_id_for_task);
+                return;
+            }
+        };
+        if is_request_canceled(&request_id_for_task).await {
+            drop(python_permit);
+            let _ = app_handle.emit("pdf://request_done", request_id_for_task.clone());
+            let mut canceled = CANCELED_REQUESTS.lock().await;
+            canceled.remove(&request_id_for_task);
+            return;
+        }
+
         let request_id_for_blocking = request_id_for_task.clone();
         let file_id_for_blocking = file_id_for_task.clone();
         let render_result = tokio::task::spawn_blocking(move || {
+            let _python_permit = python_permit;
             let page_png = render_page_png(&path, page_no, render_zoom)?;
             build_tile_payloads(
                 &request_id_for_blocking,
@@ -764,9 +1144,11 @@ pub async fn request_tiles(
 
 #[tauri::command]
 pub async fn cancel_tile_request(request_id: String) -> Result<(), String> {
+    if request_id.trim().is_empty() {
+        return Err("tile request id cannot be empty".to_string());
+    }
     eprintln!("[cancel_tile_request] request_id={}", request_id);
-    let mut canceled = CANCELED_REQUESTS.lock().await;
-    canceled.insert(request_id);
+    mark_request_canceled(request_id).await;
     Ok(())
 }
 
@@ -775,7 +1157,7 @@ pub async fn cancel_llm_chat_completion(request_id: String) -> Result<(), String
     if request_id.trim().is_empty() {
         return Err("LLM request id cannot be empty".to_string());
     }
-    CANCELED_REQUESTS.lock().await.insert(request_id);
+    mark_request_canceled(request_id).await;
     Ok(())
 }
 
@@ -791,7 +1173,10 @@ pub async fn export_page_png(
         file_id, page_no, zoom
     );
     let path = resolve_file_path(&file_id).await?;
-    let zoom = zoom.unwrap_or(2.0).max(0.1);
+    let zoom = zoom
+        .filter(|value| value.is_finite())
+        .unwrap_or(2.0)
+        .clamp(0.1, MAX_RENDER_ZOOM);
 
     let png = run_pdf_export_blocking("png export", request_id, move || {
         render_page_png(&path, page_no, zoom)
@@ -844,6 +1229,15 @@ pub async fn export_page_svg_crop(
     height: f64,
     request_id: Option<String>,
 ) -> Result<String, String> {
+    if !left.is_finite()
+        || !top.is_finite()
+        || !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+    {
+        return Err("SVG crop rectangle must contain finite positive dimensions".to_string());
+    }
     eprintln!(
         "[export_page_svg_crop] file_id={} page={} left={} top={} width={} height={}",
         file_id, page_no, left, top, width, height
@@ -890,8 +1284,18 @@ pub async fn get_page_images(
             .insert(request_id.to_string(), cancel_flag.clone());
     }
 
+    let python_permit = match acquire_python_task_permit("image scan").await {
+        Ok(permit) => permit,
+        Err(error) => {
+            if let Some(request_id) = request_id.as_deref() {
+                PDF_IMAGE_CANCEL_FLAGS.lock().await.remove(request_id);
+            }
+            return Err(error);
+        }
+    };
     let cancel_flag_for_task = cancel_flag.clone();
     let task = tokio::task::spawn_blocking(move || {
+        let _python_permit = python_permit;
         get_page_images_json(&path, page_no, Some(cancel_flag_for_task))
     });
     let result = match tokio::time::timeout(PDF_OPERATION_TIMEOUT, task).await {
@@ -946,18 +1350,31 @@ pub async fn get_pdf_reading_blocks(
             .insert(request_id.to_string(), cancel_flag.clone());
     }
 
+    let python_permit = match acquire_python_task_permit("reading block extraction").await {
+        Ok(permit) => permit,
+        Err(error) => {
+            if let Some(request_id) = request_id.as_deref() {
+                PDF_BLOCK_CANCEL_FLAGS.lock().await.remove(request_id);
+            }
+            return Err(error);
+        }
+    };
     let cancel_flag_for_task = cancel_flag.clone();
     let task = tokio::task::spawn_blocking(move || {
+        let _python_permit = python_permit;
         get_pdf_reading_blocks_json(&path, start_page, end_page, Some(cancel_flag_for_task))
     });
-    let result = match tokio::time::timeout(Duration::from_secs(30), task).await {
+    let result = match tokio::time::timeout(PDF_OPERATION_TIMEOUT, task).await {
         Ok(Ok(result)) => {
             result.map_err(|err| format!("get_pdf_reading_blocks task failed: {err}"))
         }
         Ok(Err(err)) => Err(format!("get_pdf_reading_blocks task failed: {err}")),
         Err(_) => {
             cancel_flag.store(true, Ordering::Release);
-            Err("PDF reading block extraction timed out after 30 seconds".to_string())
+            Err(format!(
+                "PDF reading block extraction timed out after {} seconds",
+                PDF_OPERATION_TIMEOUT.as_secs()
+            ))
         }
     };
     if let Some(request_id) = request_id {
@@ -984,22 +1401,8 @@ pub async fn download_pdf_via_proxy(
     proxy_url: Option<String>,
 ) -> Result<ProxyDownloadPayload, String> {
     let parsed_url = normalize_download_url(&url)?;
-    let mut client_builder = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(8))
-        .timeout(Duration::from_secs(30))
-        .danger_accept_invalid_certs(false);
-    if let Some(proxy) = proxy_url {
-        let trimmed = proxy.trim().to_string();
-        if !trimmed.is_empty() {
-            let req_proxy =
-                reqwest::Proxy::all(&trimmed).map_err(|err| format!("invalid proxy url: {err}"))?;
-            client_builder = client_builder.proxy(req_proxy);
-        }
-    }
-    let client = client_builder
-        .build()
-        .map_err(|err| format!("failed to create proxy client: {err}"))?;
-    let mut response = client
+    let client = crate::http::build_http_client(PDF_OPERATION_TIMEOUT, 8, proxy_url.as_deref())?;
+    let response = client
         .get(parsed_url)
         .send()
         .await
@@ -1016,35 +1419,155 @@ pub async fn download_pdf_via_proxy(
         .get(reqwest::header::CONTENT_DISPOSITION)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.to_string());
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_PROXY_DOWNLOAD_BYTES as u64)
-    {
-        return Err(format!(
-            "download response exceeds {} MiB limit",
-            MAX_PROXY_DOWNLOAD_BYTES / 1024 / 1024
-        ));
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|err| format!("read response bytes failed: {err}"))?
-    {
-        if bytes.len().saturating_add(chunk.len()) > MAX_PROXY_DOWNLOAD_BYTES {
-            return Err(format!(
-                "download response exceeds {} MiB limit",
-                MAX_PROXY_DOWNLOAD_BYTES / 1024 / 1024
-            ));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
+    let bytes = crate::http::read_capped_body(response, MAX_PROXY_DOWNLOAD_BYTES).await?;
     Ok(ProxyDownloadPayload {
         data_base64: BASE64.encode(&bytes),
         final_url,
         content_type,
         content_disposition,
         status_code,
+    })
+}
+
+fn download_file_name(final_url: &str, content_disposition: Option<&str>) -> String {
+    let header_name = content_disposition
+        .and_then(|value| {
+            value.split(';').find_map(|part| {
+                let trimmed = part.trim();
+                let (key, value) = trimmed.split_once('=')?;
+                if key.trim().eq_ignore_ascii_case("filename")
+                    || key.trim().eq_ignore_ascii_case("filename*")
+                {
+                    Some(value.trim().trim_matches('"').to_string())
+                } else {
+                    None
+                }
+            })
+        })
+        .filter(|value| !value.trim().is_empty());
+    let url_name = Url::parse(final_url)
+        .ok()
+        .and_then(|url| {
+            url.path_segments()
+                .and_then(|mut segments| segments.next_back().map(ToOwned::to_owned))
+        })
+        .filter(|value| !value.trim().is_empty());
+    let raw = header_name
+        .or(url_name)
+        .unwrap_or_else(|| "document.pdf".to_string());
+    let safe = raw
+        .replace(['/', '\\', '\0'], "-")
+        .replace(['<', '>', ':', '"', '|', '?', '*'], "-")
+        .trim()
+        .to_string();
+    let safe = if safe.is_empty() {
+        "document.pdf"
+    } else {
+        safe.as_str()
+    };
+    let safe = if safe.to_ascii_lowercase().ends_with(".pdf") {
+        safe.to_string()
+    } else {
+        format!("{safe}.pdf")
+    };
+    sanitize_file_name(&safe).unwrap_or_else(|_| "document.pdf".to_string())
+}
+
+#[tauri::command]
+pub async fn download_pdf_to_temp(
+    app: AppHandle,
+    url: String,
+    proxy_url: Option<String>,
+) -> Result<NativePdfDownloadPayload, String> {
+    let parsed_url = normalize_download_url(&url)?;
+    let client = crate::http::build_http_client(PDF_DOWNLOAD_TIMEOUT, 8, proxy_url.as_deref())?;
+    let mut response = client
+        .get(parsed_url)
+        .send()
+        .await
+        .map_err(|err| format!("PDF download failed: {err}"))?;
+    if !response.status().is_success() {
+        return Err(format!("PDF download returned HTTP {}", response.status()));
+    }
+    if response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("text/html"))
+    {
+        return Err("server returned an HTML page instead of a PDF".to_string());
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_PDF_BYTES)
+    {
+        return Err(format!(
+            "PDF download exceeds {} MiB limit",
+            MAX_PDF_BYTES / 1024 / 1024
+        ));
+    }
+
+    let final_url = response.url().to_string();
+    let file_name = download_file_name(
+        &final_url,
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_DISPOSITION)
+            .and_then(|value| value.to_str().ok()),
+    );
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|value| value.as_millis())
+        .unwrap_or(0);
+    let mut path = app
+        .path()
+        .temp_dir()
+        .map_err(|err| format!("temporary directory unavailable: {err}"))?;
+    path.push(format!("{MANAGED_WEB_PDF_PREFIX}{unique}-{file_name}"));
+    let output_path = path.clone();
+    let mut output = tokio::fs::File::create(&path)
+        .await
+        .map_err(|err| format!("failed to create temporary PDF: {err}"))?;
+    let mut total = 0_u64;
+    let mut prefix = Vec::with_capacity(1024);
+    loop {
+        let chunk = match response.chunk().await {
+            Ok(chunk) => chunk,
+            Err(err) => {
+                let _ = tokio::fs::remove_file(&path).await;
+                return Err(format!("failed to read PDF download: {err}"));
+            }
+        };
+        let Some(chunk) = chunk else { break };
+        total = total.saturating_add(chunk.len() as u64);
+        if total > MAX_PDF_BYTES {
+            let _ = tokio::fs::remove_file(&path).await;
+            return Err(format!(
+                "PDF download exceeds {} MiB limit",
+                MAX_PDF_BYTES / 1024 / 1024
+            ));
+        }
+        if prefix.len() < 1024 {
+            let remaining = 1024 - prefix.len();
+            prefix.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
+        }
+        if let Err(err) = output.write_all(&chunk).await {
+            let _ = tokio::fs::remove_file(&path).await;
+            return Err(format!("failed to write temporary PDF: {err}"));
+        }
+    }
+    if let Err(err) = output.flush().await {
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err(format!("failed to flush temporary PDF: {err}"));
+    }
+    if !prefix.windows(5).any(|window| window == b"%PDF-") {
+        let _ = tokio::fs::remove_file(&path).await;
+        return Err("downloaded content is not a valid PDF".to_string());
+    }
+    Ok(NativePdfDownloadPayload {
+        path: output_path.to_string_lossy().into_owned(),
+        file_name,
+        final_url,
     })
 }
 
@@ -1068,6 +1591,11 @@ fn join_llm_chat_url(base_url: &str) -> String {
     } else {
         format!("{base_url}/chat/completions")
     }
+}
+
+async fn read_llm_response_body(response: reqwest::Response) -> Result<String, String> {
+    let bytes = crate::http::read_capped_body(response, MAX_LLM_RESPONSE_BYTES).await?;
+    String::from_utf8(bytes).map_err(|err| format!("model service response was not UTF-8: {err}"))
 }
 
 fn sanitize_llm_messages(messages: Vec<LlmChatMessage>) -> Result<Vec<serde_json::Value>, String> {
@@ -1116,12 +1644,7 @@ pub async fn llm_chat_completion(request: LlmChatCompletionRequest) -> Result<St
 
     let timeout_ms = request.timeout_ms.unwrap_or(60_000).clamp(1_000, 120_000);
     let request_id = request.request_id.filter(|value| !value.trim().is_empty());
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .timeout(Duration::from_millis(timeout_ms))
-        .danger_accept_invalid_certs(false)
-        .build()
-        .map_err(|err| format!("failed to create model client: {err}"))?;
+    let client = crate::http::build_http_client(Duration::from_millis(timeout_ms), 3, None)?;
 
     let mut builder = client
         .post(join_llm_chat_url(&base_url))
@@ -1172,7 +1695,7 @@ pub async fn llm_chat_completion(request: LlmChatCompletionRequest) -> Result<St
         .to_ascii_lowercase();
     let body = if let Some(request_id) = request_id.as_deref() {
         let result = tokio::select! {
-            result = response.text() => result.map_err(|err| format!("failed to read model response: {err}")),
+            result = read_llm_response_body(response) => result,
             _ = wait_for_request_canceled(request_id) => Err("model service request cancelled".to_string()),
         };
         match result {
@@ -1183,10 +1706,7 @@ pub async fn llm_chat_completion(request: LlmChatCompletionRequest) -> Result<St
             }
         }
     } else {
-        response
-            .text()
-            .await
-            .map_err(|err| format!("failed to read model response: {err}"))?
+        read_llm_response_body(response).await?
     };
     if let Some(request_id) = request_id.as_deref() {
         CANCELED_REQUESTS.lock().await.remove(request_id);
@@ -1238,12 +1758,11 @@ pub async fn create_or_show_webview_tab(
     let parsed_url = parse_webview_url(&url)?;
     let label = native_webview_label(&tab_id);
     let _ = title;
-    {
-        let mut tabs = WEBVIEW_TABS.lock().await;
-        tabs.insert(tab_id.clone(), label.clone());
-    }
-
     if let Some(webview) = app.get_webview(&label) {
+        WEBVIEW_TABS
+            .lock()
+            .await
+            .insert(tab_id.clone(), label.clone());
         webview
             .navigate(parsed_url)
             .map_err(|err| format!("navigate existing webview failed: {err}"))?;
@@ -1264,14 +1783,24 @@ pub async fn create_or_show_webview_tab(
         .initialization_script(NATIVE_WEBVIEW_NAV_PATCH_SCRIPT);
     let nav_app = app.clone();
     let nav_tab_id = tab_id.clone();
+    let download_app = app.clone();
+    let download_tab_id = tab_id.clone();
     builder = builder.on_navigation(move |url| {
         let next = url.as_str();
+        if !matches!(url.scheme(), "http" | "https") {
+            return false;
+        }
         if is_pdf_url(next) {
+            // Keep this callback side-effect free. On macOS this runs inside
+            // WebKit's navigation stack; mutating the same view here can cause
+            // a transient blank page followed by a process crash. The
+            // frontend hides the view after receiving the event.
             let payload = WebviewPdfLinkPayload {
                 tab_id: nav_tab_id.clone(),
                 url: next.to_string(),
             };
             let _ = nav_app.emit("r0nix://webview-pdf-link", payload);
+            hide_webview_after_pdf_interception(&nav_app, native_webview_label(&nav_tab_id));
             return false;
         }
         let payload = WebviewNavigatedPayload {
@@ -1280,6 +1809,36 @@ pub async fn create_or_show_webview_tab(
         };
         let _ = nav_app.emit("r0nix://webview-navigated", payload);
         true
+    });
+    builder = builder.on_download(move |_webview, event| match event {
+        DownloadEvent::Requested { url, destination } => {
+            let url_string = url.to_string();
+            let destination_is_pdf = destination
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("pdf"));
+            if is_pdf_url(&url_string) || destination_is_pdf {
+                // Returning false cancels the download. The frontend hides
+                // the source view after receiving the event, outside this
+                // platform callback.
+                let payload = WebviewPdfLinkPayload {
+                    tab_id: download_tab_id.clone(),
+                    url: url_string,
+                };
+                let _ = download_app.emit("r0nix://webview-pdf-link", payload);
+                hide_webview_after_pdf_interception(
+                    &download_app,
+                    native_webview_label(&download_tab_id),
+                );
+                // Let the frontend validate and stream the PDF instead of
+                // letting WebView create a blank download/PDF surface.
+                false
+            } else {
+                true
+            }
+        }
+        DownloadEvent::Finished { .. } => true,
+        _ => true,
     });
     let main = app
         .get_window("main")
@@ -1290,6 +1849,7 @@ pub async fn create_or_show_webview_tab(
         Size::Logical(LogicalSize::new(1.0, 1.0)),
     )
     .map_err(|err| format!("build embedded native webview failed: {err}"))?;
+    WEBVIEW_TABS.lock().await.insert(tab_id, label.clone());
     Ok(label)
 }
 
@@ -1300,12 +1860,7 @@ pub async fn navigate_webview_tab(
     url: String,
 ) -> Result<(), String> {
     let parsed_url = parse_webview_url(&url)?;
-    let label = {
-        let tabs = WEBVIEW_TABS.lock().await;
-        tabs.get(&tab_id)
-            .cloned()
-            .unwrap_or_else(|| native_webview_label(&tab_id))
-    };
+    let label = registered_webview_label(&tab_id).await?;
 
     if let Some(webview) = app.get_webview(&label) {
         webview
@@ -1321,12 +1876,7 @@ pub async fn navigate_webview_tab_history(
     tab_id: String,
     direction: String,
 ) -> Result<(), String> {
-    let label = {
-        let tabs = WEBVIEW_TABS.lock().await;
-        tabs.get(&tab_id)
-            .cloned()
-            .unwrap_or_else(|| native_webview_label(&tab_id))
-    };
+    let label = registered_webview_label(&tab_id).await?;
     let script = match direction.as_str() {
         "back" => "history.back();",
         "forward" => "history.forward();",
@@ -1351,12 +1901,7 @@ pub async fn show_webview_tab(
     tab_id: String,
     focus: Option<bool>,
 ) -> Result<(), String> {
-    let label = {
-        let tabs = WEBVIEW_TABS.lock().await;
-        tabs.get(&tab_id)
-            .cloned()
-            .unwrap_or_else(|| native_webview_label(&tab_id))
-    };
+    let label = registered_webview_label(&tab_id).await?;
     if let Some(webview) = app.get_webview(&label) {
         webview
             .show()
@@ -1372,12 +1917,7 @@ pub async fn show_webview_tab(
 
 #[tauri::command]
 pub async fn hide_webview_tab(app: AppHandle, tab_id: String) -> Result<(), String> {
-    let label = {
-        let tabs = WEBVIEW_TABS.lock().await;
-        tabs.get(&tab_id)
-            .cloned()
-            .unwrap_or_else(|| native_webview_label(&tab_id))
-    };
+    let label = registered_webview_label(&tab_id).await?;
     if let Some(webview) = app.get_webview(&label) {
         webview
             .hide()
@@ -1395,12 +1935,7 @@ pub async fn sync_webview_tab_bounds(
     width: f64,
     height: f64,
 ) -> Result<(), String> {
-    let label = {
-        let tabs = WEBVIEW_TABS.lock().await;
-        tabs.get(&tab_id)
-            .cloned()
-            .unwrap_or_else(|| native_webview_label(&tab_id))
-    };
+    let label = registered_webview_label(&tab_id).await?;
     let webview = app
         .get_webview(&label)
         .ok_or_else(|| format!("native webview does not exist: {label}"))?;
@@ -1417,10 +1952,12 @@ pub async fn sync_webview_tab_bounds(
 
 #[tauri::command]
 pub async fn close_webview_tab(app: AppHandle, tab_id: String) -> Result<(), String> {
-    let label = {
-        let mut tabs = WEBVIEW_TABS.lock().await;
-        tabs.remove(&tab_id)
-            .unwrap_or_else(|| native_webview_label(&tab_id))
+    // Remove the registration before closing the platform view. A close can
+    // synchronously trigger late navigation/resize callbacks; those callbacks
+    // must fail the lookup instead of operating on a view being torn down.
+    let label = WEBVIEW_TABS.lock().await.remove(&tab_id);
+    let Some(label) = label else {
+        return Ok(());
     };
     if let Some(webview) = app.get_webview(&label) {
         webview
@@ -1433,12 +1970,21 @@ pub async fn close_webview_tab(app: AppHandle, tab_id: String) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::{
-        cancel_llm_chat_completion, ensure_allowed_binary_write_path,
-        ensure_allowed_text_write_path, ensure_importable_extension, ensure_markdown_extension,
-        is_pdf_url, normalize_download_url, sanitize_file_name, wait_for_request_canceled,
-        CANCELED_REQUESTS,
+        cancel_llm_chat_completion, cancel_pdf_byte_read, cancel_pdf_page_count,
+        ensure_allowed_binary_write_path, ensure_allowed_text_write_path,
+        ensure_importable_extension, ensure_markdown_extension, ensure_pdf_extension,
+        is_managed_import_temp_path, is_managed_web_pdf_path, is_pdf_url, is_request_canceled,
+        normalize_download_url, parse_webview_url, sanitize_file_name, wait_for_request_canceled,
+        CANCELED_REQUESTS, PDF_BYTE_READ_CANCEL_FLAGS, PDF_PAGE_COUNT_CANCEL_FLAGS,
     };
-    use std::{path::Path, time::Duration};
+    use std::{
+        path::Path,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
 
     #[tokio::test]
     async fn llm_cancellation_is_visible_to_the_request_waiter() {
@@ -1456,6 +2002,64 @@ mod tests {
             .expect("request waiter should observe cancellation")
             .expect("request waiter should not panic");
         CANCELED_REQUESTS.lock().await.remove(&request_id);
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_wait_is_observed_immediately() {
+        let request_id = "llm-cancel-before-wait-test".to_string();
+        CANCELED_REQUESTS.lock().await.insert(request_id.clone());
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            wait_for_request_canceled(&request_id),
+        )
+        .await
+        .expect("a pre-existing cancel flag must return without waiting for a notify");
+        CANCELED_REQUESTS.lock().await.remove(&request_id);
+    }
+
+    #[tokio::test]
+    async fn cancellation_state_is_scoped_to_request_id() {
+        let request_id = "llm-cancel-waiter-test".to_string();
+        let other_id = "llm-cancel-other-test".to_string();
+        CANCELED_REQUESTS.lock().await.remove(&request_id);
+        CANCELED_REQUESTS.lock().await.insert(other_id.clone());
+        assert!(!is_request_canceled(&request_id).await);
+        assert!(is_request_canceled(&other_id).await);
+        CANCELED_REQUESTS.lock().await.remove(&other_id);
+    }
+
+    #[tokio::test]
+    async fn pdf_open_cancellation_marks_registered_native_tasks() {
+        let byte_request = "pdf-byte-cancel-test".to_string();
+        let page_request = "pdf-page-count-cancel-test".to_string();
+        let byte_flag = Arc::new(AtomicBool::new(false));
+        let page_flag = Arc::new(AtomicBool::new(false));
+        PDF_BYTE_READ_CANCEL_FLAGS
+            .lock()
+            .await
+            .insert(byte_request.clone(), byte_flag.clone());
+        PDF_PAGE_COUNT_CANCEL_FLAGS
+            .lock()
+            .await
+            .insert(page_request.clone(), page_flag.clone());
+
+        cancel_pdf_byte_read(byte_request.clone())
+            .await
+            .expect("byte read cancellation should accept a registered request");
+        cancel_pdf_page_count(page_request.clone())
+            .await
+            .expect("page count cancellation should accept a registered request");
+
+        assert!(byte_flag.load(Ordering::Acquire));
+        assert!(page_flag.load(Ordering::Acquire));
+        PDF_BYTE_READ_CANCEL_FLAGS
+            .lock()
+            .await
+            .remove(&byte_request);
+        PDF_PAGE_COUNT_CANCEL_FLAGS
+            .lock()
+            .await
+            .remove(&page_request);
     }
 
     #[test]
@@ -1498,9 +2102,15 @@ mod tests {
         assert!(ensure_importable_extension(Path::new("paper.pdf")));
         assert!(ensure_importable_extension(Path::new("note.md")));
         assert!(!ensure_importable_extension(Path::new("secret.env")));
+        assert!(ensure_pdf_extension(Path::new("PAPER.PDF")));
+        assert!(!ensure_pdf_extension(Path::new("note.md")));
+        assert!(parse_webview_url("https://example.com/paper").is_ok());
+        assert!(parse_webview_url("file:///tmp/paper.pdf").is_err());
+        assert!(parse_webview_url("javascript:alert(1)").is_err());
 
         assert!(ensure_allowed_text_write_path(Path::new("export.csv")).is_ok());
         assert!(ensure_allowed_text_write_path(Path::new("diagram.svg")).is_ok());
+        assert!(ensure_allowed_text_write_path(Path::new("EXPORT.CSV")).is_ok());
         assert!(ensure_allowed_text_write_path(Path::new("script.sh")).is_err());
 
         assert!(ensure_allowed_binary_write_path(Path::new("page.png")).is_ok());
@@ -1517,6 +2127,52 @@ mod tests {
         assert!(sanitize_file_name("../paper.pdf").is_err());
         assert!(sanitize_file_name("nested/paper.pdf").is_err());
         assert!(sanitize_file_name("nested\\paper.pdf").is_err());
+    }
+
+    #[test]
+    fn managed_web_pdf_cleanup_is_limited_to_the_app_temp_directory() {
+        let temp_dir = Path::new("/tmp/r0nix");
+        assert!(is_managed_web_pdf_path(
+            temp_dir,
+            Path::new("/tmp/r0nix/r0nix-web-123-paper.pdf")
+        ));
+        assert!(!is_managed_web_pdf_path(
+            temp_dir,
+            Path::new("/tmp/r0nix/paper.pdf")
+        ));
+        assert!(!is_managed_web_pdf_path(
+            temp_dir,
+            Path::new("/tmp/other/r0nix-web-123-paper.pdf")
+        ));
+        assert!(!is_managed_web_pdf_path(
+            temp_dir,
+            Path::new("/tmp/r0nix/r0nix-web-123-paper.txt")
+        ));
+    }
+
+    #[test]
+    fn managed_import_cleanup_is_limited_to_owned_temp_files() {
+        let temp_dir = Path::new("/tmp/r0nix");
+        assert!(is_managed_import_temp_path(
+            temp_dir,
+            Path::new("/tmp/r0nix/r0nix-import-42-paper.pdf")
+        ));
+        assert!(is_managed_import_temp_path(
+            temp_dir,
+            Path::new("/tmp/r0nix/r0nix-import-42-note.md")
+        ));
+        assert!(!is_managed_import_temp_path(
+            temp_dir,
+            Path::new("/tmp/r0nix/paper.pdf")
+        ));
+        assert!(!is_managed_import_temp_path(
+            temp_dir,
+            Path::new("/tmp/other/r0nix-import-42-paper.pdf")
+        ));
+        assert!(!is_managed_import_temp_path(
+            temp_dir,
+            Path::new("/tmp/r0nix/r0nix-import-42-script.sh")
+        ));
     }
 
     #[test]
@@ -1583,13 +2239,44 @@ mod tests {
             vector_items.len() >= 2,
             "separate vector paths must remain separate resources"
         );
+        let vector_widths = vector_items
+            .iter()
+            .filter_map(|item| {
+                let bbox = item["bbox"].as_array()?;
+                let left = bbox.first()?.as_f64()?;
+                let right = bbox.get(2)?.as_f64()?;
+                Some(right - left)
+            })
+            .collect::<Vec<_>>();
         assert!(
-            vector_items.iter().all(|item| {
+            vector_widths
+                .iter()
+                .any(|width| (*width - 50.0).abs() < 0.1)
+                && vector_widths
+                    .iter()
+                    .any(|width| (*width - 40.0).abs() < 0.1),
+            "nested vector paths must retain both outer and inner export bounds"
+        );
+        assert!(
+            vector_items.iter().any(|item| {
                 let bbox = item["bbox"].as_array();
                 bbox.and_then(|values| values.get(2))
                     .and_then(serde_json::Value::as_f64)
                     .zip(
-                        bbox.and_then(|values| values.get(0))
+                        bbox.and_then(|values| values.first())
+                            .and_then(serde_json::Value::as_f64),
+                    )
+                    .is_some_and(|(right, left)| right - left > 100.0)
+            }),
+            "large vector figures must remain discoverable"
+        );
+        assert!(
+            vector_items.iter().any(|item| {
+                let bbox = item["bbox"].as_array();
+                bbox.and_then(|values| values.get(2))
+                    .and_then(serde_json::Value::as_f64)
+                    .zip(
+                        bbox.and_then(|values| values.first())
                             .and_then(serde_json::Value::as_f64),
                     )
                     .is_some_and(|(right, left)| right - left < 70.0)
@@ -1600,6 +2287,8 @@ mod tests {
         assert_eq!(image["extension"], "png");
         assert_eq!(image["width"], 1);
         assert_eq!(image["height"], 1);
+        assert_eq!(image["bbox"][0].as_f64(), Some(10.0));
+        assert_eq!(image["bbox"][1].as_f64(), Some(10.0));
 
         let extracted: serde_json::Value = serde_json::from_str(
             &extract_pdf_image_json(path.to_str().expect("fixture path"), 1, xref)
@@ -1620,12 +2309,22 @@ mod tests {
             path.to_str().expect("fixture path"),
             1,
             20.0,
-            20.0,
-            80.0,
-            80.0,
+            30.0,
+            60.0,
+            40.0,
         )
         .expect("export SVG crop");
         assert!(svg.contains("<svg"));
+        assert!(
+            svg.contains("viewBox=\"20 110 60 40\""),
+            "SVG crop must convert PDF top-origin coordinates to SVG coordinates"
+        );
+        assert!(
+            svg.contains("clipPath id=\"r0nix-crop\"")
+                && svg.contains("clip-path=\"url(#r0nix-crop)\"")
+                && svg.contains("overflow=\"hidden\""),
+            "SVG crop must explicitly clip the exported content to the target bounds"
+        );
         assert!(
             svg.len() < 50_000,
             "crop unexpectedly expanded to page-sized SVG"

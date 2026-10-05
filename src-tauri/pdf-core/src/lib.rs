@@ -2,12 +2,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use thiserror::Error;
 
+const MAX_PLANNED_TILES: usize = 4096;
+const MAX_VIEWPORT_EXTENT: f32 = 1_048_576.0;
+
 #[derive(Debug, Error, Clone)]
 pub enum CoreError {
     #[error("document not found: {0}")]
     DocumentNotFound(String),
     #[error("failed to open document: {0}")]
     OpenFailed(String),
+    #[error("document is already open: {0}")]
+    DocumentAlreadyOpen(String),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,11 +65,16 @@ impl PdfCore {
     }
 
     pub fn open_document(&mut self, file_id: String, path: &str) -> Result<PdfInfo, CoreError> {
+        if file_id.trim().is_empty() {
+            return Err(CoreError::OpenFailed("file id is empty".to_string()));
+        }
+        if self.documents.contains_key(&file_id) {
+            return Err(CoreError::DocumentAlreadyOpen(file_id));
+        }
         let file_size = std::fs::metadata(path)
             .map(|m| m.len())
             .map_err(|err| CoreError::OpenFailed(format!("cannot read file metadata: {err}")))?;
 
-        // Placeholder until the renderer pipeline is moved into Rust core.
         let info = PdfInfo {
             file_id: file_id.clone(),
             path: path.to_string(),
@@ -111,7 +121,18 @@ pub fn plan_visible_tiles(
     tile_size: u32,
     overscan_tiles: u32,
 ) -> Vec<(u32, u32, u32, u32)> {
-    if viewport.width <= 0.0 || viewport.height <= 0.0 || tile_size == 0 {
+    if !viewport.x.is_finite()
+        || !viewport.y.is_finite()
+        || !viewport.width.is_finite()
+        || !viewport.height.is_finite()
+        || viewport.width <= 0.0
+        || viewport.height <= 0.0
+        || viewport.x.abs() > MAX_VIEWPORT_EXTENT
+        || viewport.y.abs() > MAX_VIEWPORT_EXTENT
+        || viewport.width > MAX_VIEWPORT_EXTENT
+        || viewport.height > MAX_VIEWPORT_EXTENT
+        || tile_size == 0
+    {
         return Vec::new();
     }
 
@@ -122,6 +143,12 @@ pub fn plan_visible_tiles(
     let start_y = ((viewport.y - overscan).max(0.0) / tile).floor() as u32 * tile_size;
     let end_x = (((viewport.x + viewport.width + overscan) / tile).ceil() as u32).max(1) * tile_size;
     let end_y = (((viewport.y + viewport.height + overscan) / tile).ceil() as u32).max(1) * tile_size;
+
+    let planned_x = end_x.saturating_sub(start_x).div_ceil(tile_size) as usize;
+    let planned_y = end_y.saturating_sub(start_y).div_ceil(tile_size) as usize;
+    if planned_x.saturating_mul(planned_y) > MAX_PLANNED_TILES {
+        return Vec::new();
+    }
 
     let mut tiles = Vec::new();
     let mut y = start_y;
@@ -138,11 +165,46 @@ pub fn plan_visible_tiles(
 
 #[cfg(test)]
 mod tests {
-    use super::PdfCore;
+    use super::{CoreError, PdfCore};
 
     #[test]
     fn creates_empty_core() {
         let core = PdfCore::new();
         assert!(core.list_documents().is_empty());
+    }
+
+    #[test]
+    fn rejects_empty_and_duplicate_file_ids() {
+        let path = std::env::temp_dir().join(format!("r0nix-pdf-core-{}.pdf", std::process::id()));
+        std::fs::write(&path, b"fixture").expect("write fixture");
+        let mut core = PdfCore::new();
+
+        assert!(matches!(
+            core.open_document(String::new(), path.to_str().unwrap()),
+            Err(CoreError::OpenFailed(_))
+        ));
+        core.open_document("file-1".to_string(), path.to_str().unwrap())
+            .expect("first open should succeed");
+        assert!(matches!(
+            core.open_document("file-1".to_string(), path.to_str().unwrap()),
+            Err(CoreError::DocumentAlreadyOpen(id)) if id == "file-1"
+        ));
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn rejects_non_finite_and_unbounded_tile_viewports() {
+        use super::{plan_visible_tiles, TileViewport};
+
+        assert!(plan_visible_tiles(
+            &TileViewport { x: 0.0, y: 0.0, width: f32::NAN, height: 100.0 },
+            512,
+            1,
+        ).is_empty());
+        assert!(plan_visible_tiles(
+            &TileViewport { x: 0.0, y: 0.0, width: 100_000.0, height: 100_000.0 },
+            512,
+            1,
+        ).is_empty());
     }
 }

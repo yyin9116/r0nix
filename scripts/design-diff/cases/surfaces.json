@@ -1,0 +1,60 @@
+{
+  "_comment": "规则级断言：验证「某条手写 CSS 规则用的到底是哪个令牌」。这些类里的多数不在当前挂载视图里（阅读助手浮层、Web 加载遮罩），整页快照采不到，只能用 probe 注入游离元素读计算值。断言的是**规则→令牌的归属**与**令牌→像素的结果**，不是「令牌等于多少」—— 后者由 app-shell.json / dark-migration.json 直接断言工具类覆盖，这里不重复。",
+  "_rewriteNote": "2026-10-04 重写。原用例的 8 个目标（home-hero-card / home-address-card / home-address-bar / home-content / pdf-status-bar / snapshot-handle / snapshot-actions / page-image-debug-badge）随 StartPage 改用 Tailwind 工具类而失去全部消费者，已在同日的死代码清理中删除 —— 探针于是 28/28 全部量到 `rgba(0, 0, 0, 0)`（找不到规则，不是值不对）。重写时改用存活规则，并把断言收敛到 6 条各自独立的决策上。",
+  "props": ["backgroundColor", "color", "borderTopColor"],
+  "targets": [
+    {
+      "label": "PDF 纸张不随主题翻转",
+      "class": "pdf-page-block",
+      "_claim": "PDF 页面本体是「纸」，深色模式下也是白纸。反色属 reader 主题的职责，不是 UI 主题的。若这条挂了，说明有人给 --surface-paper 加了深色覆写。",
+      "expect": {
+        "light": { "backgroundColor": "rgb(255, 255, 255)" },
+        "dark": { "backgroundColor": "rgb(255, 255, 255)" }
+      }
+    },
+    {
+      "label": "阅读助手面板 = surface-panel",
+      "class": "reading-assist-menu",
+      "_claim": "浮层主体取 panel 面 + default 描边（与右键菜单同级）。",
+      "expect": {
+        "light": { "backgroundColor": "rgb(255, 255, 255)", "borderTopColor": "rgb(212, 212, 216)" },
+        "dark": { "backgroundColor": "rgb(24, 24, 27)", "borderTopColor": "rgb(63, 63, 70)" }
+      }
+    },
+    {
+      "label": "摘录区比面板更沉一层",
+      "class": "reading-assist-excerpt",
+      "_claim": "同一浮层内三个层次：面板 panel → 摘录 app → 按钮 sunken。摘录取 app 而不是 panel，是为了和面板拉开底色差；取 sunken 会和按钮撞色。这条锁住相对层次。",
+      "expect": {
+        "light": { "backgroundColor": "rgb(250, 250, 250)" },
+        "dark": { "backgroundColor": "rgb(9, 9, 11)" }
+      }
+    },
+    {
+      "label": "阅读助手按钮 = surface-sunken",
+      "class": "reading-assist-action",
+      "expect": {
+        "light": { "backgroundColor": "rgb(244, 244, 245)", "borderTopColor": "rgb(212, 212, 216)" },
+        "dark": { "backgroundColor": "rgb(15, 15, 17)", "borderTopColor": "rgb(63, 63, 70)" }
+      }
+    },
+    {
+      "label": "手写 CSS 里的强调色链路",
+      "class": "reading-assist-submit",
+      "_claim": "★ 唯一一处断言「手写 CSS 规则能取到运行时注入的强调色」。--reader-accent 由 App 写在 documentElement 上；一旦注入点被挪到后代元素，:root 上的派生值会烧成兜底灰，而这条会立刻变灰 —— 这正是本项目踩过的 P0（强调色点了界面不变，且深浅两态都是同一个灰，截图上看不出来）。",
+      "expect": {
+        "light": { "backgroundColor": "rgb(24, 24, 27)", "color": "rgb(255, 255, 255)" },
+        "dark": { "backgroundColor": "rgb(244, 244, 245)", "color": "rgb(24, 24, 27)" }
+      }
+    },
+    {
+      "label": "Web 加载遮罩半透明衬底",
+      "class": "web-loading-overlay",
+      "_claim": "color-mix(..., transparent) 就地派生半透明面，而不是新增一枚字面色。同时验证 color-mix 的 alpha 保真。",
+      "expect": {
+        "light": { "backgroundColor": "rgba(255, 255, 255, 0.86)" },
+        "dark": { "backgroundColor": "rgba(24, 24, 27, 0.86)" }
+      }
+    }
+  ]
+}

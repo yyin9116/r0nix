@@ -1,0 +1,298 @@
+/*
+ * r0nix 设计令牌层
+ * ---------------------------------------------------------------------------
+ * 唯一色源 + 字号 / 圆角 / 高度 / 层级 / 动效刻度。
+ *
+ * 接入方式（增量、可回滚）：
+ *   1. 在 src/index.css 顶部把本文件放在 tailwindcss 之后：
+ *        @import "tailwindcss";
+ *        @import "./tokens.css";
+ *   2. 本文件的 :root 是「无层级」普通规则。按 CSS 层叠层规范，无层级声明排在
+ *      所有 @layer 之后，因此它一旦被 @import 就【立刻压过】index.css 里
+ *      @layer base 的任何同名声明 —— 不存在「层内声明仍然优先」这回事。
+ *      不要在注释里假设反了。
+ *   3. 迁移进度见 docs/token-migration-map.md。
+ *
+ * 迁移期曾有一段兼容别名层（--chrome-* / --bg-primary / --text-* / --accent-*），
+ * 让尚未迁移的手写 CSS 继续可用。2026-10-04 最后一个引用迁走后已整段删除 ——
+ * 现在本文件就是唯一色源，没有第二套名字。
+ *
+ * 两个刻意的取值变更（迁移前 --chrome-* 与原值的差异，均已实测生效）：
+ *   ① --surface-app（原 --bg-primary）浅色 #ffffff → #fafafa
+ *   ② 深色 --border-default 由 #27272a 变为 #3f3f46（描边三档引入后统一）
+ * 依据见 docs/design-system.md §4。
+ */
+
+@theme {
+  /* ---- 表面 / 描边 / 文字：把语义令牌暴露成 Tailwind 工具类 ----
+     用法：bg-surface-panel / text-content-muted / border-border-subtle
+     值本身引用运行时变量，所以深浅色切换自动生效，无需 dark: 前缀。 */
+  --color-surface-app: var(--surface-app);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-surface-panel: var(--surface-panel);
+  --color-surface-hover: var(--surface-hover);
+  --color-surface-active: var(--surface-active);
+  --color-surface-paper: var(--surface-paper);
+  --color-border-subtle: var(--border-subtle);
+  --color-border-default: var(--border-default);
+  --color-border-strong: var(--border-strong);
+  --color-content-primary: var(--content-primary);
+  --color-content-secondary: var(--content-secondary);
+  --color-content-muted: var(--content-muted);
+  --color-content-disabled: var(--content-disabled);
+  --color-content-inverse: var(--content-inverse);
+  --color-content-primary-hover: var(--content-primary-hover);
+
+  /* ---- 强调色：跟随用户选择（--reader-accent 由 App 运行时注入） ---- */
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-on: var(--accent-on);
+
+  /* ---- 状态色：本产品唯一被允许的色彩入口 ----
+     每个状态三段式：tint 底色 / border 描边 / fg 文字与图标，soft 用于半透明环。
+     text-state-danger 等价于 text-state-danger-fg，覆盖最常见的「危险文字」用法。 */
+  --color-state-ok-tint: var(--state-ok-tint);
+  --color-state-ok-border: var(--state-ok-border);
+  --color-state-warn-tint: var(--state-warn-tint);
+  --color-state-warn-border: var(--state-warn-border);
+  --color-state-danger-tint: var(--state-danger-tint);
+  --color-state-danger-border: var(--state-danger-border);
+  /* 文字用法只保留短名一种写法：text-state-danger。
+     不再额外提供 text-state-danger-fg —— 两个类指向同一个变量属于重复词汇。 */
+  --color-state-danger: var(--state-danger-fg);
+  --color-state-ok: var(--state-ok-fg);
+  --color-state-warn: var(--state-warn-fg);
+
+  /* ---- 高度 ----
+     刻意【不】在这里暴露 shadow-* 工具类。
+     理由：本仓库 15 处 box-shadow 全部写在手写 CSS 里，TSX 侧零处使用
+     shadow-* 类；高度令牌的真正消费者是 CSS 的 box-shadow 属性。
+     需要工具类时用任意值：shadow-[var(--elev-sm)]。 */
+}
+
+:root {
+  /* =======================================================================
+   * 表面（由低到高）
+   *
+   * 第 5 档 --surface-active 是建立组件层时才补的：按钮的「按下/二级 hover」
+   * 在代码里原本写作 `hover:bg-zinc-300 dark:hover:bg-zinc-700`
+   * （= #d4d4d8 / #3f3f46），前四档都没有对应值 —— 用 sunken 会朝错误方向走
+   * （浅色变亮、深色变黑）。它不是「先备着」，是有真实实例才归纳出来的。
+   * ===================================================================== */
+  --surface-app: #fafafa; /* 应用外壳 / 窗口底色 */
+  --surface-sunken: #f4f4f5; /* 内凹区：侧栏轨道、嵌入面板底 */
+  --surface-panel: #ffffff; /* 主面板、卡片、下拉（默认内容面） */
+  --surface-hover: #e4e4e7; /* hover / 选中填充 */
+  --surface-active: #d4d4d8; /* 按下 / 二级 hover */
+
+  /* 纸张色：PDF 页面本身，以及贴在页面上的浮层（快照手柄、快照操作条、debug 徽标底）。
+     刻意【不随主题翻转】—— PDF 内容永远是纸面，深色模式下也是白纸；
+     「深色下把 PDF 反色」属于阅读偏好，应由 reader 主题承担，不是 UI 主题的职责。
+     所以下面的深色块里【没有】它的覆写 —— 这是有意为之，不是遗漏。
+     它存在的意义是把这 4 处「无法区分是漏迁还是刻意」的白色变成显式语义。 */
+  --surface-paper: #ffffff;
+
+  /* =======================================================================
+   * 描边（3 档）
+   * 第三档「强描边 / 聚焦前态」在 2026-10 首轮审计时被删（当时全仓零实例）。
+   * 2026-10-04 迁移 PDFViewer 时出现了第一次真实需求：批注输入框的
+   * `focus:ring-1 focus:ring-zinc-400 dark:focus:ring-zinc-600` ——
+   * 它要的是「比控件描边更显眼、但不抢强调色」的灰度聚焦环。
+   * 与其把它硬塞进 border-default（浅色差 27/255、深色差 18/255），
+   * 不如把这一档按需补回：两侧都是逐值精确。
+   * ===================================================================== */
+  --border-subtle: #e4e4e7; /* 分隔线、极轻描边 */
+  --border-default: #d4d4d8; /* 控件描边（输入框、按钮） */
+  --border-strong: #a1a1aa; /* 强描边 / 灰度聚焦环 */
+
+  /* =======================================================================
+   * 文字（4 档）
+   * ===================================================================== */
+  --content-primary: #18181b;
+  --content-secondary: #3f3f46;
+  --content-muted: #71717a; /* 元信息、分组标签 —— 最低对比见 a11y 条款 */
+  --content-disabled: #a1a1aa;
+
+  /* 反相前景：坐在 --content-primary 上的文字与图标（logo 徽标、实心主按钮）。
+     它必须随主题反相 —— 浅色下 content-primary 是深色，故取白；
+     深色下 content-primary 是浅色，故取最深的应用底。
+     迁移动机来自一处既有不一致：侧栏 logo 写 dark:text-zinc-900(#18181b)、
+     Markdown 按钮写 dark:text-zinc-950(#09090b)，同一语义两种深色值。
+     统一取 #09090b（对 #f4f4f5 的对比度 18:1，比 #18181b 更稳）。 */
+  --content-inverse: #ffffff;
+
+  /* 实心主按钮的 hover 档。
+     为什么要单独一档：这是全仓唯一「填充色 = 前景色」的组件（反相按钮），
+     它的 hover 不能复用 surface 阶梯 —— surface 阶梯在浅色下是「往下走」（更暗），
+     而深色实心按钮的 hover 必须「往上走」（更亮），方向相反。
+     浅色 #18181b → #27272a，深色 #f4f4f5 → #ffffff，都是朝更极端走一档。
+     归并动机是一处既有不一致：同一个「主按钮」模式，Whiteboards 写
+     dark:hover:bg-white(#ffffff)，MarkdownViewer 写 dark:hover:bg-surface-panel
+     (#18181b) —— 后者会让按钮从近白直接跳到近黑。统一取 #ffffff。 */
+  --content-primary-hover: #27272a;
+
+  /* =======================================================================
+   * 强调色：运行时由 :root 上的 --reader-accent / -soft / -contrast 覆写
+   * 兜底值 = 浅色下 zinc 的注入值（#18181b）—— 即「默认主题 + 默认强调色」。
+   * 这里给不出「两种主题都对的魔法值」：zinc 是唯一会随主题反相的选项
+   * （浅色 #18181b / 深色 #f4f4f5），而兜底值只能写一个。
+   * 它只在 App 挂载前的那一帧可见，React 挂载后立刻由 useLayoutEffect 覆写。
+   * 切勿把兜底值当成「zinc 的实际颜色」引用：实际值在 src/theme/accent.ts。
+   *
+   * ★ 注入点：这三个变量必须由 App.tsx 写在 documentElement（:root）上。
+   * 本文件与 @theme 里的每个派生值（--accent / --accent-primary / --accent-light
+   * / --accent-hover / --accent-ring / --color-accent*）都在 :root 完成 var() 代入，
+   * 挂到任何后代元素上都会让它们烧成兜底值 —— 现象是「强调色永远是灰的」。
+   * ===================================================================== */
+  --accent: var(--reader-accent, #18181b);
+  --accent-soft: var(--reader-accent-soft, rgba(24, 24, 27, 0.08));
+  --accent-on: var(--reader-accent-contrast, #ffffff);
+  --accent-ring: color-mix(in srgb, var(--accent) 40%, transparent);
+  /* 强调色的 6 个选项值不在本文件：它们是「用户可选集合」，由 App.tsx 的
+     ACCENT_TOKENS 持有并注入 --reader-accent*。在这里再抄一份会产生第二处真相。 */
+
+  /* =======================================================================
+   * 状态色：唯一允许的彩色，其余一律走强调色。
+   * 每个状态三段式：tint 底 / border 可见描边 / fg 文字。取值取自代码里原本
+   * 在用的代表色，因此在迁移前有对应写法的位置视觉不变。
+   * fg 的对比度（浅色，落在各自 tint 上，均 ≥ AA 4.5）：
+   *     ok #166534 → 6.81   warn #92400e → 6.37   danger #b91c1c → 5.91
+   * 需要「半透明状态色」（柔和描边、半透明环）时，不要新增字面色，也不要新增
+   * --state-*-soft 令牌（那两个令牌在仓库里零消费者，已删除），
+   * 就地派生：color-mix(in srgb, var(--state-*-fg) N%, transparent)。
+   * ===================================================================== */
+  --state-ok-tint: #f0fdf4;
+  --state-ok-border: #86efac;
+  --state-ok-fg: #166534;
+  --state-warn-tint: #fef3c7;
+  --state-warn-border: #fde68a;
+  --state-warn-fg: #92400e;
+  --state-danger-tint: #fef2f2;
+  --state-danger-border: #fca5a5;
+  --state-danger-fg: #b91c1c;
+
+  /* =======================================================================
+   * 高度：瑞士风格以描边建立层级，阴影只用于真正浮起的层。
+   *
+   * 这套刻度是【按代码实测归纳】的，不是先定一套再让代码去凑。
+   * 归纳前手写 CSS 里有 8 个互不相同的 box-shadow，收敛成 4 档：
+   *   sm  0 1px 2px  c 14%   贴片、缩略图底、hover 抬起
+   *   md  0 4px 12px c 15%   浮动工具条、局部操作组
+   *   lg  0 10px 24px c 16%  下拉菜单、右键菜单、浮动面板
+   *   xl  0 18px 48px c 22%  主浮层（阅读助手）
+   *
+   * 关键点：一律用 color-mix(..., var(--content-primary), ...) 而不是固定
+   * rgba(0,0,0,...)。--content-primary 在深色下是 #f4f4f5，阴影会自动从
+   * 「暗投影」翻成「浅色辉光」，因此深色块【不需要】再覆写 --elev-*。
+   * （改前 --elev-raised 写死 rgba(24,24,27,.06)：WebViewPanel 的 3 处引用
+   *   在深色下几乎不可见，而同组件其余位置用的是浅色辉光 —— 这就是修它的原因。）
+   * ===================================================================== */
+  --elev-sm: 0 1px 2px color-mix(in srgb, var(--content-primary) 14%, transparent);
+  --elev-md: 0 4px 12px color-mix(in srgb, var(--content-primary) 15%, transparent);
+  --elev-lg: 0 10px 24px color-mix(in srgb, var(--content-primary) 16%, transparent);
+  --elev-xl: 0 18px 48px color-mix(in srgb, var(--content-primary) 22%, transparent);
+
+  /* =======================================================================
+   * 焦点环：全应用唯一的键盘焦点视觉，只由 :focus-visible 触发（见 index.css
+   * 的 @layer base）。
+   *
+   * 颜色取用户强调色 —— 浅色下是深色环、深色下是浅色环，始终与所在表面保持对比
+   * （强调色在深色下由 App.tsx 覆写为 #f4f4f5）。
+   *
+   * 这里能安全地在 :root 上做一次 var() 代入，是因为 --reader-accent 的注入点
+   * 已从应用外壳 div 移到 :root（见 App.tsx 的 useEffect）。
+   * 反过来切记：只要 --reader-accent 被挂到 :root 之外的任何元素上，本行就会被
+   * 烧成兜底值 #52525b 并被所有后代继承 —— 深色下落在 #18181b 表面上对比度只有
+   * 约 2.4:1，键盘用户几乎看不见。详见 §「注入点」注释。
+   * ===================================================================== */
+  --focus-ring-color: var(--reader-accent, var(--accent));
+  --focus-ring-width: 2px;
+  --focus-ring-offset: 2px;
+
+  /* 间距没有令牌集，这是刻意的：
+     Tailwind v4 已经提供 --spacing(4px) 与 p-* / gap-* 工具类，手写 CSS 需要时用
+     calc(var(--spacing) * N) 即可，再包一层 --space-N 只是同义反复。
+     本仓库手写 CSS 的实际尺度是 2px 半步（实测 179 处间距声明：8px×31、12px×28、
+     10px×24、6px×19…，其中 83 处不在 4px 刻度上），收不进任何 4px 令牌集。
+     间距是「评审时看刻度」的事，不是「用变量包起来」的事 —— 见 docs/design-system.md §3.6。 */
+
+  /* =======================================================================
+   * 圆角：直接沿用 Tailwind 的 --radius-* 刻度（不重定义，避免改动 rounded-* 的既有尺寸）
+   * 允许档位：xs 2 / sm 4 / md 6 / lg 8 / xl 12 / 2xl 16 / pill
+   * ===================================================================== */
+  --radius-pill: 999px;
+
+  /* =======================================================================
+   * 字号：手写 CSS 用语义别名，值仍取 Tailwind 刻度（不新增字号）
+   * 只保留当前真有引用的别名 —— 其余（title / body-leading 等）已删除，
+   * 因为它们在代码里没有任何 20px / 1.15 的对应实例，属于「想当然的刻度」。
+   * 实际在用的字号清单与收敛目标见 docs/design-system.md §3.6。
+   * ===================================================================== */
+  --text-caption: var(--text-xs); /* 12px  元信息、分组标签 */
+  --text-ui: var(--text-sm); /* 14px  控件与正文默认 */
+  --text-body: var(--text-base); /* 16px  阅读正文 */
+
+  /* 阅读场景专用行高（不等同 UI 行高） */
+  --leading-ui: 1.45;
+
+  /* 层级没有令牌集，同样是刻意的：本仓库 19 处 z-index 里绝大多数是页面内部的
+     局部层叠上下文（0/1/2/4/5/7/9 —— 页基线、贴片、文字层、链接层），这些绝不能
+     抽成全局阶梯。剩下 7 处跨组件的值尚不一致（20 / 80 / 90 / 100 / 120 / 130
+     都在充当「浮层」），先收敛成一个浮层档位再token化，否则只是把不一致命名下来。
+     清单见 docs/design-system.md §3.6。 */
+
+  /* =======================================================================
+   * 动效
+   * ===================================================================== */
+  --duration-fast: 120ms; /* hover / 按压反馈 */
+  --duration-base: 160ms; /* 状态与面板切换 */
+  --duration-slow: 240ms; /* 浮层进出 */
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+}
+
+/*
+ * 深色：App.tsx 同时设置 html.dark 与 html[data-theme="dark"]，
+ * 这里一次覆盖两种机制，避免出现「Tailwind dark: 生效但手写 CSS 没生效」的裂缝。
+ * :where() 权重为 0，所以本块选择器权重仅 (0,1,0)；但它是【无层级】规则，
+ * 排在所有 @layer 之后，因此任何层内的同名声明都压不过它（层级先于权重比较）。
+ * 实测：深色 --border-default = #3f3f46（本块）。
+ */
+:root:where([data-theme="dark"], .dark) {
+  --surface-app: #09090b;
+  --surface-sunken: #0f0f11;
+  --surface-panel: #18181b;
+  --surface-hover: #27272a;
+  --surface-active: #3f3f46;
+  --border-subtle: #27272a;
+  --border-default: #3f3f46;
+  --border-strong: #52525b;
+  --content-primary: #f4f4f5;
+  --content-secondary: #d4d4d8;
+  --content-muted: #a1a1aa;
+  --content-disabled: #71717a;
+  --content-inverse: #09090b;
+  --content-primary-hover: #ffffff;
+  /* 深色状态色：tint / border 直接沿用代码里已手工混出的那两个值（#0f2a1d、#3a1f27、#5f1d24），
+     因此替换后深色视觉与现状完全一致，只是不再散落各文件。 */
+  --state-ok-tint: #0f2a1d;
+  --state-ok-border: #1c4a32;
+  --state-ok-fg: #4ade80;
+  --state-warn-tint: #3a2a12;
+  --state-warn-border: #5c4218;
+  --state-warn-fg: #fbbf24;
+  --state-danger-tint: #3a1f27;
+  --state-danger-border: #5f1d24;
+  --state-danger-fg: #f87171;
+  /* 这里【没有】--elev-* 覆写：刻度用 color-mix(..., var(--content-primary), ...)
+     构建，而 --content-primary 在上一行已翻成 #f4f4f5，阴影自动变成浅色辉光。 */
+}
+
+/* 尊重系统「减少动态效果」设置 */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --duration-fast: 0ms;
+    --duration-base: 0ms;
+    --duration-slow: 0ms;
+  }
+}

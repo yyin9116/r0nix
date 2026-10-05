@@ -36,6 +36,12 @@ impl PdfManager {
     }
 }
 
+impl Default for PdfManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::PdfManager;

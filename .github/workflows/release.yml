@@ -74,6 +74,15 @@ jobs:
       - name: Check Release Readiness
         run: npm run check:release
 
+      - name: Check P-Level Contracts
+        run: npm run check:contracts
+
+      - name: Run P-Level Fixtures
+        run: npm run test:fixtures
+
+      - name: Run Browser P-Level E2E
+        run: npm run test:e2e
+
       - name: Check macOS signing secrets
         id: macos_signing
         if: matrix.platform.name == 'macos'
@@ -96,7 +105,7 @@ jobs:
 
           if (( ${#missing[@]} > 0 )); then
             printf 'macOS Developer ID signing and notarization secrets are missing: %s\n' "${missing[*]}" >&2
-            printf 'Building an ad-hoc signed macOS package instead. This package is usable, but users may need to approve it manually in macOS Security settings.\n' >&2
+            printf 'Building an ad-hoc macOS package. It is not notarized; users may need to approve it manually in macOS Security settings.\n' >&2
             echo "has_secrets=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -117,10 +126,7 @@ jobs:
         env:
           APPLE_SIGNING_IDENTITY: "-"
         run: |
-          npx tauri build --bundles app
-          bash scripts/patch-macos-bundle.sh "src-tauri/target/release/bundle/macos/r0nix.app"
-          bash scripts/macos-bundle-smoke.sh "src-tauri/target/release/bundle/macos/r0nix.app"
-          npx tauri bundle --bundles dmg --no-sign
+          bash scripts/build-macos-bundle.sh
 
       - name: Build Signed and Notarized macOS Bundles
         if: matrix.platform.name == 'macos' && steps.macos_signing.outputs.has_secrets == 'true'
@@ -133,14 +139,20 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
+          source scripts/macos-signing.sh
+          trap cleanup_macos_signing EXIT
+          setup_macos_signing
           npx tauri build --bundles app
           bash scripts/patch-macos-bundle.sh "src-tauri/target/release/bundle/macos/r0nix.app"
           bash scripts/notarize-macos-artifact.sh "src-tauri/target/release/bundle/macos/r0nix.app"
+          version="$(node -p 'JSON.parse(require("fs").readFileSync("src-tauri/tauri.conf.json", "utf8")).version')"
+          architecture="$(uname -m)"
+          if [[ "$architecture" == "arm64" ]]; then architecture="aarch64"; fi
+          dmg_path="src-tauri/target/release/bundle/dmg/r0nix_${version}_${architecture}.dmg"
+          bash scripts/create-macos-dmg.sh "src-tauri/target/release/bundle/macos/r0nix.app" "$dmg_path"
           bash scripts/macos-bundle-smoke.sh "src-tauri/target/release/bundle/macos/r0nix.app"
-          npx tauri bundle --bundles dmg --no-sign
-          for dmg in src-tauri/target/release/bundle/dmg/*.dmg; do
-            bash scripts/notarize-macos-artifact.sh "$dmg"
-          done
+          bash scripts/macos-app-process-smoke.sh "src-tauri/target/release/bundle/macos/r0nix.app"
+          bash scripts/notarize-macos-artifact.sh "$dmg_path"
 
       - name: Verify macOS DMG
         if: matrix.platform.name == 'macos'

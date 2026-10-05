@@ -1,5 +1,26 @@
 ﻿@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&family=EB+Garamond:ital,wght@0,400;0,500;0,600;0,700;1,400;1,500&family=Noto+Serif+SC:wght@400;500;600;700&family=Noto+Sans+SC:wght@400;500;600&display=swap");
 @import "tailwindcss";
+@import "./tokens.css";
+
+/* 不扫描 docs/。
+ * ---------------------------------------------------------------------------
+ * Tailwind v4 的自动内容探测会把**仓库里所有未 gitignore 的文本文件**当候选源，
+ * 包括 docs/*.md（本仓库的 .gitignore 专门把 docs/*.md 放行了）。于是规范文档里
+ * 为了记录「迁移前长什么样」而写的 class 串，会被真的编进产物：
+ *   docs/design-system.md 写 `bg-white dark:bg-[var(--chrome-surface-1)]`
+ *   → dist 里真出现 `.dark\:bg-\[var\(--chrome-surface-1\)\]:where(...){background-color:var(--chrome-surface-1)}`
+ * 兼容别名删除后，这条规则引用的是一个不存在的变量（invalid at computed-value time），
+ * 成为产物里唯一一处指向已删令牌的死声明 —— 读产物的人会以为该变量还在。
+ *
+ * 判据的分工要记住：**「产物里有这个类」不能证明代码在用**，判断令牌有无消费者
+ * 只能查 src/。之前删 --border-strong 时就是踩了这个反向坑（它在 src 里零出现，
+ * 只因文档表格写了它就被编出来）。
+ *
+ * 注意不要改成 source(none) + 只扫 src/：scripts/design-diff/cases/*.json 里的
+ * before/after class 串**必须**被扫描，probe 才能量到迁移前的值（那些类在 src 里
+ * 早已不存在，正是被迁走的）。
+ */
+@source not "../docs";
 
 @custom-variant dark (&:where(.dark, .dark *));
 
@@ -12,41 +33,35 @@
 }
 
 @layer base {
-  :root {
-    --chrome-surface-1: #fafafa;
-    --chrome-surface-2: #f4f4f5;
-    --chrome-surface-3: #ffffff;
-    --chrome-surface-4: #e4e4e7;
-    --chrome-border: #d4d4d8;
-    --chrome-text: #18181b;
-    --chrome-muted: #71717a;
-    --bg-primary: var(--chrome-surface-3);
-    --text-primary: var(--chrome-text);
-    --text-secondary: #3f3f46;
-    --text-tertiary: var(--chrome-muted);
-    --border-default: var(--chrome-border);
-    --accent-primary: var(--reader-accent, #18181b);
-    --accent-light: var(--reader-accent-soft, rgba(24, 24, 27, 0.08));
-    --accent-hover: var(--reader-accent, #18181b);
-  }
+  /* 这里【不再】放 --chrome-* / --bg-primary / --accent-* 的字面量兼容层。
+     那份块曾与 tokens.css 重复定义同一批变量，而按 CSS 层叠层规范，无层级声明
+     排在所有 @layer 之后（层级先于权重比较），所以 tokens.css 一被 @import 就
+     100% 覆盖了它 —— 它从那一刻起就是死声明，只会让下一个读代码的人以为
+     「改 index.css 里的值能生效」。唯一色源就是 tokens.css。
 
-  :root[data-theme="dark"] {
-    --chrome-surface-1: #09090b;
-    --chrome-surface-2: #0f0f11;
-    --chrome-surface-3: #18181b;
-    --chrome-surface-4: #27272a;
-    --chrome-border: #27272a;
-    --chrome-text: #f4f4f5;
-    --chrome-muted: #a1a1aa;
-    --bg-primary: var(--chrome-surface-1);
-    --text-primary: var(--chrome-text);
-    --text-secondary: #d4d4d8;
-    --text-tertiary: var(--chrome-muted);
-    --border-default: var(--chrome-border);
-  }
+     2026-10-04 收尾：连 tokens.css 里的那批兼容别名（--chrome-* / --bg-primary /
+     --text-* / --accent-*）也一并删除了 —— 最后一个引用它的地方已经迁走。
+     本文件也不再豁免字面色值检查（见 scripts/check-design-tokens.mjs 的
+     TOKEN_SOURCES）：它只定义字体，不定义颜色，没有豁免的理由。 */
 
   * {
     box-sizing: border-box;
+  }
+
+  /* 统一键盘焦点环
+     ---------------------------------------------------------------------
+     全应用唯一的焦点视觉，只由 :focus-visible 触发 —— 鼠标点击不显示，
+     键盘 Tab 才显示。颜色取用户强调色（浅色下深环、深色下浅环）。
+     本规则在 base 层：utilities 层永远压过 base 层，所以任何带了
+     focus:outline-none / focus:ring-* 的元素都由 Tailwind 工具类接管，
+     不会出现「系统环 + 组件环」双环。
+     迁移前 11 处 focus:outline-none 里有 2 处是裸的（无任何替代环），
+     已直接删掉那两处 opt-out，让下面的环生效。
+     颜色令牌能安全地做一次 :root 级代入，是因为 --reader-accent 的注入点
+     已移到 :root；若它被挂回后代元素，本行会退化成兜底灰 —— 见 tokens.css。 */
+  :focus-visible {
+    outline: var(--focus-ring-width) solid var(--focus-ring-color);
+    outline-offset: var(--focus-ring-offset);
   }
 
   html,
@@ -96,19 +111,15 @@
   background: transparent;
 }
 
+/* 滑块取样自描边刻度：令牌自身随主题翻转，因此【不需要】.dark 覆写。
+   迁移前这里是 4 个字面量（#d4d4d8 / #3f3f46 / #a1a1aa / #52525b），
+   它们恰好就是 --border-default 与 --border-strong 的浅深两组值 ——
+   写成字面量意味着「深浅两份真相」，加起来恰好是两个令牌的四个面。 */
 ::-webkit-scrollbar-thumb {
-  background: #d4d4d8;
+  background: var(--border-default);
   border-radius: 10px;
 }
 
-.dark ::-webkit-scrollbar-thumb {
-  background: #3f3f46;
-}
-
 ::-webkit-scrollbar-thumb:hover {
-  background: #a1a1aa;
-}
-
-.dark ::-webkit-scrollbar-thumb:hover {
-  background: #52525b;
+  background: var(--border-strong);
 }

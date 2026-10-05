@@ -1,0 +1,77 @@
+{
+  "_comment": "App.tsx 外壳（主内容列 / 内容滚动区）与 tab 右键菜单的 dark: 迁移映射。before 是迁移前的 class 串，after 是迁移后。probe 会在浅深两态下渲染两者并逐属性对比 —— eq 表示零视觉变化，Δ 表示已审阅并接受的位移（acceptedDrift），未标记的 DRIFT 一律当回归处理。",
+  "_legacyAliasNote": "「主内容列底色」「内容滚动区底色」的 before 串原本写 --chrome-surface-1；该兼容别名已于 2026-10-04 整段删除，故 before 冻结为其当时解析出的深色字面量 #09090b。",
+  "_mainContentColumnNote": "主内容列底色：深色下 #09090b → #18181b。这是归属修正而非回归 —— 迁移前它写的是 var(--chrome-surface-1)（= surface-app，#09090b），而它其实是主面板，应归 surface-panel（#18181b）。浅色两态同为 #ffffff，无位移。",
+  "props": ["backgroundColor", "color", "borderTopColor"],
+  "targets": [
+    {
+      "label": "bg-surface-panel",
+      "class": "bg-surface-panel",
+      "expect": { "light": { "backgroundColor": "rgb(255, 255, 255)" }, "dark": { "backgroundColor": "rgb(24, 24, 27)" } }
+    },
+    {
+      "label": "bg-surface-app",
+      "class": "bg-surface-app",
+      "expect": { "light": { "backgroundColor": "rgb(250, 250, 250)" }, "dark": { "backgroundColor": "rgb(9, 9, 11)" } }
+    },
+    {
+      "label": "border-border-subtle",
+      "class": "border border-border-subtle",
+      "expect": { "light": { "borderTopColor": "rgb(228, 228, 231)" }, "dark": { "borderTopColor": "rgb(39, 39, 42)" } }
+    },
+    {
+      "label": "bg-surface-panel/95",
+      "class": "bg-surface-panel/95",
+      "expect": { "light": { "backgroundColor": "rgba(255, 255, 255, 0.95)" }, "dark": { "backgroundColor": "rgba(24, 24, 27, 0.95)" } }
+    },
+    {
+      "label": "text-content-secondary",
+      "class": "text-content-secondary",
+      "expect": { "light": { "color": "rgb(63, 63, 70)" }, "dark": { "color": "rgb(212, 212, 216)" } }
+    },
+    {
+      "label": "text-content-muted",
+      "class": "text-content-muted",
+      "expect": { "light": { "color": "rgb(113, 113, 122)" }, "dark": { "color": "rgb(161, 161, 170)" } }
+    }
+  ],
+  "comparisons": [
+    {
+      "label": "主内容列底色",
+      "before": "bg-white dark:bg-[#09090b]",
+      "after": "bg-surface-panel",
+      "props": ["backgroundColor"],
+      "acceptedDrift": true
+    },
+    {
+      "label": "内容滚动区底色",
+      "before": "bg-zinc-50 dark:bg-[#09090b]",
+      "after": "bg-surface-app",
+      "props": ["backgroundColor"]
+    },
+    {
+      "label": "菜单面板描边",
+      "before": "border border-zinc-200 dark:border-zinc-800",
+      "after": "border border-border-subtle",
+      "props": ["borderTopColor"]
+    },
+    {
+      "label": "菜单面板底色",
+      "before": "bg-white/95 dark:bg-zinc-900/95",
+      "after": "bg-surface-panel/95",
+      "props": ["backgroundColor"]
+    },
+    {
+      "label": "菜单项文字",
+      "before": "text-sm text-zinc-700 dark:text-zinc-300",
+      "after": "text-sm text-content-secondary",
+      "props": ["color"]
+    },
+    {
+      "label": "加载提示文字",
+      "before": "text-xs text-zinc-500 dark:text-zinc-400",
+      "after": "text-xs text-content-muted",
+      "props": ["color"]
+    }
+  ]
+}

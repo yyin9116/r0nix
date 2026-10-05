@@ -1,0 +1,121 @@
+{
+  "_comment": "dark: 中性色配对迁移的映射等价性断言。before = 迁移前的 class 串，after = 迁移后。probe 在浅深两态渲染两者并逐属性比较：eq 表示零视觉变化，Δ 表示已审阅并接受的位移（acceptedDrift）。未标记的 DRIFT 一律当回归。",
+  "_legacyAliasNote": "标「旧别名」的条目，其 before 串原本写的是 --chrome-surface-1 / -2 / --chrome-border 这三个兼容别名。2026-10-04 兼容别名层整段删除后，这些名字在页面上再也解析不出值（var() 失效 → 量到透明黑），于是把 before 冻结成它们**当时解析出的**字面量：--chrome-surface-1 = #09090b(深) / --chrome-surface-2 = #0f0f11(深) / --chrome-border = #27272a(深)。冻结而不是删除，是因为这些条目的断言对象（迁移是否等价）依然有效，只是不能再依赖一个已不存在的间接层。",
+  "props": ["backgroundColor", "color", "borderTopColor", "borderTopWidth"],
+
+  "targets": [
+    {
+      "label": "反相前景 content-inverse",
+      "class": "text-content-inverse",
+      "expect": {
+        "light": { "color": "rgb(255, 255, 255)" },
+        "dark": { "color": "rgb(9, 9, 11)" }
+      }
+    },
+    {
+      "label": "反相底 content-primary",
+      "class": "bg-content-primary",
+      "expect": {
+        "light": { "backgroundColor": "rgb(24, 24, 27)" },
+        "dark": { "backgroundColor": "rgb(244, 244, 245)" }
+      }
+    },
+    {
+      "label": "强调色前景 accent-on",
+      "class": "text-accent-on",
+      "expect": {
+        "light": { "color": "rgb(255, 255, 255)" },
+        "dark": { "color": "rgb(24, 24, 27)" }
+      }
+    },
+    {
+      "label": "主按钮 hover content-primary-hover",
+      "class": "bg-content-primary-hover",
+      "expect": {
+        "light": { "backgroundColor": "rgb(39, 39, 42)" },
+        "dark": { "backgroundColor": "rgb(255, 255, 255)" }
+      }
+    },
+    {
+      "label": "强描边 border-strong",
+      "class": "border border-border-strong",
+      "expect": {
+        "light": { "borderTopColor": "rgb(161, 161, 170)" },
+        "dark": { "borderTopColor": "rgb(82, 82, 91)" }
+      }
+    },
+    {
+      "label": "控件描边 border-default",
+      "class": "border border-border-default",
+      "expect": {
+        "light": { "borderTopColor": "rgb(212, 212, 216)" },
+        "dark": { "borderTopColor": "rgb(63, 63, 70)" }
+      }
+    }
+  ],
+
+  "comparisons": [
+    { "label": "侧栏底色", "before": "bg-zinc-50 dark:bg-zinc-950", "after": "bg-surface-app", "props": ["backgroundColor"] },
+    { "label": "标签栏底色", "before": "bg-zinc-100 dark:bg-zinc-950", "after": "bg-surface-sunken", "props": ["backgroundColor"], "acceptedDrift": true },
+    { "label": "活动标签底", "before": "bg-white dark:bg-zinc-900", "after": "bg-surface-panel", "props": ["backgroundColor"] },
+    { "label": "菜单面板底 95", "before": "bg-white/95 dark:bg-zinc-900/95", "after": "bg-surface-panel/95", "props": ["backgroundColor"] },
+    { "label": "favicon 衬底", "before": "bg-white dark:bg-zinc-800", "after": "bg-surface-panel", "props": ["backgroundColor"], "acceptedDrift": true },
+    { "label": "反相底 content-primary", "before": "bg-zinc-900 dark:bg-zinc-100", "after": "bg-content-primary", "props": ["backgroundColor"] },
+
+    { "label": "分隔描边", "before": "border border-zinc-200 dark:border-zinc-800", "after": "border border-border-subtle", "props": ["borderTopColor", "borderTopWidth"] },
+    { "label": "细描边 70", "before": "border border-zinc-200/70 dark:border-zinc-800/70", "after": "border border-border-subtle/70", "props": ["borderTopColor"] },
+    { "label": "细描边 80", "before": "border border-zinc-200/80 dark:border-zinc-800/80", "after": "border border-border-subtle/80", "props": ["borderTopColor"] },
+
+    { "label": "主文字 900/100", "before": "text-zinc-900 dark:text-zinc-100", "after": "text-content-primary", "props": ["color"] },
+    { "label": "主文字 800/200", "before": "text-zinc-800 dark:text-zinc-200", "after": "text-content-primary", "props": ["color"], "acceptedDrift": true },
+    { "label": "二级文字 700/300", "before": "text-zinc-700 dark:text-zinc-300", "after": "text-content-secondary", "props": ["color"] },
+    { "label": "二级文字 600/400", "before": "text-zinc-600 dark:text-zinc-400", "after": "text-content-secondary", "props": ["color"], "acceptedDrift": true },
+    { "label": "弱文字 500/400", "before": "text-zinc-500 dark:text-zinc-400", "after": "text-content-muted", "props": ["color"] },
+    { "label": "弱文字 400/500", "before": "text-zinc-400 dark:text-zinc-500", "after": "text-content-muted", "props": ["color"], "acceptedDrift": true },
+    { "label": "反相前景 (logo)", "before": "text-white dark:text-zinc-900", "after": "text-content-inverse", "props": ["color"], "acceptedDrift": true },
+    { "label": "反相前景 (按钮)", "before": "text-white dark:text-zinc-950", "after": "text-content-inverse", "props": ["color"] },
+
+    { "label": "hover 填充 200/800", "before": "bg-zinc-200 dark:bg-zinc-800", "after": "bg-surface-hover", "props": ["backgroundColor"] },
+    { "label": "hover 填充 100/800", "before": "bg-zinc-100 dark:bg-zinc-800", "after": "bg-surface-hover", "props": ["backgroundColor"], "acceptedDrift": true },
+    { "label": "hover 填充 200-50", "before": "bg-zinc-200/50 dark:bg-zinc-800/50", "after": "bg-surface-hover/50", "props": ["backgroundColor"] },
+    { "label": "hover 填充 100/800-50", "before": "bg-zinc-100 dark:bg-zinc-800/50", "after": "bg-surface-hover/50", "props": ["backgroundColor"], "acceptedDrift": true },
+    { "label": "hover 填充 300/700-50", "before": "bg-zinc-300/50 dark:bg-zinc-700/50", "after": "bg-surface-active/50", "props": ["backgroundColor"] },
+
+    { "label": "禁用底 300/800", "before": "bg-zinc-300 dark:bg-zinc-800", "after": "bg-surface-hover", "props": ["backgroundColor"], "acceptedDrift": true },
+    { "label": "禁用文字 500/500", "before": "text-zinc-500 dark:text-zinc-500", "after": "text-content-muted", "props": ["color"], "acceptedDrift": true },
+
+    { "label": "内凹填充 100/800", "before": "bg-zinc-100 dark:bg-zinc-800", "after": "bg-surface-sunken", "props": ["backgroundColor"], "acceptedDrift": true },
+    { "label": "禁用文字 300/600", "before": "text-zinc-300 dark:text-zinc-600", "after": "text-content-disabled", "props": ["color"], "acceptedDrift": true },
+    { "label": "占位文字 400/600", "before": "text-zinc-400 dark:text-zinc-600", "after": "text-content-disabled", "props": ["color"], "acceptedDrift": true },
+    { "label": "次级文字 700/200", "before": "text-zinc-700 dark:text-zinc-200", "after": "text-content-secondary", "props": ["color"], "acceptedDrift": true },
+    { "label": "弱文字 500/300", "before": "text-zinc-500 dark:text-zinc-300", "after": "text-content-muted", "props": ["color"], "acceptedDrift": true },
+
+    { "label": "半透明底 90/90", "before": "bg-zinc-50/90 dark:bg-zinc-950/90", "after": "bg-surface-app/90", "props": ["backgroundColor"] },
+    { "label": "半透明底 70/50", "before": "bg-zinc-50/70 dark:bg-zinc-950/50", "after": "bg-surface-app/70", "props": ["backgroundColor"], "acceptedDrift": true },
+    { "label": "行 hover 40", "before": "bg-zinc-50 dark:bg-zinc-800/40", "after": "bg-surface-hover/40", "props": ["backgroundColor"], "acceptedDrift": true },
+
+    { "label": "旧别名 输入框底", "before": "bg-zinc-50 dark:bg-[#0f0f11]", "after": "bg-surface-sunken", "props": ["backgroundColor"], "acceptedDrift": true },
+    { "label": "旧别名 描边", "before": "border border-zinc-200 dark:border-[#27272a]", "after": "border border-border-subtle", "props": ["borderTopColor", "borderTopWidth"] },
+    { "label": "旧别名 面板底", "before": "bg-white dark:bg-[#0f0f11]", "after": "bg-surface-panel", "props": ["backgroundColor"], "acceptedDrift": true },
+    { "label": "旧别名 内容底", "before": "bg-white dark:bg-[#09090b]", "after": "bg-surface-panel", "props": ["backgroundColor"], "acceptedDrift": true },
+    { "label": "旧别名 工具条 95", "before": "bg-white/95 dark:bg-[#09090b]/95", "after": "bg-surface-panel/95", "props": ["backgroundColor"], "acceptedDrift": true },
+    { "label": "旧别名 加载遮罩", "before": "bg-white/80 dark:bg-[#09090b]/70", "after": "bg-surface-app/80", "props": ["backgroundColor"], "acceptedDrift": true },
+
+    { "label": "主按钮 hover 档", "before": "bg-zinc-800 dark:bg-white", "after": "bg-content-primary-hover", "props": ["backgroundColor"] },
+    { "label": "按钮描边 200/700", "before": "border border-zinc-200 dark:border-zinc-700", "after": "border border-border-default", "props": ["borderTopColor", "borderTopWidth"], "acceptedDrift": true },
+    { "label": "虚线描边 300/700", "before": "border border-zinc-300 dark:border-zinc-700", "after": "border border-border-default", "props": ["borderTopColor"] },
+    { "label": "选中色板描边", "before": "border border-zinc-900 dark:border-zinc-100", "after": "border border-content-primary", "props": ["borderTopColor"] },
+    { "label": "半透明面板底 90", "before": "bg-white/90 dark:bg-zinc-900/90", "after": "bg-surface-panel/90", "props": ["backgroundColor"] },
+    { "label": "旧别名 内容区底", "before": "bg-zinc-50 dark:bg-[#09090b]", "after": "bg-surface-app", "props": ["backgroundColor"] },
+
+    { "label": "竖分隔线 300/700", "before": "bg-zinc-300 dark:bg-zinc-700", "after": "bg-border-default", "props": ["backgroundColor"] },
+    { "label": "画布底 200/950-50", "before": "bg-zinc-200/50 dark:bg-zinc-950/50", "after": "bg-surface-sunken/50", "props": ["backgroundColor"], "acceptedDrift": true },
+    { "label": "加载遮罩 panel/60", "before": "bg-surface-panel/60 dark:bg-zinc-950/60", "after": "bg-surface-panel/60", "props": ["backgroundColor"], "acceptedDrift": true },
+    { "label": "选中缩略图底 100/800-80", "before": "bg-zinc-100 dark:bg-zinc-800/80", "after": "bg-surface-hover/80", "props": ["backgroundColor"], "acceptedDrift": true },
+    { "label": "行 hover 50/800-50", "before": "bg-zinc-50 dark:bg-zinc-800/50", "after": "bg-surface-hover/50", "props": ["backgroundColor"], "acceptedDrift": true },
+    { "label": "大纲区底 50/950-60", "before": "bg-zinc-50/60 dark:bg-zinc-950/60", "after": "bg-surface-app/60", "props": ["backgroundColor"] },
+    { "label": "面板底 panel/900", "before": "bg-surface-panel dark:bg-zinc-900", "after": "bg-surface-panel", "props": ["backgroundColor"], "acceptedDrift": true },
+    { "label": "卡片内引用块 50/900", "before": "bg-zinc-50 dark:bg-zinc-900", "after": "bg-surface-sunken", "props": ["backgroundColor"], "acceptedDrift": true },
+    { "label": "选中缩略图描边 900-75", "before": "border border-zinc-900/75 dark:border-zinc-100", "after": "border border-content-primary/75", "props": ["borderTopColor"], "acceptedDrift": true }
+  ]
+}

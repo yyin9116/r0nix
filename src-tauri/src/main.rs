@@ -2,16 +2,26 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use tauri::{
+    image::Image,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
 };
 use tauri::{Manager, WindowEvent};
+
+const MACOS_TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
 
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            if let Ok(removed) =
+                r0nix::tauri_commands::cleanup_stale_web_pdf_temp_files(app.handle())
+            {
+                if removed > 0 {
+                    eprintln!("[temp-cleanup] removed {removed} stale managed temp file(s)");
+                }
+            }
             let text_show = if cfg!(target_os = "windows") {
                 "打开 r0nix"
             } else {
@@ -33,7 +43,14 @@ fn main() {
             let tray_menu = Menu::with_items(app, &[&show_item, &hide_item, &quit_item])?;
 
             let mut tray_builder = TrayIconBuilder::new().menu(&tray_menu);
-            if let Some(icon) = app.default_window_icon() {
+            if cfg!(target_os = "macos") {
+                let icon = image::load_from_memory(MACOS_TRAY_ICON_PNG).map_err(|error| {
+                    tauri::Error::AssetNotFound(format!("macOS tray icon: {error}"))
+                })?;
+                let rgba = icon.to_rgba8();
+                let tray_icon = Image::new_owned(rgba.into_raw(), icon.width(), icon.height());
+                tray_builder = tray_builder.icon(tray_icon).icon_as_template(true);
+            } else if let Some(icon) = app.default_window_icon() {
                 tray_builder = tray_builder.icon(icon.clone());
             }
             tray_builder
@@ -108,12 +125,16 @@ fn main() {
             r0nix::tauri_commands::write_text_file,
             r0nix::tauri_commands::write_binary_file,
             r0nix::tauri_commands::write_temp_file,
+            r0nix::tauri_commands::remove_managed_web_pdf_temp,
+            r0nix::tauri_commands::remove_managed_import_temp,
             r0nix::tauri_commands::collect_importable_paths,
             r0nix::tauri_commands::close_pdf,
             r0nix::tauri_commands::get_pdf_info,
             r0nix::tauri_commands::get_page_count,
             r0nix::tauri_commands::list_pdfs,
             r0nix::tauri_commands::read_opened_pdf_bytes,
+            r0nix::tauri_commands::cancel_pdf_byte_read,
+            r0nix::tauri_commands::cancel_pdf_page_count,
             r0nix::tauri_commands::request_tiles,
             r0nix::tauri_commands::cancel_tile_request,
             r0nix::tauri_commands::export_page_png,
@@ -126,6 +147,7 @@ fn main() {
             r0nix::tauri_commands::get_pdf_reading_blocks,
             r0nix::tauri_commands::cancel_pdf_reading_blocks,
             r0nix::tauri_commands::download_pdf_via_proxy,
+            r0nix::tauri_commands::download_pdf_to_temp,
             r0nix::tauri_commands::llm_chat_completion,
             r0nix::tauri_commands::cancel_llm_chat_completion,
             r0nix::tauri_commands::create_or_show_webview_tab,

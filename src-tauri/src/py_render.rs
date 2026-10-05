@@ -141,6 +141,10 @@ fn ensure_python_runtime() {
     });
 }
 
+fn close_python_document(doc: &Bound<'_, PyAny>) -> PyResult<()> {
+    doc.call_method0("close").map(|_| ())
+}
+
 pub fn get_page_count(path: &str) -> Result<usize, String> {
     ensure_python_runtime();
     let path_owned = path.to_string();
@@ -148,38 +152,53 @@ pub fn get_page_count(path: &str) -> Result<usize, String> {
     Python::with_gil(|py| -> PyResult<usize> {
         let fitz = py.import_bound("fitz")?;
         let doc = fitz.call_method1("open", (path_owned.as_str(),))?;
-        doc.getattr("page_count")?.extract()
+        let result = doc.getattr("page_count").and_then(|value| value.extract());
+        let close_result = close_python_document(&doc);
+        match (result, close_result) {
+            (Ok(page_count), Ok(())) => Ok(page_count),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
     })
     .map_err(|err| format!("pymupdf page count failed: {err}"))
 }
 
 pub fn render_page_png(path: &str, page_no: usize, zoom: f32) -> Result<Vec<u8>, String> {
     ensure_python_runtime();
-    let safe_zoom = zoom.max(0.1);
+    let safe_zoom = if zoom.is_finite() {
+        zoom.clamp(0.1, 8.0)
+    } else {
+        return Err("render zoom must be finite".to_string());
+    };
     let path_owned = path.to_string();
 
     Python::with_gil(|py| -> PyResult<Vec<u8>> {
         let fitz = py.import_bound("fitz")?;
         let doc = fitz.call_method1("open", (path_owned.as_str(),))?;
-        let page_count: usize = doc.getattr("page_count")?.extract()?;
-
-        if page_no == 0 || page_no > page_count {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "page {page_no} out of range (1..={page_count})"
-            )));
+        let result: PyResult<Vec<u8>> = (|| {
+            let page_count: usize = doc.getattr("page_count")?.extract()?;
+            if page_no == 0 || page_no > page_count {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "page {page_no} out of range (1..={page_count})"
+                )));
+            }
+            let page = doc.call_method1("load_page", ((page_no - 1) as i32,))?;
+            let matrix = fitz
+                .getattr("Matrix")?
+                .call1((safe_zoom as f64, safe_zoom as f64))?;
+            let kwargs = PyDict::new_bound(py);
+            kwargs.set_item("matrix", matrix)?;
+            kwargs.set_item("alpha", false)?;
+            page.call_method("get_pixmap", (), Some(&kwargs))
+                .and_then(|pixmap| pixmap.call_method1("tobytes", ("png",)))
+                .and_then(|bytes| bytes.extract())
+        })();
+        let close_result = close_python_document(&doc);
+        match (result, close_result) {
+            (Ok(png), Ok(())) => Ok(png),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
         }
-
-        let page = doc.call_method1("load_page", ((page_no - 1) as i32,))?;
-        let matrix = fitz
-            .getattr("Matrix")?
-            .call1((safe_zoom as f64, safe_zoom as f64))?;
-
-        let kwargs = PyDict::new_bound(py);
-        kwargs.set_item("matrix", matrix)?;
-        kwargs.set_item("alpha", false)?;
-
-        let pixmap = page.call_method("get_pixmap", (), Some(&kwargs))?;
-        pixmap.call_method1("tobytes", ("png",))?.extract()
     })
     .map_err(|err| format!("pymupdf render failed: {err}"))
 }
@@ -191,16 +210,23 @@ pub fn render_page_svg(path: &str, page_no: usize) -> Result<String, String> {
     Python::with_gil(|py| -> PyResult<String> {
         let fitz = py.import_bound("fitz")?;
         let doc = fitz.call_method1("open", (path_owned.as_str(),))?;
-        let page_count: usize = doc.getattr("page_count")?.extract()?;
-
-        if page_no == 0 || page_no > page_count {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "page {page_no} out of range (1..={page_count})"
-            )));
+        let result: PyResult<String> = (|| {
+            let page_count: usize = doc.getattr("page_count")?.extract()?;
+            if page_no == 0 || page_no > page_count {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "page {page_no} out of range (1..={page_count})"
+                )));
+            }
+            let page = doc.call_method1("load_page", ((page_no - 1) as i32,))?;
+            page.call_method0("get_svg_image")
+                .and_then(|svg| svg.extract())
+        })();
+        let close_result = close_python_document(&doc);
+        match (result, close_result) {
+            (Ok(svg), Ok(())) => Ok(svg),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
         }
-
-        let page = doc.call_method1("load_page", ((page_no - 1) as i32,))?;
-        page.call_method0("get_svg_image")?.extract()
     })
     .map_err(|err| format!("pymupdf svg export failed: {err}"))
 }
@@ -219,50 +245,63 @@ pub fn render_page_svg_crop(
     Python::with_gil(|py| -> PyResult<String> {
         let fitz = py.import_bound("fitz")?;
         let doc = fitz.call_method1("open", (path_owned.as_str(),))?;
-        let page_count: usize = doc.getattr("page_count")?.extract()?;
-
-        if page_no == 0 || page_no > page_count {
-            return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                "page {page_no} out of range (1..={page_count})"
-            )));
-        }
-
-        let page = doc.call_method1("load_page", ((page_no - 1) as i32,))?;
-        let rect = page.getattr("rect")?;
-        let page_w: f64 = rect.getattr("width")?.extract()?;
-        let page_h: f64 = rect.getattr("height")?.extract()?;
-        let x0 = left.max(0.0).min(page_w);
-        let y0 = top.max(0.0).min(page_h);
-        let x1 = (left + width).max(0.0).min(page_w);
-        let y1 = (top + height).max(0.0).min(page_h);
-        if x1 <= x0 || y1 <= y0 {
-            return Err(pyo3::exceptions::PyValueError::new_err(
-                "crop rect is empty",
-            ));
-        }
-        let locals = PyDict::new_bound(py);
-        locals.set_item("page", page)?;
-        locals.set_item("x0", x0)?;
-        locals.set_item("y0", y0)?;
-        locals.set_item("crop_width", x1 - x0)?;
-        locals.set_item("crop_height", y1 - y0)?;
-        py.run_bound(
+        let svg_result: PyResult<String> = (|| {
+            let page_count: usize = doc.getattr("page_count")?.extract()?;
+            if page_no == 0 || page_no > page_count {
+                return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                    "page {page_no} out of range (1..={page_count})"
+                )));
+            }
+            let page = doc.call_method1("load_page", ((page_no - 1) as i32,))?;
+            let rect = page.getattr("rect")?;
+            let page_w: f64 = rect.getattr("width")?.extract()?;
+            let page_h: f64 = rect.getattr("height")?.extract()?;
+            let x0 = left.max(0.0).min(page_w);
+            let y0 = top.max(0.0).min(page_h);
+            let x1 = (left + width).max(0.0).min(page_w);
+            let y1 = (top + height).max(0.0).min(page_h);
+            if x1 <= x0 || y1 <= y0 {
+                return Err(pyo3::exceptions::PyValueError::new_err("crop rect is empty"));
+            }
+            let locals = PyDict::new_bound(py);
+            locals.set_item("page", page)?;
+            locals.set_item("x0", x0)?;
+            locals.set_item("y0", y0)?;
+            // PyMuPDF's SVG paths use a matrix that flips the PDF Y axis.
+            // Convert the PDF top-origin crop to the SVG bottom-origin viewBox.
+            locals.set_item("svg_y0", page_h - y1)?;
+            locals.set_item("crop_width", x1 - x0)?;
+            locals.set_item("crop_height", y1 - y0)?;
+            py.run_bound(
             r#"
 import re
 
 svg = page.get_svg_image()
-svg = re.sub(r'viewBox="[^"]*"', f'viewBox="{x0:g} {y0:g} {crop_width:g} {crop_height:g}"', svg, count=1)
-svg = re.sub(r'width="[^"]*"', f'width="{crop_width:g}pt"', svg, count=1)
-svg = re.sub(r'height="[^"]*"', f'height="{crop_height:g}pt"', svg, count=1)
+clip_id = "r0nix-crop"
+clip_def = f'<defs><clipPath id="{clip_id}"><rect x="{x0:g}" y="{svg_y0:g}" width="{crop_width:g}" height="{crop_height:g}"/></clipPath></defs>'
+svg = re.sub(
+    r'<svg\b([^>]*)>',
+    f'<svg\1 viewBox="{x0:g} {svg_y0:g} {crop_width:g} {crop_height:g}" width="{crop_width:g}pt" height="{crop_height:g}pt" overflow="hidden">{clip_def}<g clip-path="url(#{clip_id})">',
+    svg,
+    count=1,
+)
+svg = re.sub(r'</svg>\s*$', '</g></svg>', svg, count=1)
 result = svg
 "#,
             Some(&locals),
             Some(&locals),
-        )?;
-        locals
-            .get_item("result")?
-            .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("missing cropped SVG result"))?
-            .extract()
+            )?;
+            locals
+                .get_item("result")?
+                .ok_or_else(|| pyo3::exceptions::PyRuntimeError::new_err("missing cropped SVG result"))?
+                .extract()
+        })();
+        let close_result = close_python_document(&doc);
+        match (svg_result, close_result) {
+            (Ok(svg), Ok(())) => Ok(svg),
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(error),
+        }
     })
     .map_err(|err| format!("pymupdf svg crop export failed: {err}"))
 }
@@ -302,6 +341,8 @@ try:
 
     page = doc.load_page(page_no - 1)
     page_rect = page.rect
+    page_x0 = float(page_rect.x0)
+    page_y0 = float(page_rect.y0)
     page_area = max(1.0, float(page_rect.width) * float(page_rect.height))
     items = []
 
@@ -311,7 +352,10 @@ try:
         area_ratio = (box_w * box_h) / page_area
         aspect = max(box_w / max(1.0, box_h), box_h / max(1.0, box_w))
         if vector:
-            return box_w >= 14 and box_h >= 14 and 0.0018 <= area_ratio <= 0.45 and aspect <= 18
+            # Large figures can legitimately occupy most of a paper column or
+            # page. Reserve only the near-full-page range for background
+            # filtering; a 45% cap silently dropped wide vector charts.
+            return box_w >= 14 and box_h >= 14 and 0.0018 <= area_ratio <= 0.88 and aspect <= 18
         # Raster resources are often banners, strips, or tiled PDF assets.
         # A strict aspect/area cutoff silently drops legitimate figures and
         # logos before the user can inspect or export them.
@@ -331,7 +375,10 @@ try:
                 m_area = max(1.0, (mr - ml) * (mb - mt))
                 gap_x = max(0.0, max(left, ml) - min(right, mr))
                 gap_y = max(0.0, max(top, mt) - min(bottom, mb))
-                close = gap_x <= tolerance and gap_y <= tolerance
+                # A zero tolerance means overlap-only merging. Treating a
+                # touching edge as "close" combines adjacent figures into a
+                # single export target.
+                close = tolerance > 0.0 and gap_x <= tolerance and gap_y <= tolerance
                 same_box = abs(left - ml) < tolerance and abs(top - mt) < tolerance and abs(right - mr) < tolerance and abs(bottom - mb) < tolerance
                 if same_box or close or inter / min(area, m_area) > overlap_threshold:
                     merged_rects[idx] = (min(left, ml), min(top, mt), max(right, mr), max(bottom, mb))
@@ -341,7 +388,33 @@ try:
                 merged_rects.append((left, top, right, bottom))
         return merged_rects
 
-    for image in page.get_images(full=True):
+    def dedupe_vector_rects(rects, overlap_threshold=0.96):
+        # Vector figures frequently contain nested paths (plots, axes,
+        # legends, and labels). A one-sided overlap test treats containment as
+        # duplication and expands the export target toward the outer path.
+        # Only remove paths that cover almost exactly the same rectangle.
+        unique = []
+        for left, top, right, bottom in sorted(rects, key=lambda r: (r[1], r[0])):
+            area = max(1.0, (right - left) * (bottom - top))
+            duplicate = False
+            for uleft, utop, uright, ubottom in unique:
+                inter_l = max(left, uleft)
+                inter_t = max(top, utop)
+                inter_r = min(right, uright)
+                inter_b = min(bottom, ubottom)
+                inter = max(0.0, inter_r - inter_l) * max(0.0, inter_b - inter_t)
+                u_area = max(1.0, (uright - uleft) * (ubottom - utop))
+                if inter / area >= overlap_threshold and inter / u_area >= overlap_threshold:
+                    duplicate = True
+                    break
+            if not duplicate:
+                unique.append((left, top, right, bottom))
+        return unique
+
+    check_cancelled()
+    image_records = page.get_images(full=True)
+    check_cancelled()
+    for image in image_records:
         check_cancelled()
         xref = int(image[0])
         width = int(image[2]) if len(image) > 2 else 0
@@ -349,13 +422,17 @@ try:
 
         ext = ""
         try:
+            check_cancelled()
             ext = str(doc.extract_image(xref).get("ext", ""))
+            check_cancelled()
         except Exception:
             ext = ""
 
         rects = []
         try:
+            check_cancelled()
             rects = page.get_image_rects(xref)
+            check_cancelled()
         except Exception:
             rects = []
 
@@ -365,10 +442,14 @@ try:
         normalized_rects = []
         for rect in rects:
             check_cancelled()
-            left = float(min(rect.x0, rect.x1))
-            right = float(max(rect.x0, rect.x1))
-            top = float(min(rect.y0, rect.y1))
-            bottom = float(max(rect.y0, rect.y1))
+            left = float(min(rect.x0, rect.x1) - page_x0)
+            right = float(max(rect.x0, rect.x1) - page_x0)
+            top = float(min(rect.y0, rect.y1) - page_y0)
+            bottom = float(max(rect.y0, rect.y1) - page_y0)
+            left = max(0.0, min(float(page_rect.width), left))
+            right = max(0.0, min(float(page_rect.width), right))
+            top = max(0.0, min(float(page_rect.height), top))
+            bottom = max(0.0, min(float(page_rect.height), bottom))
             if not valid_box(left, top, right, bottom):
                 continue
             normalized_rects.append((left, top, right, bottom))
@@ -379,6 +460,8 @@ try:
             items.append({
                 "xref": xref,
                 "pageNumber": int(page_no),
+                "pageWidth": float(page_rect.width),
+                "pageHeight": float(page_rect.height),
                 "width": width,
                 "height": height,
                 "extension": ext,
@@ -386,9 +469,53 @@ try:
                 "source": "xref",
             })
 
+    # Inline images and some structure-preserving PDF producers expose image
+    # placements only through get_image_info(), not through get_images(). This
+    # returns metadata without serializing image bytes or computing xref
+    # digests; ordinary xrefs are already handled by the loop above.
+    image_infos = []
+    try:
+        check_cancelled()
+        image_infos = page.get_image_info()
+        check_cancelled()
+    except Exception:
+        image_infos = []
+
+    for block in image_infos:
+        check_cancelled()
+        bbox = block.get("bbox")
+        if not isinstance(bbox, (list, tuple)) or len(bbox) != 4:
+            continue
+        left = float(min(bbox[0], bbox[2]) - page_x0)
+        right = float(max(bbox[0], bbox[2]) - page_x0)
+        top = float(min(bbox[1], bbox[3]) - page_y0)
+        bottom = float(max(bbox[1], bbox[3]) - page_y0)
+        left = max(0.0, min(float(page_rect.width), left))
+        right = max(0.0, min(float(page_rect.width), right))
+        top = max(0.0, min(float(page_rect.height), top))
+        bottom = max(0.0, min(float(page_rect.height), bottom))
+        if not valid_box(left, top, right, bottom):
+            continue
+
+        # The frontend deduplicates overlapping xref/block candidates while
+        # preserving the block source for inline resources.
+        items.append({
+            "xref": 0,
+            "pageNumber": int(page_no),
+            "pageWidth": float(page_rect.width),
+            "pageHeight": float(page_rect.height),
+            "width": int(block.get("width", max(1.0, right - left)) or 0),
+            "height": int(block.get("height", max(1.0, bottom - top)) or 0),
+            "extension": "crop",
+            "bbox": [left, top, right, bottom],
+            "source": "block",
+        })
+
     vector_rects = []
     try:
+        check_cancelled()
         drawings = page.get_drawings()
+        check_cancelled()
     except Exception:
         drawings = []
 
@@ -402,17 +529,32 @@ try:
         top = float(max(0.0, min(page_rect.height, min(rect.y0, rect.y1) - page_rect.y0)))
         bottom = float(max(0.0, min(page_rect.height, max(rect.y0, rect.y1) - page_rect.y0)))
         if valid_box(left, top, right, bottom, vector=True):
+            # A single white filled path in a small area is usually a logo
+            # knockout or page decoration, not an exportable figure. Keep
+            # stroked shapes and multi-path drawings, which cover charts and
+            # diagrams, while avoiding false SVG targets around page chrome.
+            items_for_drawing = drawing.get("items") or []
+            fill = drawing.get("fill")
+            white_fill = (
+                isinstance(fill, (list, tuple)) and len(fill) >= 3 and
+                all(float(channel) >= 0.97 for channel in fill[:3])
+            )
+            area_ratio = ((right - left) * (bottom - top)) / page_area
+            if len(items_for_drawing) <= 1 and white_fill and area_ratio < 0.02:
+                continue
             vector_rects.append((left, top, right, bottom))
 
     # Only collapse duplicate/near-identical drawing paths. Adjacent paths can
     # be separate chart marks, borders, or glyph outlines; merging them by a
     # proximity threshold creates false page-sized image targets.
-    for left, top, right, bottom in merge_rects(vector_rects, tolerance=0.0, overlap_threshold=0.92):
+    for left, top, right, bottom in dedupe_vector_rects(vector_rects):
         if not valid_box(left, top, right, bottom, vector=True):
             continue
         items.append({
             "xref": 0,
             "pageNumber": int(page_no),
+            "pageWidth": float(page_rect.width),
+            "pageHeight": float(page_rect.height),
             "width": int(max(1.0, right - left)),
             "height": int(max(1.0, bottom - top)),
             "extension": "svg",
@@ -507,13 +649,22 @@ import fitz
 doc = fitz.open()
 page = doc.new_page(width=200, height=200)
 page.insert_image(fitz.Rect(20, 20, 100, 100), stream=image_bytes)
-# A nearby reused xref must remain two exportable placements.
-page.insert_image(fitz.Rect(102, 20, 182, 100), stream=image_bytes)
+# Even a touching reused xref must remain two exportable placements.
+page.insert_image(fitz.Rect(100, 20, 180, 100), stream=image_bytes)
 # A wide, short raster resource protects against aspect-ratio filtering that
 # used to hide banners and figure labels from the export list.
 page.insert_image(fitz.Rect(110, 160, 195, 168), stream=image_bytes)
-page.draw_rect(fitz.Rect(120, 120, 180, 180), color=(0.1, 0.3, 0.8), width=2)
-page.draw_rect(fitz.Rect(183, 120, 197, 180), color=(0.8, 0.2, 0.2), width=2)
+page.draw_rect(fitz.Rect(100, 120, 150, 170), color=(0.1, 0.3, 0.8), width=2)
+# A nested path must remain a separate vector export target rather than being
+# swallowed by the outer chart frame.
+page.draw_rect(fitz.Rect(105, 125, 145, 165), color=(0.2, 0.8, 0.3), width=1)
+page.draw_rect(fitz.Rect(160, 120, 174, 170), color=(0.8, 0.2, 0.2), width=2)
+# A wide vector figure must remain exportable even when it occupies more than
+# 45% of the page; only near-full-page backgrounds should be filtered.
+page.draw_rect(fitz.Rect(20, 20, 180, 145), color=(0.4, 0.4, 0.4), width=1)
+# Keep a non-zero crop-box origin so image coordinates must be normalized
+# against page.rect.x0/page.rect.y0 rather than assumed to start at zero.
+page.set_cropbox(fitz.Rect(10, 10, 190, 190))
 doc.save(path)
 doc.close()
 "#,

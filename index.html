@@ -5,25 +5,85 @@
     <link rel="icon" type="image/svg+xml" href="/r0nix-icon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>r0nix</title>
+    <script>
+      /*
+       * 首帧前定主题。语义与 App.tsx 的 resolveTheme 完全一致；
+       * 放在这里是为了消除「暗色下先闪一帧浅色」——App 的主题是在 useEffect
+       * 里才落到 html 上的，那一帧会露出 body 的浅色底。
+       */
+      (function () {
+        var dark;
+        try {
+          var raw = localStorage.getItem("pdf_reader_user_settings_v2");
+          var mode = raw ? (JSON.parse(raw) || {}).themeMode : "system";
+          dark =
+            mode === "dark" ||
+            (mode !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        } catch (err) {
+          dark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        }
+        var el = document.documentElement;
+        el.classList.toggle("dark", dark);
+        el.setAttribute("data-theme", dark ? "dark" : "light");
+        el.style.colorScheme = dark ? "dark" : "light";
+      })();
+    </script>
     <style>
+      /*
+       * 启动屏必须自包含：此刻 tokens.css 尚未加载，无法使用 var(--surface-*)。
+       * 下面内联的是 zinc 令牌的解析值，与 src/tokens.css 保持一致 —— 改令牌时请同步此处。
+       *   surface-app #fafafa/#09090b · surface-panel #ffffff/#18181b
+       *   border-subtle #e4e4e7/#27272a · border-default #d4d4d8/#3f3f46
+       *   content-primary #18181b/#f4f4f5 · content-muted #71717a/#a1a1aa
+       *   强调色（zinc 默认）浅 #18181b 深 #f4f4f5
+       */
       :root {
-        color-scheme: light dark;
+        --splash-app: #fafafa;
+        --splash-panel: #ffffff;
+        --splash-border: #e4e4e7;
+        --splash-track: #d4d4d8;
+        --splash-text: #18181b;
+        --splash-muted: #71717a;
+        --splash-accent: #18181b;
+        --splash-shadow: 0 24px 48px rgba(24, 24, 27, 0.16);
+      }
+      html.dark,
+      html[data-theme="dark"] {
+        --splash-app: #09090b;
+        --splash-panel: #18181b;
+        --splash-border: #27272a;
+        --splash-track: #3f3f46;
+        --splash-text: #f4f4f5;
+        --splash-muted: #a1a1aa;
+        --splash-accent: #f4f4f5;
+        --splash-shadow: 0 24px 48px rgba(0, 0, 0, 0.6);
+      }
+      /* 禁用 JS 时的兜底：脚本没跑起来就跟随系统 */
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme]) {
+          --splash-app: #09090b;
+          --splash-panel: #18181b;
+          --splash-border: #27272a;
+          --splash-track: #3f3f46;
+          --splash-text: #f4f4f5;
+          --splash-muted: #a1a1aa;
+          --splash-accent: #f4f4f5;
+          --splash-shadow: 0 24px 48px rgba(0, 0, 0, 0.6);
+        }
       }
       body {
         margin: 0;
-        background: #f5f7fb;
+        background: var(--splash-app);
       }
+      /* 层级用字面量：启动屏必须在所有内容之上，而 --z-* 令牌此时不可用 */
       #app-splash {
         position: fixed;
         inset: 0;
         z-index: 9999;
         display: grid;
         place-items: center;
-        background:
-          radial-gradient(circle at 20% 20%, rgba(59, 130, 246, 0.14), transparent 40%),
-          radial-gradient(circle at 80% 10%, rgba(14, 165, 233, 0.14), transparent 36%),
-          linear-gradient(180deg, #f8fbff 0%, #eef3fa 100%);
-        transition: opacity 220ms ease;
+        background: var(--splash-app);
+        transition: opacity 240ms ease;
       }
       #app-splash.hide {
         opacity: 0;
@@ -33,11 +93,12 @@
         min-width: 280px;
         padding: 28px 24px 20px;
         border-radius: 16px;
-        border: 1px solid rgba(148, 163, 184, 0.24);
-        background: rgba(255, 255, 255, 0.9);
-        box-shadow: 0 24px 45px rgba(15, 23, 42, 0.12);
+        border: 1px solid var(--splash-border);
+        background: var(--splash-panel);
+        box-shadow: var(--splash-shadow);
         text-align: center;
-        font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+        font-family: "Inter", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
       }
       .splash-brand {
         width: 52px;
@@ -49,14 +110,14 @@
       }
       .splash-title {
         margin: 0;
-        color: #0f172a;
+        color: var(--splash-text);
         font-size: 22px;
         font-weight: 700;
         letter-spacing: 0.02em;
       }
       .splash-version {
         margin-top: 4px;
-        color: #475569;
+        color: var(--splash-muted);
         font-size: 12px;
       }
       .splash-loader {
@@ -64,25 +125,37 @@
         height: 28px;
         margin: 16px auto 10px;
         border-radius: 50%;
-        border: 2px solid #bfdbfe;
-        border-top-color: #2563eb;
+        border: 2px solid var(--splash-track);
+        border-top-color: var(--splash-accent);
         animation: splash-spin 1s linear infinite;
       }
       .splash-text {
         margin: 0;
-        color: #334155;
+        color: var(--splash-muted);
         font-size: 12px;
       }
+      @media (prefers-reduced-motion: reduce) {
+        #app-splash {
+          transition: none;
+        }
+        .splash-loader {
+          animation: none;
+        }
+      }
       @keyframes splash-spin {
-        from { transform: rotate(0deg); }
-        to { transform: rotate(360deg); }
+        from {
+          transform: rotate(0deg);
+        }
+        to {
+          transform: rotate(360deg);
+        }
       }
     </style>
   </head>
   <body>
     <div id="app-splash" role="status" aria-live="polite">
       <div class="splash-card">
-        <img class="splash-brand" src="/r0nix-icon.svg" alt="r0nix" />
+        <img class="splash-brand" src="/r0nix-icon.svg" alt="" />
         <h1 class="splash-title">r0nix</h1>
         <div class="splash-version" id="app-splash-version">v%APP_VERSION%</div>
         <div class="splash-loader"></div>

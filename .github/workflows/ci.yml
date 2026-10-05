@@ -53,8 +53,23 @@ jobs:
       - name: Frontend Build
         run: npm run build
 
+      - name: Contract Checks
+        run: npm run check:contracts
+
+      - name: Frontend Fixture Tests
+        run: npm run test:fixtures
+
+      - name: Browser P-Level E2E
+        run: npm run test:e2e
+
       - name: Rust Check
         run: cargo check --manifest-path src-tauri/Cargo.toml
+
+      - name: Rust Format Check
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Rust Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Rust Unit Tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
