@@ -58,6 +58,7 @@ import {
 } from"../services/readingAssistant";
 import { loadTranslationCache, saveTranslationCache } from"../services/translationCache";
 import { loadResourceIndex, saveResourceIndex } from"../services/resourceIndexCache";
+import { debugLog } from"../services/debugLogger";
 import"./PDFViewer.css";
 import { PageCanvas } from"./pdfReader/PageCanvas";
 import { PageThumbnail } from"./pdfReader/PageThumbnail";
@@ -966,6 +967,75 @@ export function PDFViewer({
     },
     [animateZoomToTarget, captureZoomAnchor, lockedZoomPage, scheduleRenderZoomCommit, totalPages, visiblePage],
   );
+
+  // ★ wheel 必须走原生 non-passive 监听 —— 不能沿用 React 的 onWheel prop。
+  // React 17+ 把 wheel / touch* 注册为 **passive** 监听器，在合成事件里调
+  // preventDefault() 会被浏览器直接忽略（并在控制台告警）。后果有两层：
+  // 既拦不住 WKWebView 对捏合的原生放大，也让「右键 + 滚轮缩放」拦不住页面滚动。
+  const isGestureRightDownRef = useRef(isGestureRightDown);
+  isGestureRightDownRef.current = isGestureRightDown;
+  const smoothZoomByRef = useRef(smoothZoomBy);
+  smoothZoomByRef.current = smoothZoomBy;
+
+  useEffect(() => {
+    const root = scrollRef.current;
+    if (!root) return;
+
+    // ---- 捏合探测窗口（临时代码，结论出来即拆）----
+    // 要回答的唯一问题：macOS 触控板捏合在 WKWebView 里到底派不派发 wheel 事件。
+    // 「没有日志」有两种可能：事件没来 / 监听压根没挂上。后者会被误判成前者，
+    // 所以窗口必须连普通滚动一起统计 —— total > 0 证明监听是活的，
+    // ctrl > 0 才证明捏合真的以 wheel + ctrlKey 的形态到达。
+    let total = 0;
+    let ctrl = 0;
+    let maxAbs = 0;
+    let mode = -1;
+    let flush = 0;
+    let timer: number | null = null;
+
+    const flushProbe = () => {
+      timer = null;
+      if (total === 0) return;
+      flush += 1;
+      // 常态只打前 3 个窗口（证明监听活着），一旦出现捏合就每次都打。
+      if (ctrl > 0 || flush <= 3) {
+        debugLog("wheel.probe", "window", {
+          total,
+          ctrl,
+          maxAbsDeltaY: Math.round(maxAbs * 10) / 10,
+          deltaMode: mode,
+        });
+      }
+      total = 0;
+      ctrl = 0;
+      maxAbs = 0;
+      mode = -1;
+    };
+
+    const onWheel = (event: WheelEvent) => {
+      total += 1;
+      if (event.ctrlKey || event.metaKey) ctrl += 1;
+      maxAbs = Math.max(maxAbs, Math.abs(event.deltaY));
+      mode = Math.max(mode, event.deltaMode);
+      if (timer === null) timer = window.setTimeout(flushProbe, 500);
+
+      // 既有行为不变：只有右键手势才缩放。捏合此刻仍不缩放 —— 先取证再动手。
+      if (!isGestureRightDownRef.current) return;
+      event.preventDefault();
+      const wheelMagnitude = Math.max(
+        WHEEL_ZOOM_MIN_STEP,
+        Math.min(24, Math.abs(event.deltaY) * WHEEL_ZOOM_SENSITIVITY),
+      );
+      const step = event.deltaY < 0 ? wheelMagnitude : -wheelMagnitude;
+      smoothZoomByRef.current(step, { clientX: event.clientX, clientY: event.clientY });
+    };
+
+    root.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      root.removeEventListener("wheel", onWheel);
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, []);
 
   const scheduleSync = useCallback(() => {
     if (rafRef.current !== null) {
@@ -2952,18 +3022,6 @@ export function PDFViewer({
         <div
           ref={scrollRef}
           className="pdf-selection-scope flex-1 overflow-auto bg-surface-sunken/50 relative z-0"
-          onWheel={(event) => {
-            if (!isGestureRightDown) return;
-            event.preventDefault();
-            event.stopPropagation();
-            const lockedPage = lockedZoomPageRef.current ?? lockedZoomPage ?? visiblePage;
-            const wheelMagnitude = Math.max(
-              WHEEL_ZOOM_MIN_STEP,
-              Math.min(24, Math.abs(event.deltaY) * WHEEL_ZOOM_SENSITIVITY),
-            );
-            const step = event.deltaY < 0 ? wheelMagnitude : -wheelMagnitude;
-            smoothZoomBy(step, { pageNo: lockedPage, clientX: event.clientX, clientY: event.clientY });
-          }}
         >
           {isImageLabelReader && imageLabelStatus.kind !=="idle" ? (
             <div
