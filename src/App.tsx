@@ -37,6 +37,7 @@ import {
   type PersistenceWarning,
 } from "./services/localStore";
 import { loadStoredAnnotations, saveStoredAnnotations } from "./services/readerAnnotations";
+import { describeFileOpenError } from "./services/fileOpenError";
 import { dismissCompanionBlock, dismissalForRemovedAnnotation, loadDismissedBlocks } from "./services/readingCompanion";
 import { debugWarn } from "./services/debugLogger";
 import { resolveAccentToken } from "./theme/accent";
@@ -1142,15 +1143,17 @@ export default function App() {
             setActiveTabId(DEFAULT_ACTIVE_TAB_ID);
           }
         }
-        const message = error instanceof Error ? error.message : String(error);
-        updateBusyMessage(`Failed to open file: ${message}`, 3200);
+        // ★ 不再直接甩原始串：那是「哪一层失败了」，而用户需要的是「下一步做什么」。
+        // macOS TCC 拦受保护目录时有明确解法（改走「打开文件」对话框拿 powerbox 授权），
+        // 分类与文案都在 services/fileOpenError.ts（纯函数、有单测）。
+        updateBusyMessage(describeFileOpenError(error, settings.language), 3600);
         return false;
       } finally {
         openingPathsRef.current.delete(openKey);
         cancelledOpeningPathsRef.current.delete(openKey);
       }
     },
-    [documents, releasePdfFileAfterTabCommit, tabs, updateBusyMessage, upsertDocumentFromOpen]
+    [documents, releasePdfFileAfterTabCommit, settings.language, tabs, updateBusyMessage, upsertDocumentFromOpen]
   );
 
   useEffect(() => {
@@ -1445,8 +1448,9 @@ export default function App() {
               });
             }
           }
-          const message = error instanceof Error ? error.message : String(error);
-          updateBusyMessage(`打开 PDF 失败: ${message}`, 3600);
+          // openPdfByPath 已经提示过一次，这里用同一份文案覆盖而不是再甩一条原始串 ——
+          // 否则用户先看到可行动的提示、随即被一条 errno 盖掉。
+          updateBusyMessage(describeFileOpenError(error, settings.language), 3600);
           return false;
         }
       })();
@@ -1531,10 +1535,9 @@ export default function App() {
         throw error;
       }
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      updateBusyMessage(`Failed to open file: ${message}`, 3200);
+      updateBusyMessage(describeFileOpenError(error, settings.language), 3600);
     }
-  }, [openPdfByPath, updateBusyMessage, upsertDocumentFromOpen]);
+  }, [openPdfByPath, settings.language, updateBusyMessage, upsertDocumentFromOpen]);
 
   const importFolder = useCallback(async () => {
     try {
