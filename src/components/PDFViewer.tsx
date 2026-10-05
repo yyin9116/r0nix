@@ -3064,7 +3064,7 @@ export function PDFViewer({
         </div>
         <div
           ref={scrollRef}
-          className="pdf-selection-scope flex-1 overflow-auto bg-surface-sunken/50 relative z-0"
+          className={`pdf-selection-scope flex-1 overflow-auto bg-surface-sunken/50 relative z-0 ${isGestureRightDown ?"cursor-grabbing" :""}`}
         >
           {isImageLabelReader && imageLabelStatus.kind !=="idle" ? (
             <div
@@ -3119,7 +3119,7 @@ export function PDFViewer({
                         else pageRefs.current.delete(pageNo);
                       }}
                       data-pdf-page={pageNo}
-                      className={`pdf-page-block relative overflow-hidden bg-surface-panel border origin-top ${isGestureRightDown ?"cursor-ns-resize" : activeTool ==="hand" ?"cursor-grab active:cursor-grabbing" : activeTool ==="select" ?"cursor-text" :"cursor-crosshair"} dark:invert dark:hue-rotate-180 ${visiblePage === pageNo ?"pdf-page-block--focused" :"border-transparent"}`}
+                      className={`pdf-page-block relative overflow-hidden bg-surface-panel border origin-top ${isGestureRightDown ?"cursor-grabbing" : activeTool ==="select" ?"cursor-text" : isAnnotationTool(activeTool) ?"cursor-crosshair" :"cursor-default"} dark:invert dark:hue-rotate-180 ${visiblePage === pageNo ?"pdf-page-block--focused" :"border-transparent"}`}
                       style={{
                         width,
                         height,

@@ -206,4 +206,18 @@ assert(
   "The text-selection predicate must be defined once, not duplicated at each consumer.",
 );
 
+// 光标必须描述右键拖拽**实际做的事**：moveRightGesture 改的是 scrollLeft/scrollTop，
+// 是平移（pan），不是缩放。此前这里写的是 cursor-ns-resize（上下调尺寸），
+// 与实际行为不符，且 hand 工具用 cursor-grab 暗示「左键能拖」—— 而拖拽只认右键。
+assert(!viewer.includes("cursor-ns-resize"), "Right-drag pans the page; its cursor must not claim resize semantics.");
+assert(
+  !viewer.includes("cursor-grab active:cursor-grabbing"),
+  "The hand tool must not show a grab cursor: dragging the page requires the right button.",
+);
+// 手型必须同时在页块与滚动容器上 —— 只改页块会让页间留白处光标不变，看着像没生效。
+assert(
+  viewer.split('isGestureRightDown ?"cursor-grabbing"').length - 1 === 2,
+  "The pan cursor must cover both page blocks and the scroll container's empty space.",
+);
+
 console.log("pdf-virtualization: ok");
