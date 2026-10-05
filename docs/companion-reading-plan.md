@@ -22,15 +22,15 @@
 | §4 第 4 接触点 `App.tsx:407` 的 kind 硬白名单 | ✅ **已迁走** | `readerAnnotations.ts:35-50`，且实现方式改了，见下 |
 | §4 第 5 接触点 `App.tsx:408-423` 的逐字段重建 | ✅ **已迁走** | `readerAnnotations.ts:59-98` |
 | §8 「先测量再钳制」 | ✅ **已按修法 B 落地** | `src/services/overlayPlacement.ts` + `ReadingAssistMenu.tsx`（`useLayoutEffect` + `ResizeObserver` 实测尺寸，`clampOverlayPoint` / `resolveOverlayPoint` 派生位置） |
-| §3.5 否定集合 + §3.6 设置字段 + §5 气泡 + §6 LLM 契约 + §7 密度引擎 | ⬜ **未做** | 仍是本单的施工内容 |
+| ~~§3.5 否定集合 + §3.6 设置字段 + §5 气泡 + §6 LLM 契约 + §7 密度引擎~~ | ✅ **整行已做完，条目拆散见本表下方** | 密度引擎（`deriveIntensity`）✅、**不做后端**（§7 拍板）；其余各项见下 |
 | §3.1 / §3.2 / §3.3 类型改动 | ✅ **已完成** | 批次 1 落地。实测：只加 `wavy` 后 `tsc` 报出 **5 个**接触点（比本单原预测的 3 个多 2 个），见 §4 表格下的更正 |
 | §9 强证据的两条单测（wavy / origin 存活） | ✅ **已完成** | `scripts/test-reader-annotations.mjs`，配 3 个变异测试（M1 tsc 绿/单测红、M2 谓词放宽、M3 穷举表漏成员 → TS2741） |
 | §3.5 否定集合 | ✅ **已完成** | `src/services/readingCompanion.ts`：`loadDismissedBlocks` / `dismissCompanionBlock` / `isBlockDismissed` / `dismissalForRemovedAnnotation`，接线在 `App.tsx` 的 `removeAnnotation` |
 | §3.6 设置字段 | ✅ **已完成** | `userSettings.ts` 4 个必填字段 + `USER_SETTINGS_VERSION` 3 → 4 |
 | §3.4 密度档位 `deriveIntensity` | ✅ **已完成** | 同上模块，单测含 26244 条单调性样本 |
-| §3.4 行为信号**采集**（dwell / revisits） | ⬜ **未做** | 类型 `CompanionDwellSample` 已定义，采集端（PageCanvas 的可见性观测）未接 |
-| §6 `suggestReadingCompanion` + 解析降级 | ✅ **已完成** | `readingAssistant.ts` 走既有 `requestChatCompletionText`；纯逻辑（prompt + 解析）在 **`src/services/companionSuggestion.ts`**，见 §6 下的偏离说明 |
-| §5 气泡三态 | ⬜ **未做** | 仍是本单的施工内容 |
+| §3.4 行为信号**采集**（dwell） | ✅ **已完成** | `src/components/pdfReader/useCompanionDwell.ts`（DOM 实测 + 防抖 + 计时）+ `services/companionDwell.ts`（纯判定，960 条网格样本）。⚠️ **只做了 dwell**：`CompanionDwellSample.revisits` 仍无采集端 |
+| §6 `suggestReadingCompanion` + 解析降级 | ✅ **已完成且已接上调用方** | `readingAssistant.ts` 走既有 `requestChatCompletionText`；纯逻辑（prompt + 解析）在 **`src/services/companionSuggestion.ts`**，见 §6 下的偏离说明 |
+| §5 气泡 | ✅ **已按方案 A 落地单态闭环** | 停留 2.5s → `PDFViewer.tsx` 打开既有 `ReadingAssistMenu`（`inline-toolbar`）→ 渲染提示卡（疑问 / 预览 / 为什么在这里出现 / 暂不提示）。**三态机未做**，见 §5 下的偏离说明 |
 
 ### ⚠️ 与原方案的一处主动偏离 —— 不要改回去
 
@@ -352,6 +352,35 @@ export function deriveIntensity(stats: CompanionLearningStats): CompanionIntensi
 | 关闭后又点开 | 允许；但**同一次会话内**不再重复弹同一条 | 防止「关一下再点一下」来回骚扰 |
 | 状态落盘 | 只有 dismiss 与计数落盘，状态机本身不落盘 | 见 §3.4 |
 
+### ⚠️ 与 §5 的一处主动偏离 —— 先只做单态（方案 A）
+
+三态机（seed → preview → expanded）**没有**落地。先做的是「**单态闭环**」：
+
+```
+  停留 ≥ 2.5s ──► 打开既有 ReadingAssistMenu（variant="inline-toolbar"）
+                  └─ 有提示：疑问 / 预览 / 为什么在这里出现 / 暂不提示
+                  └─ 无提示：退化成普通阅读辅助工具栏（看不出发生过什么）
+```
+
+理由是**验证顺序**：三态机里真正有争议的是「什么时候值得弹」，而不是「弹出来长什么样」。
+先把「停留 → 请求 → 渲染 → 可拒绝」这条链路打通，才能拿到 §11 那三个数的**真实样本**；
+在那之前把三态做全，等于在没人用过的前提下先写死交互细节。
+
+因此 §5 里有三条**尚未落地**，列清楚以免被当成已完成：
+
+| §5 的规则 | 状态 |
+|---|---|
+| `seed` 态（页面只渲染波浪线 + 锚点、不弹窗） | ⬜ 未做 —— 目前触发即展开气泡 |
+| `expanded` 态（完整解答 + 可追问） | ⬜ 未做 —— 用的是既有阅读辅助面板的展开态，不是伴读自己的 |
+| 主动点锚点 / 主动选中作为触发信号 | ⬜ 未做 —— 触发信号目前只有停留 |
+| 每页上限 1 条、自报理由、暂不提示 | ✅ 已落地 |
+
+失败形态统一是这一版的**设计决定**，不是省事：未配置模型 / 网络错 / 超时 /
+模型返回 `[]` / 模型挑了同页另一块 —— 五种情形在 UI 上完全一致（不显示提示卡）。
+伴读是主动找上门的，它失败时不该再占用一次注意力去报错；
+而「提示挂在错误的块上」比不提示更坏，所以结果要用 `pickSuggestionForBlock`
+筛到停留块上（详见 §6 下的偏离说明）。
+
 ---
 
 ### ⚠️ 与 §6 的一处主动偏离 —— 位置分成了两个文件
@@ -528,13 +557,27 @@ export const WAVY_IS_NOT_A_USER_TOOL: WavyIsNotAUserTool = true;
 - ✅ **已完成**：`loadStoredAnnotations` 及其 sanitize 已从 `src/App.tsx` 抽到
   `src/services/readerAnnotations.ts`，该模块可被 `node --experimental-strip-types` 真实加载，
   因此「刷新后还剩什么」可以用行为断言覆盖，而不是 `readFileSync` + `includes`。
-- ⬜ **待批次 2**：单测必须补上这两条。注意**顺序**——当前的
-  `sanitizeStoredAnnotations` 恰好会把这两者都丢掉（`wavy` 被白名单拒、`origin` 被重建丢掉），
-  所以必须先改白名单与重建对象、**再**补断言，否则断言写出来就是红的、且无法区分
-  「功能没做」与「断言写错」：
-  1. 输入含 `kind: "wavy"` 的标注 ⇒ 输出**保留**它
-  2. 输入含 `origin: "ai"` 的标注 ⇒ 输出**保留** `origin`
+- ✅ **已完成**（原标「待批次 2」）：`scripts/test-reader-annotations.mjs` 里
+  「`wavy` 必须存活」与「`origin` 必须存活」两条断言已落地，见该文件 §1b / §3 段注释。
+  顺序问题也按原计划处理完了：白名单与重建对象是**先改**的，所以断言写出来就是绿的，
+  不存在「功能没做」与「断言写错」分不清的情形。
 - 抽离本身就是本仓做过的动作（`readerCore.ts` 就是从 `PDFViewer.tsx` 拆出来的），不引入新模式。
+
+### ★ 「提示必须锚在停留块上」—— 一条新的解析纪律
+
+§6 的三条解析纪律之外补第 4 条，因为它防的是另一种失败：
+
+> **4. 结果必须筛到触发提示的那块上。** prompt 会点名停留块并要求只针对它提问，
+> 但模型是**不可信输入源**，它仍会挑同页「更像结论」的另一块。
+> 而气泡已经锚在停留块上了，让它挪走就会变成「内容说 A、气泡挂在 B」。
+
+落地形态：`pickSuggestionForBlock(suggestions, blockId)`（纯函数，
+`scripts/test-companion-suggestion.mjs` 覆盖；变异：改成 `suggestions[0]` 会红）。
+
+顺带的两处 prompt 改动，都是为了让它**能**回答停留块的问题：
+system prompt 加第 6 条「只针对停留块，没有可问的就返回 `[]`」；
+`buildCompanionBlockDigest(blocks, maxChars, prioritizeBlockId)` 把停留块排到摘要第一位 ——
+截断是按顺序发生的，靠后的块会被整块切掉，那模型就只能靠 id 猜。
 
 ---
 
@@ -578,10 +621,13 @@ export const WAVY_IS_NOT_A_USER_TOOL: WavyIsNotAUserTool = true;
 | 1 | §3.1 / §3.2 / §3.3 类型改动 + §4 的 3 个编译器可见接触点 | ✅ 已过。`npx tsc --noEmit` 通过；实测它指出的接触点是 **5 个**不是 3 个（见 §4） |
 | 2 | ✅ 已抽 `services/readerAnnotations.ts` + 2 条单测（wavy / origin 存活） | ✅ 已过。单测绿；3 个变异测试全部会红 |
 | 3 | §3.5 否定集合 + 「删标注同时写否定」+ §3.6 设置字段 | ✅ 已过。`deriveIntensity` 与其单测一并提前落地（原属批次 4）；7 个变异测试全部会红 |
-| 4 | §3.4 本地信号采集（dwell / revisits 观测端） | 单测覆盖四档边界 + 单调性（档位部分已完成，采集端待做） |
+| 4 | §3.4 本地信号采集（dwell / revisits 观测端） | ✅ 已过（2026-10-05）。⚠️ **只过了 dwell**：`useCompanionDwell` 用页面元素 `rect` 实测焦点块（块本身没有 DOM，这是当时的卡点），纯判定 960 条网格样本。**revisits 采集端仍未做**，故 `deriveIntensity` 仍无真实信号 |
 | 5 | §6 `suggestReadingCompanion` + 解析降级 | ✅ 已过。29 组畸形输入的解析降级全部不抛错；3 个变异测试全部会红 |
-| 6 | §5 气泡三态 + ~~§8 钳制修复~~（§8 已完成） | 视觉核验 + 靠近下缘时的翻转行为 |
-| 7 | §9 守卫 + 变异测试 | 每条守卫都证明过会红；#3 / #4 与「删标注写否定」已提前落地 |
+| 6 | §5 气泡三态 + ~~§8 钳制修复~~（§8 已完成） | ✅ **已过，但只过了方案 A**（视觉核验 + 靠近下缘时的翻转行为）。三态机本身未做，见 §5 下的偏离说明 |
+| 7 | §9 守卫 + 变异测试 | ✅ 已过。每条守卫都证明过会红；#3 / #4 与「删标注写否定」已提前落地 |
+| 8 | §3.4 采集端接线（hook + 设置开关） | ✅ 已过。设置沿用既有 Button 切换约定（曾误建 `src/ui/Switch.tsx` 引入第二套约定，已删除） |
+| 9 | §6 接进气泡 + 锚定停留块 + 暂不提示 | ✅ 已过。纯逻辑 4 个变异 + 守卫 4 个变异全部会红 |
+| 10 | 守卫补强 + 施工单回写 | ✅ 已过。⚠️ 两条守卫**初版没牙**（只匹配裸名字，被 import 行 / 相似前缀兜住），已改成只认调用形式并重跑变异 |
 
 > **批次 3 的一处顺序调整**：§3.6 的设置字段与 §3.4 的 `deriveIntensity` 被提前到批次 3。
 > 理由是 `companionIntensity` 这个字段的类型就是 `CompanionIntensity`，两者是同一个决定的
@@ -593,6 +639,11 @@ export const WAVY_IS_NOT_A_USER_TOOL: WavyIsNotAUserTool = true;
 
 | 项 | 风险 | 何时复核 |
 |---|---|---|
+| **§11 三个判据目前一个数都取不到** | 锚点准确率与打扰度都需要真实使用样本；现在只有链路是通的 | 有真实用户数据后 |
+| `deriveIntensity` 仍无行为信号 | `revisits` 采集端没做，只有 dwell；密度档位目前等于**用户手选的常量**，不是「学出来的」 | 做 revisits 采集时 |
+| 气泡三态机未做 | 触发即展开，比 §5 设想的 seed 态打扰更强 | 拿到 §11 样本后决定要不要收紧 |
+| 气泡失败态完全静默 | 用户无法区分「模型没配」与「模型说这页没什么可问的」。刻意如此，但值得在设置里补一句状态说明 | 有「伴读怎么没反应」的反馈时 |
+| macOS TCC：自动恢复 `~/Downloads/*` 的 PDF 得 EPERM | 无 powerbox 授权，且**应用不给用户任何提示**，看起来像无声失败 | 动文件恢复路径时 |
 | `wavy` 的语义冲突 | Word / 浏览器里波浪线 = 「有问题」。若上线后出现「为什么给我标错」的反馈，说明锚点没有起到消歧作用 | 上线后第一批反馈 |
 | 老数据的 `origin` 缺省 | 一律视为 `manual`。如果早期 AI 标注（若有）混在未标记数据里，它们会被当成人工标注因而**不会**被重生保护 | 数据迁移时 |
 | `heavy` 档 60% 上界 | 这个数是设计判断，不是实验结论 | 有真实用户数据后 |

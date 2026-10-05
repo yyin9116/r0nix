@@ -172,4 +172,44 @@ for (const forbidden of ["Date.now", "Math.random", "fetch(", "invoke(", "XMLHtt
   );
 }
 
+// 与停留层同款：companionSuggestion.ts 也必须保持纯且离线。
+// 它一旦 import 了 @tauri-apps/api 或掺进时钟/随机，就再也加载不进 node，
+// 「模型返回垃圾时会不会崩」这条最该被行为断言覆盖的性质就退回成字符串断言了。
+const suggestionLogic = view(readFileSync("src/services/companionSuggestion.ts", "utf8"));
+for (const forbidden of ["Date.now", "Math.random", "fetch(", "invoke(", "XMLHttpRequest", "localStorage"]) {
+  assert(
+    !suggestionLogic.includes(forbidden),
+    `companion suggestion logic must stay pure and offline; found ${forbidden}.`
+  );
+}
+
+// 提示必须锚在停留块上：调用点要把 focusedBlockId 带进去，
+// 并且结果要用 pickSuggestionForBlock 筛一遍 —— 模型是不可信输入源，
+// 它会挑同页「更像结论」的另一块，那会造成「内容说 A、气泡挂在 B」的错位。
+//
+// ⚠️ 只认**调用**，不认 import 行：实测过，只匹配裸名字时把调用换成 `suggestions[0]`
+// 守卫照样绿（import 那一行还在）。同理，下面「暂不提示」那条也不能只匹配裸名字 ——
+// `onDismissCompanionRemoved` 之类同样含那段前缀。
+const viewerCallLines = viewer.raw.split("\n").filter((line) => !line.trimStart().startsWith("import"));
+const viewerCalls = (name) => viewerCallLines.some((line) => line.includes(`${name}(`));
+assert(
+  viewer.includes("focusedBlockId:") && viewerCalls("pickSuggestionForBlock"),
+  "the companion bubble must anchor its hint to the block the reader dwelled on."
+);
+
+// ⚠️ 弱证据，且弱得有据可查：字符串守卫只能证明「这行字还在」，证明不了它会被执行
+// （§9 里 `if (false && …)` 的实证）。「提示必须自报理由」无法用编译期不变量表达 ——
+// `CompanionSuggestion.reason` 是必填字段，但不渲染它 tsc 并不报错。
+// 所以这里只防「整块被删掉」这种最粗的回归，别把它当强约束。
+assert(
+  menu.raw.includes("companion.reason"),
+  "a companion hint must state why it appeared — an unexplained proactive action reads as noise."
+);
+// 「暂不提示」是打扰度判据（施工单 §11）唯一的输入：
+// 没有它，读者只能关掉全局开关 —— 而他只是不想看**这一块**。
+assert(
+  /onDismissCompanion\s*[=:]/.test(viewer.raw) && viewerCalls("dismissCompanionBlock"),
+  "the companion bubble must offer 'not now' and record it in the dismissal set."
+);
+
 console.log("reading-assist-contract: ok");
