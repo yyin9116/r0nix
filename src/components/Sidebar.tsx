@@ -111,7 +111,7 @@ export function Sidebar({
   return (
     <div
       aria-hidden={!isOpen}
-      className={`${isOpen ? "w-72 visible pointer-events-auto" : "w-0 invisible pointer-events-none"} transition-[width] duration-300 ease-in-out overflow-hidden bg-surface-app border-r border-border-subtle flex flex-col h-full text-sm font-sans text-content-primary shrink-0`}
+      className={`${isOpen ? "w-72 visible pointer-events-auto" : "w-0 invisible pointer-events-none"} transition-[width] duration-slow ease-standard overflow-hidden bg-surface-app border-r border-border-subtle flex flex-col h-full text-sm font-sans text-content-primary shrink-0`}
     >
       <div className="w-72 flex flex-col h-full">
         <div className="p-4 flex items-center justify-between border-b border-border-subtle">
@@ -238,7 +238,7 @@ export function Sidebar({
               >
                 <ChevronDown
                   size={13}
-                  className={`shrink-0 transition-transform duration-150 ${quickLinksOpen ? "rotate-0" : "-rotate-90"}`}
+                  className={`shrink-0 transition-transform duration-fast ${quickLinksOpen ? "rotate-0" : "-rotate-90"}`}
                 />
                 <span className="truncate">{text.quickLinks}</span>
               </button>
@@ -253,7 +253,7 @@ export function Sidebar({
               </button>
             </div>
             <div
-              className={`overflow-hidden transition-[max-height,opacity,transform] duration-200 ease-out ${
+              className={`overflow-hidden transition-[max-height,opacity,transform] duration-base ease-out ${
                 quickLinksOpen ? "max-h-52 translate-y-0 opacity-100" : "max-h-0 -translate-y-1 opacity-0"
               }`}
             >

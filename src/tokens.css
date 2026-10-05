@@ -63,6 +63,25 @@
   --color-state-ok: var(--state-ok-fg);
   --color-state-warn: var(--state-warn-fg);
 
+  /* ---- 动效 ----
+     与颜色同一套桥接模式：把刻度暴露成 duration-fast / duration-base / duration-slow。
+
+     ★ 为什么必须桥接（不是整洁问题）：不桥接时 TSX 只能用 Tailwind 默认档
+     （duration-150 / 200 / 300），而那些类生成的是**固定值** ——
+     `prefers-reduced-motion` 把下面三个令牌归零，对固定值完全无效，
+     reduce 用户照样看完整动画。桥接后类里写的是 var()，归零才真正生效。
+
+     ★ `--duration-*: initial` / `--ease-*: initial` 清掉 Tailwind 默认档位：
+     留着它们等于留一条绕过刻度的小路 —— 谁都能顺手写一个 duration-200，
+     它既不进刻度、也不归零，还没有任何东西拦着。清掉之后刻度才是唯一入口。 */
+  --duration-*: initial;
+  --duration-fast: 120ms; /* hover / 按压反馈 */
+  --duration-base: 160ms; /* 状态与面板切换 */
+  --duration-slow: 240ms; /* 浮层进出 */
+  --ease-*: initial;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+
   /* ---- 高度 ----
      刻意【不】在这里暴露 shadow-* 工具类。
      理由：本仓库 15 处 box-shadow 全部写在手写 CSS 里，TSX 侧零处使用
@@ -244,11 +263,9 @@
   /* =======================================================================
    * 动效
    * ===================================================================== */
-  --duration-fast: 120ms; /* hover / 按压反馈 */
-  --duration-base: 160ms; /* 状态与面板切换 */
-  --duration-slow: 240ms; /* 浮层进出 */
-  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
-  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  /* 动效令牌定义在文件头部的 @theme 段：那里一处定义同时产出
+     ① :root 变量（供手写 CSS 的 var() 引用）② duration-fast / ease-standard 工具类。
+     这里不重复声明 —— 两处同名声明会让「改了一处没生效」成为常态。 */
 }
 
 /*
@@ -295,4 +312,26 @@
     --duration-base: 0ms;
     --duration-slow: 0ms;
   }
+}
+
+/*
+ * duration-fast / base / slow 工具类。
+ *
+ * ★ 为什么需要 @utility：Tailwind v4 的 duration-* 是**数字型**内置工具
+ * （duration-150 直接取 150ms），它不读 --duration-* theme 变量 —— 实测 @theme 里
+ * 声明 --duration-fast 只会产出 :root 变量（已验证：产物里有 --duration-fast:.12s），
+ * **不会**产出 .duration-fast 类。所以要在这里用 @utility 补上，
+ * 否则 TSX 只能写 duration-[var(--duration-slow)] 这种任意值。
+ *
+ * ★ 值必须走 var()：写成固定值（如 240ms）的话，prefers-reduced-motion
+ * 把令牌归零就够不着它 —— reduce 用户照样看完整动画，这正是要修的那个洞。
+ */
+@utility duration-fast {
+  transition-duration: var(--duration-fast);
+}
+@utility duration-base {
+  transition-duration: var(--duration-base);
+}
+@utility duration-slow {
+  transition-duration: var(--duration-slow);
 }

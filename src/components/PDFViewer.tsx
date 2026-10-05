@@ -2684,7 +2684,7 @@ export function PDFViewer({
       />
 
       <div
-        className={`${isLeftSidebarOpen ?"w-[196px]" :"w-0"} transition-[width] duration-150 ease-out bg-surface-panel border-r border-border-subtle hidden md:flex md:flex-col shrink-0 overflow-hidden`}
+        className={`${isLeftSidebarOpen ?"w-[196px]" :"w-0"} transition-[width] duration-slow ease-out bg-surface-panel border-r border-border-subtle hidden md:flex md:flex-col shrink-0 overflow-hidden`}
       >
         <div className="w-[196px] flex border-b border-border-subtle items-center px-2 py-1.5">
           <button
@@ -2754,7 +2754,7 @@ export function PDFViewer({
       </div>
 
       <div
-        className={`flex-1 flex flex-col min-w-0 transition-[padding-right] duration-200 ease-out ${isNotesOpen ?"lg:pr-80" :""}`}
+        className={`flex-1 flex flex-col min-w-0 transition-[padding-right] duration-base ease-out ${isNotesOpen ?"lg:pr-80" :""}`}
       >
         <div className="min-h-14 bg-surface-panel border-b border-border-subtle flex flex-nowrap items-center justify-between gap-2 px-3 py-2 shrink-0 shadow-sm z-30 overflow-visible">
           <div className="flex min-w-0 items-center gap-1 overflow-hidden">
@@ -3322,7 +3322,7 @@ export function PDFViewer({
       </div>
 
       <div
-        className={`absolute right-0 top-0 z-40 hidden h-full w-[20rem] transform-gpu flex-col overflow-hidden border-l border-border-subtle bg-surface-panel shadow-[-18px_0_38px_rgba(15,23,42,0.08)] transition-transform duration-200 ease-out will-change-transform dark:shadow-[-18px_0_38px_rgba(0,0,0,0.32)] lg:flex ${
+        className={`absolute right-0 top-0 z-40 hidden h-full w-[20rem] transform-gpu flex-col overflow-hidden border-l border-border-subtle bg-surface-panel shadow-[-18px_0_38px_rgba(15,23,42,0.08)] transition-transform duration-slow ease-out will-change-transform dark:shadow-[-18px_0_38px_rgba(0,0,0,0.32)] lg:flex ${
           isNotesOpen ?"translate-x-0" :"translate-x-full"
         }`}
         aria-hidden={!isNotesOpen}

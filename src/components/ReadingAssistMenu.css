@@ -20,7 +20,7 @@
   background: color-mix(in srgb, var(--surface-panel) 96%, transparent);
   color: var(--content-primary);
   box-shadow: var(--elev-lg);
-  animation: reading-assist-enter 110ms ease-out;
+  animation: reading-assist-enter var(--duration-fast) ease-out;
   backdrop-filter: blur(14px);
 }
 

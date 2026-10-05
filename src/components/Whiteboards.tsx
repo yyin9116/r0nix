@@ -649,7 +649,7 @@ export function Whiteboards({ documents, notesByDocument, onOpenPdf, onOpenPdfAt
           ) : null}
         </div>
       </div>
-      <aside className={`${isSidecarOpen ? "w-96" : "w-0"} transition-[width] duration-300 ease-in-out shrink-0 border-l border-border-subtle bg-surface-panel hidden xl:flex xl:flex-col overflow-hidden`}>
+      <aside className={`${isSidecarOpen ? "w-96" : "w-0"} transition-[width] duration-slow ease-standard shrink-0 border-l border-border-subtle bg-surface-panel hidden xl:flex xl:flex-col overflow-hidden`}>
         <div className="px-5 py-4 border-b border-border-subtle">
           <div className="text-sm font-semibold text-content-primary">{selectedCard ? t.inspector : selectedConnection ? t.connection : t.sidecar}</div>
           <p className="text-xs text-content-muted mt-1">{t.sidecarDefaultHint}</p>

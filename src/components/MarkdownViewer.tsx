@@ -887,7 +887,7 @@ export function MarkdownViewer({
         }
       />
       <div
-        className={`${isOutlineOpen ?"w-64" :"w-0"} transition-[width] duration-200 ease-out bg-surface-panel border-r border-border-subtle hidden md:flex md:flex-col shrink-0 overflow-hidden`}
+        className={`${isOutlineOpen ?"w-64" :"w-0"} transition-[width] duration-slow ease-out bg-surface-panel border-r border-border-subtle hidden md:flex md:flex-col shrink-0 overflow-hidden`}
       >
         <div className="h-12 flex items-center px-4 border-b border-border-subtle text-sm font-semibold tracking-tight">
           <List className="w-4 h-4 mr-2" />

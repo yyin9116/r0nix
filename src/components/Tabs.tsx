@@ -183,7 +183,7 @@ export function Tabs({
                     if (!onTabContextMenu) return;
                     onTabContextMenu(tab, event);
                   }}
-                  className={`group relative box-border flex shrink-0 items-center gap-2 overflow-hidden px-4 h-full cursor-pointer motion-safe:transition-[background-color,color,border-color] motion-safe:duration-220 text-sm ${
+                  className={`group relative box-border flex shrink-0 items-center gap-2 overflow-hidden px-4 h-full cursor-pointer motion-safe:transition-[background-color,color,border-color] motion-safe:duration-fast text-sm ${
                     isActive
                       ? "bg-surface-panel text-content-primary shadow-sm border-x border-border-subtle z-10"
                       : "text-content-muted hover:bg-surface-hover/50 hover:text-content-primary border-x border-transparent"
