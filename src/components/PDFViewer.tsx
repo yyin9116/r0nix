@@ -288,6 +288,10 @@ export function PDFViewer({
     viewportY: number;
   } | null>(null);
   const lockedZoomPageRef = useRef<number | null>(null);
+  /** 所有页的直接父容器 —— 缩放预览作用在它上面，而不是某一页。 */
+  const pageFlowRef = useRef<HTMLDivElement | null>(null);
+  /** 页流在滚动容器坐标系里的**未变换**位置。预览期间布局不变，采一次即可。 */
+  const zoomFlowBaseRef = useRef<{ left: number; top: number } | null>(null);
   const readingBlocksByPageRef = useRef<Map<number, PdfReadingBlock[]>>(new Map());
   /** 伴读触发的辅助气泡要以内联浮层呈现，与「划词后的面板」区分开。 */
   const [assistFromCompanion, setAssistFromCompanion] = useState(false);
@@ -412,7 +416,6 @@ export function PDFViewer({
   const pdfFingerprint =
     pdfDoc?.fingerprints?.find((value): value is string => typeof value ==="string" && value.trim().length > 0) ||"";
   const resourceCacheKey = resourceCacheIdentity(documentId || fileId ||"", documentFileSize, pdfFingerprint);
-  const zoomScale = useMemo(() => Math.max(0.5, zoom / 100), [zoom]);
   const renderZoomScale = useMemo(() => Math.max(0.5, renderZoom / 100), [renderZoom]);
   const visiblePage = lockedZoomPage ?? page;
   renderZoomRef.current = renderZoom;
@@ -805,17 +808,14 @@ export function PDFViewer({
     }
     zoomAnchorRef.current = null;
     zoomRenderReadyRef.current = false;
-    const lockedPage = lockedZoomPageRef.current;
-    if (lockedPage !== null) {
-      const node = pageRefs.current.get(lockedPage);
-      if (node) {
-        // The preview transform is written outside React for animation. Once
-        // the committed canvas is ready, return ownership to React so a later
-        // document/tab change cannot inherit a stale transform.
-        node.style.transform ="";
-        node.style.transformOrigin ="";
-      }
+    const flow = pageFlowRef.current;
+    if (flow) {
+      // 预览 transform 是绕开 React 写在 DOM 上的。提交完成后必须把所有权
+      // 交还回去，否则之后切换文档 / 标签页会继承一个过期 transform。
+      flow.style.transform ="";
+      flow.style.transformOrigin ="";
     }
+    zoomFlowBaseRef.current = null;
     lockedZoomPageRef.current = null;
     setLockedZoomPage(null);
   }, []);
@@ -888,23 +888,46 @@ export function PDFViewer({
   const applyZoomPreview = useCallback(
     (previewZoom: number) => {
       const anchor = zoomAnchorRef.current;
-      const root = scrollRef.current;
-      const lockedPage = lockedZoomPageRef.current;
-      const node = lockedPage === null ? null : pageRefs.current.get(lockedPage);
-      if (!anchor || !root || !node) return;
+      const flow = pageFlowRef.current;
+      const base = zoomFlowBaseRef.current;
+      if (!anchor || !flow) return;
 
       const previewScale = Math.max(0.5, previewZoom / 100);
       const visualScale = previewScale / Math.max(0.01, renderZoomScale);
-      node.style.transform = Math.abs(visualScale - 1) < 0.0001 ?"" :`scale(${visualScale})`;
+      // ★ 缩放整个页流，而不是锁定的那一页。
+      // 之前只对锁定页写 transform，于是它先变、其余页停在旧尺寸，
+      // 直到 160ms 后 renderZoom 提交才一齐跟上 —— 就是那个「某一页先缩放」的过渡态。
+      // CSS transform 是 GPU 合成的，一次变换 vs 每页一次变换成本几乎没差别，
+      // 而 canvas 重渲染依旧延后，所以「一起预览」不牺牲任何原有取舍。
+      //
+      // transform-origin 必须是**同一个绝对原点**（锚点在页流坐标系里的像素位置）。
+      // 若每页各按自己的相对原点缩放，页与页的间距会跟着变，看起来像「散开」。
+      const originX = base ? anchor.viewportX - base.left : 0;
+      const originY = base ? anchor.viewportY - base.top : 0;
+      flow.style.transformOrigin =`${originX}px ${originY}px`;
       // Keep the point under the pointer fixed by the transform itself. A
       // second scroll correction causes the page to drift left and snap back.
-      node.style.transformOrigin =`${anchor.relX * 100}% ${anchor.relY * 100}%`;
+      flow.style.transform = Math.abs(visualScale - 1) < 0.0001 ?"" :`scale(${visualScale})`;
     },
     [renderZoomScale],
   );
 
   const animateZoomToTarget = useCallback(() => {
     if (zoomAnimationRef.current !== null) return;
+
+    // 尊重系统「减少动态效果」。这条判断写在这里而不是指望令牌层，
+    // 是因为 tokens.css 把 --duration-* 归零只对走 CSS / transition 的消费者生效；
+    // 本文件的缩放是 rAF 手写循环，与 CSS 令牌没有任何连接，
+    // 不自己判断的话 reduce 用户照样会看到完整的逐帧逼近。
+    if (window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true) {
+      const target = zoomTargetRef.current;
+      zoomPreviewRef.current = target;
+      applyZoomPreview(target);
+      setZoom(target);
+      scheduleRenderZoomCommit(target);
+      return;
+    }
+
     const tick = () => {
       zoomAnimationRef.current = null;
       const target = zoomTargetRef.current;
@@ -949,6 +972,16 @@ export function PDFViewer({
       if (lockedZoomPageRef.current === null) {
         lockedZoomPageRef.current = anchorPage;
         setLockedZoomPage(anchorPage);
+        // 采集页流的未变换位置 —— 此刻还没写过 transform，量到的是布局坐标。
+        // 预览期间布局不变，所以一次足够；每次都重算反而会量到「已缩放」的 rect，
+        // 让后续帧把上一次的缩放当成基准，越缩越偏。
+        const flow = pageFlowRef.current;
+        const scrollRoot = scrollRef.current;
+        if (flow && scrollRoot) {
+          const flowRect = flow.getBoundingClientRect();
+          const rootRect = scrollRoot.getBoundingClientRect();
+          zoomFlowBaseRef.current = { left: flowRect.left - rootRect.left, top: flowRect.top - rootRect.top };
+        }
         const nextActive = new Set<number>();
         for (
           let offset = -PAGE_RENDER_OVERSCAN_WHILE_ZOOMING;
@@ -3047,7 +3080,7 @@ export function PDFViewer({
             </div>
           ) : (
             <div className="min-h-full w-max min-w-full px-4 py-8 md:px-8">
-              <div className="mx-auto flex w-fit flex-col items-center gap-0">
+              <div ref={pageFlowRef} className="mx-auto flex w-fit flex-col items-center gap-0">
                 {pageNumbers.map((pageNo) => {
                   const size = pageSizes[pageNo] || DEFAULT_PAGE_SIZE;
                   const width = Math.max(1, Math.round(size.width * renderZoomScale));
@@ -3056,7 +3089,6 @@ export function PDFViewer({
                     lockedZoomPage === null
                       ? activePages.has(pageNo)
                       : Math.abs(pageNo - lockedZoomPage) <= PAGE_RENDER_OVERSCAN_WHILE_ZOOMING;
-                  const visualScale = lockedZoomPage === pageNo ? zoomScale / Math.max(0.01, renderZoomScale) : 1;
                   const pageAnnotationItems = active ? annotationsByPage.get(pageNo) || [] : [];
                   const pageDraftRect = active && draftAnnotation?.page === pageNo ? draftRect : null;
                   const pageSize = pageSizes[pageNo] || DEFAULT_PAGE_SIZE;
@@ -3084,9 +3116,6 @@ export function PDFViewer({
                           isGestureRightDown && lockedZoomPage !== null && pageNo !== lockedZoomPage
                             ?"hidden"
                             : undefined,
-                        transform: visualScale === 1 ? undefined :`scale(${visualScale})`,
-                        transformOrigin:"top left",
-                        zIndex: visualScale === 1 ? undefined : 3,
                       }}
                       onPointerDown={(event) => handleViewerPointerDown(pageNo, event)}
                       onPointerMove={handleViewerPointerMove}

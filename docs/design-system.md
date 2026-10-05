@@ -719,6 +719,20 @@ App.tsx 的主内容列原写作 `bg-white dark:bg-[var(--chrome-surface-1)]` �
 
 `prefers-reduced-motion: reduce` 时三个时长统一归零（令牌层处理，组件无需判断）。
 
+**★「组件无需判断」只成立于消费 CSS 令牌的动画。** 手写 rAF 循环（逐帧逼近目标值的
+那种，见下）与 CSS 令牌没有任何连接 —— 令牌归零影响不到它，所以它必须自己判断
+`prefers-reduced-motion` 并直接落到目标值。实例：`PDFViewer.tsx` 的 `animateZoomToTarget`，
+由 `check-pdf-virtualization` 的一条守卫盯着（该守卫是弱证据：挡得住整条判断被删，
+挡不住条件被改成永假而函数名还在）。
+
+**缩放刻意不用 duration + easing。** PDF 缩放是逐帧指数逼近（每帧走剩余距离的 32%，
+60fps 下约 133ms 收敛到 95% —— 与 `--duration-base` 同一量级，但只是巧合，没有任何联动）。
+理由：手势跟随的**目标值每帧都在变**，而 duration + easing 描述的是「从 A 到 B 的一次性
+过渡」，目标变化就得重启 tween，重启会产生顿挫。它的本质是「收敛速度」而不是「时长」，
+所以不进 `--duration-*` 刻度 —— 刻度里放一个没有时长语义的数字只是同义反复。
+`ZOOM_RENDER_COMMIT_DELAY_MS`（160ms，视觉预览到重渲染提交之间的延迟）数值上等于
+`--duration-base`，同样是硬编码，改令牌不会联动 —— 这是已知的影子副本，不是漏迁。
+
 待清理：实测 live CSS 里 `80ms`×2、`110ms`×1、`170ms`×1、`180ms`×1、`880ms`×1
 不在刻度上（`120ms`×11 已在刻度上）。`--ease-in` 曾定义但零引用，已删除。
 

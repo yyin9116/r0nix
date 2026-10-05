@@ -50,7 +50,34 @@ assert(viewer.includes("thumbnailObserverRef"), "Thumbnails must share one Inter
 assert(viewer.includes("onRegisterThumbnailVisibility"), "Thumbnails must register visibility callbacks with the shared observer.");
 assert(viewer.includes("const PageThumbnail = memo"), "Thumbnail rows must avoid rerendering unchanged pages.");
 assert(viewer.includes("handleThumbnailClick"), "Thumbnail handlers must be stable across viewer state updates.");
-assert(viewer.includes("node.style.transformOrigin = `${anchor.relX * 100}% ${anchor.relY * 100}%`"), "Zoom preview must anchor the transform at the pointer position.");
+// ★ 2026-10-05：预览从「锁定页」上移到「整个页流」后，原点从百分比改成了绝对像素。
+// 意图没变（锚定指针位置），但换算方式变了：每页各按自己的**相对**原点缩放会改变
+// 页间距（看起来像散开），所以必须共用一个**绝对**原点 —— 锚点在页流坐标系里的像素位置。
+// 这里刻意断言「原点由锚点算出」而不是只断言 transformOrigin 被写过：
+// 后者在退化成 `transformOrigin: "top left"` 时仍然绿。
+assert(
+  viewer.includes("const originX = base ? anchor.viewportX - base.left : 0") &&
+    viewer.includes("const originY = base ? anchor.viewportY - base.top : 0") &&
+    viewer.includes("flow.style.transformOrigin = `${originX}px ${originY}px`"),
+  "Zoom preview must anchor the transform at the pointer position.",
+);
+// 负断言：禁止退回「只缩放锁定的那一页」。那正是「某一页先缩放、其他页后跟上」
+// 的来源 —— 用户直接看到的不一致，比性能取舍更要紧。
+assert(
+  !viewer.includes("lockedZoomPage === pageNo ? zoomScale") &&
+    !viewer.includes('transform: visualScale === 1 ? undefined : `scale(${visualScale})`'),
+  "Zoom preview must scale the whole page flow, not only the locked page.",
+);
+// rAF 缩放循环不消费 --duration-* / --ease-*，令牌层把时长归零对它无效，
+// 所以它必须自己判断 reduce —— 不判断的话 reduce 用户照样看完整逐帧逼近。
+// 断言完整的 matchMedia **调用形式**而不是裸名字 "prefers-reduced-motion"：
+// 裸名字在分支被改成 `if (false)` 时仍然绿（本仓踩过 4 次的同类坑）。
+// ★ 诚实标注这条守卫的边界：它挡得住「整条判断被删掉 / 换成别的常量」，
+//   挡不住「条件被改成永假而函数名还在」—— 那种改动只能靠行为断言。
+assert(
+  viewer.includes('window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches === true'),
+  "Zoom animation must honor prefers-reduced-motion; the rAF loop ignores CSS duration tokens.",
+);
 assert(!viewer.includes("const anchorClientX = nodeRect.left + anchor.relX * nodeRect.width"), "Zoom preview must not apply a second scroll correction after anchoring the transform origin.");
 assert(!viewer.includes("const anchorClientY = nodeRect.top + anchor.relY * nodeRect.height"), "Zoom preview must not apply a second vertical scroll correction after anchoring the transform origin.");
 assert(!viewer.includes("const visualScale = zoomScale / layoutScale"), "Zoom anchor correction must not mix layout and transformed scales.");
@@ -134,7 +161,11 @@ assert(styles.includes(".pdf-selection-scope .textLayer span::selection"), "PDF 
 assert(!styles.includes(".pdf-selection-scope ::selection"), "PDF selection must not install a page-wide selection pseudo-element.");
 assert(!app.includes("selection:bg-zinc-200") && !app.includes("dark:selection:bg-zinc-700"), "App shell must not override PDF.js selection with a global selection rule.");
 assert(viewer.includes("const zoomPreviewRef = useRef(zoom)"), "Zoom preview must keep its per-frame value outside React render state.");
-assert(viewer.includes("const applyZoomPreview = useCallback"), "Zoom preview must update the locked page directly during animation.");
+assert(
+  viewer.includes("smoothZoomByFactorRef.current(pinchZoomFactor("),
+  "Pinch must go through the ratio path, not the wheel's delta path.",
+);
+assert(viewer.includes("const applyZoomPreview = useCallback"), "Zoom preview must update the page flow directly during animation.");
 assert(!viewer.includes("setZoom((currentZoom)"), "Zoom animation must not re-render the whole PDF viewer on every frame.");
 assert(styles.includes(".page-text-overlay.is-selectable .textLayer *"), "Native PDF selection must preserve PDF.js text-layer descendants.");
 assert(styles.includes(".page-text-overlay.is-selectable .textLayer"), "WebKit PDF selection must be explicit at the text-layer boundary.");
