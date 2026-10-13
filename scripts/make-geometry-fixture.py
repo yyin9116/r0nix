@@ -15,8 +15,17 @@
 """
 import json
 import os
+import sys
 
 import fitz
+
+# Windows 控制台默认不是 UTF-8（CI 的 windows-latest 是 cp1252），下面几行中文一
+# 打印就抛 UnicodeEncodeError，整个夹具生成随之失败 —— 那正是本轮 CI 的挂因。
+# reconfigure 需要 3.7+，且 stdout 被重定向成非 TextIOWrapper 时没有它，故容错。
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+except (AttributeError, OSError):
+    pass
 
 OUT_DIR = "/tmp/marker-check"
 PDF_PATH = os.path.join(OUT_DIR, "three-paras.pdf")
