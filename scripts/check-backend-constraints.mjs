@@ -12,10 +12,22 @@
 import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, relative, sep } from "node:path";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const BASELINE = join(ROOT, "scripts", "backend-constraints-baseline.json");
+
+/**
+ * ROOT-relative path, always forward-slashed.
+ *
+ * The rules below look files up by literal POSIX keys (`src-tauri/src/main.rs`),
+ * so a key must never carry the platform separator. On Windows `relative()`
+ * yields backslashes, which used to leave the absolute path sitting in the key:
+ * the `tests/` filter stopped matching (so integration tests were scanned as
+ * production code) and the main.rs bootstrap exemption stopped applying. The
+ * `baseline written` log line goes through here for the same reason.
+ */
+const toRel = (absolute) => relative(ROOT, absolute).split(sep).join("/");
 const RUST_DIR = join(ROOT, "src-tauri");
 
 const args = process.argv.slice(2);
@@ -58,15 +70,11 @@ const files = rustFiles(RUST_DIR);
  * must not be reported as a production violation.
  */
 const TEST_ONLY_FILES = new Set(
-  files
-    .map((f) => f.replace(ROOT + "/", ""))
-    .filter((f) => f.includes("/tests/") || f.endsWith("/tests.rs"))
+  files.map(toRel).filter((f) => f.includes("/tests/") || f.endsWith("/tests.rs"))
 );
 
 const sources = new Map(
-  files
-    .map((f) => [f.replace(ROOT + "/", ""), readFileSync(f, "utf8")])
-    .filter(([f]) => !TEST_ONLY_FILES.has(f))
+  files.map((f) => [toRel(f), readFileSync(f, "utf8")]).filter(([f]) => !TEST_ONLY_FILES.has(f))
 );
 
 /** Strip `#[cfg(test)] mod tests { ... }` so test code never trips production rules. */
@@ -224,7 +232,7 @@ if (REPORT_ONLY) process.exit(0);
 
 if (UPDATE_BASELINE) {
   writeFileSync(BASELINE, JSON.stringify(summary, null, 2) + "\n");
-  console.log(`\nbaseline written → ${BASELINE.replace(ROOT + "/", "")}`);
+  console.log(`\nbaseline written → ${toRel(BASELINE)}`);
   process.exit(0);
 }
 

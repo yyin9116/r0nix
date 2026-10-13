@@ -28,7 +28,10 @@ if [[ ! "$free_kib" =~ ^[0-9]+$ || "$free_kib" -lt "$min_free_kib" ]]; then
   exit 3
 fi
 
-npx tauri build "${tauri_args[@]}" --bundles app
+# `${arr[@]+"${arr[@]}"}` rather than a bare `"${arr[@]}"`: macOS ships bash 3.2,
+# where expanding an *empty* array under `set -u` aborts with "unbound variable".
+# The CI runner uses that /bin/bash, so a bare expansion fails any default build.
+npx tauri build ${tauri_args[@]+"${tauri_args[@]}"} --bundles app
 
 architecture="$(uname -m)"
 if [[ "$architecture" == "arm64" ]]; then
