@@ -30,11 +30,19 @@
 
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import { stripComments } from "./lib/source-view.mjs";
 
-const ROOT = new URL("../src", import.meta.url).pathname;
+// `new URL(..).pathname` is not a filesystem path: on Windows it yields
+// "/D:/a/...", which win32 path helpers then mangle into "D:\D:\a\...".
+// `fileURLToPath` is the platform-correct conversion.
+const REPO_ROOT = fileURLToPath(new URL("..", import.meta.url));
+const ROOT = join(REPO_ROOT, "src");
 const EXEMPT = new Set(["src/tokens.css"]);
+
+/** `relative()` gives backslashes on Windows; every comparison below is POSIX. */
+const toPosix = (path) => path.split(sep).join("/");
 
 function collect(dir) {
   const out = [];
@@ -55,7 +63,7 @@ const violations = [];
 const files = collect(ROOT).sort();
 
 for (const file of files) {
-  const rel = relative(new URL("..", import.meta.url).pathname, file);
+  const rel = toPosix(relative(REPO_ROOT, file));
   if (EXEMPT.has(rel)) continue;
   const text = stripComments(readFileSync(file, "utf8"));
   if (!text) continue;

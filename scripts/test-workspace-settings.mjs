@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { register } from "node:module";
-import { pathToFileURL } from "node:url";
 
 /**
  * 工作区设置 hydrate 的行为测试。
@@ -18,7 +17,9 @@ import { pathToFileURL } from "node:url";
 // userSettings 会 import 一整条依赖链（startPage / localStore / workspace），
 // 这些相对 import 都不带扩展名。Vite 解析得了，Node 不行 —— 挂一个只补扩展名的
 // resolve hook，而不是把被测源码改成 Node 友好的写法。
-register(pathToFileURL(new URL("./lib/ts-resolve-hook.mjs", import.meta.url).pathname));
+// `register()` takes a URL directly — no need to round-trip through
+// `.pathname` + `pathToFileURL`, which corrupts the path on Windows.
+register(new URL("./lib/ts-resolve-hook.mjs", import.meta.url));
 
 
 const workspaceFiles = new Map();
