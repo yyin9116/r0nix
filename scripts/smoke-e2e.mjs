@@ -91,6 +91,10 @@ async function ensureServer() {
     cwd: process.cwd(),
     stdio: ["ignore", "pipe", "pipe"],
     env: { ...process.env, BROWSER: "none" },
+    // Windows has no `npm` executable — it is `npm.cmd`, and Node refuses to
+    // spawn a `.cmd` without a shell there (EINVAL, from the CVE-2024-27980
+    // hardening). The arguments above carry no shell metacharacters.
+    shell: process.platform === "win32",
   });
   server.stdout.on("data", (chunk) => process.stdout.write(chunk));
   server.stderr.on("data", (chunk) => process.stderr.write(chunk));
