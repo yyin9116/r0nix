@@ -89,6 +89,14 @@
         opacity: 0;
         pointer-events: none;
       }
+      /* 字体刻意用**系统栈**，不声明 Inter / Noto Sans SC。
+       * 这两个 webfont 由 index.css 的 Google Fonts @import 异步拉取，首帧时
+       * 一定还没到；一旦声明了它们，启动屏就会先按 fallback 排版、
+       * 字体到位后再重排一次 —— 表现为「加载页上的字变了一次」（2026-10-08 实测）。
+       * 系统栈在第一帧就是最终形态，不可能闪。
+       * splash 与 App 之间仍可能有一次字体切换（App 用 Inter），但那一次被
+       * 240ms 的淡出掩盖，且 main.tsx 会等 document.fonts.ready 才淡出，
+       * 所以实际上不可见。 */
       .splash-card {
         min-width: 280px;
         padding: 28px 24px 20px;
@@ -97,8 +105,15 @@
         background: var(--splash-panel);
         box-shadow: var(--splash-shadow);
         text-align: center;
-        font-family: "Inter", "Noto Sans SC", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-          Helvetica, Arial, sans-serif;
+        font-family:
+          system-ui,
+          -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          Roboto,
+          "Helvetica Neue",
+          Arial,
+          sans-serif;
       }
       .splash-brand {
         width: 52px;

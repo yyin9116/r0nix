@@ -15,7 +15,6 @@ import type {
   ReaderAnnotationRect,
 } from "../../types";
 import type { PDFImageInfo } from "../../services/pdfApi";
-import { groupPdfTextHighlightRects } from "../../services/pdfBlocks";
 import type { CachedResourceLink } from "../../services/resourceIndexCache";
 
 export type SidebarTab ="outline" |"thumbs";
@@ -79,12 +78,31 @@ export const MAX_IMAGE_OVERLAY_ASPECT = 64;
 export type CanvasRenderTask = { cancel: () => void; promise: Promise<void> };
 export const activeCanvasRenders = new WeakMap<HTMLCanvasElement, CanvasRenderTask>();
 export const PAGE_RENDER_OVERSCAN_WHILE_ZOOMING = 5;
-export const WHEEL_ZOOM_SENSITIVITY = 0.14;
-export const WHEEL_ZOOM_MIN_STEP = 7;
+// ⚠️ 缩放手势的灵敏度与步进常量（WHEEL_ZOOM_SENSITIVITY / MIN_STEP / MAX_STEP）
+// **不在这里** —— 它们已随手势识别一起迁到 `services/pdfZoomGesture.ts`。
+// 本文件曾与那份各留一份同名的 0.14 / 7，两处数值相同纯属人工同步；
+// 手势层一旦调标定，这里就会静默变成另一套手感。
 export const ZOOM_ANIMATION_EASE = 0.32;
 export const ZOOM_ANIMATION_SETTLE = 0.18;
 export const ZOOM_RENDER_COMMIT_DELAY_MS = 160;
 export const ZOOM_RENDER_READY_FALLBACK_MS = 1800;
+
+/**
+ * 「换页后多久才去扫这一页的元数据（图像 / 阅读块）」的静默期。
+ *
+ * 为什么需要静默期：`detectPageImages(page)` 会**穿过 PDF.js / 后端边界**发一次
+ * 请求（Tauri 下是本地服务 + PyMuPDF 扫这一页的图像）。它原先挂在以 `page`
+ * 为依赖的 effect 上 —— 每次跨页都发一次。滚动跨 10 页就是 10 次请求、取消 9 次，
+ * 且每一次都在和滚动抢主线程与后端。用户报的正是「滚动/翻页卡」。
+ *
+ * 240ms 与 `emitViewState` 的 120ms 防抖同一思路（都是「滚动停下再落账」），
+ * 取两倍是为了让后端扫描明确排在阅读位置同步之后。
+ *
+ * 安全性：右键菜单里的图像命中区不依赖这次预取 —— 它自己会再要一次
+ * （`handleViewerContextMenu` 里的 `detectPageImagesRef.current(pageNo)`），
+ * 所以「预取晚一点」只影响「提前量」，不影响功能正确性。
+ */
+export const PAGE_METADATA_IDLE_MS = 240;
 export const RESOURCE_SCAN_PAGE_TIMEOUT_MS = 30_000;
 
 export function withResourceScanTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
@@ -190,6 +208,131 @@ export function trackCanvasRender(canvas: HTMLCanvasElement, task: CanvasRenderT
   void task.promise.then(clear, clear);
 }
 
+/**
+ * 缩略图渲染并发闸：全应用最多同时 N 张缩略图在渲，其余按进入视口的顺序排队。
+ *
+ * 为什么必须限流：缩略图与主画布共用同一个 pdf.js worker。滚动时
+ * IntersectionObserver（rootMargin 240px）一次能放进十几张缩略图，不限流的话
+ * 它们立刻全部 page.render，与当前页的主渲染抢 worker 带宽 —— 用户感知就是
+ * 「翻页/滚动卡顿 + 缩略图一张张逐渐亮起」（2026-10-09 反馈）。
+ * 限流到 2 之后，主渲染永远排在队头，缩略图串行补齐，肉眼几乎无感。
+ */
+const THUMBNAIL_MAX_CONCURRENT_RENDERS = 2;
+let thumbnailRenderSlotsInUse = 0;
+const thumbnailRenderWaiters: Array<() => void> = [];
+
+export async function acquireThumbnailRenderSlot(): Promise<() => void> {
+  if (thumbnailRenderSlotsInUse >= THUMBNAIL_MAX_CONCURRENT_RENDERS) {
+    await new Promise<void>((resolve) => {
+      thumbnailRenderWaiters.push(resolve);
+    });
+  }
+  thumbnailRenderSlotsInUse += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    thumbnailRenderSlotsInUse -= 1;
+    // 只唤醒一个等待者：它恢复执行时会自己把计数加回去。
+    thumbnailRenderWaiters.shift()?.();
+  };
+}
+
+/**
+ * 页面渲染的**暂存画布池**。
+ *
+ * 为什么需要暂存画布：pdf.js 的 `page.render()` 是按 band 分批渐进写入的。
+ * 直接渲染到可见画布上，读者会看到纸面一行行长出来；先渲到暂存画布、
+ * 完成后再一次性 `drawImage` 过去，可见画布只更新一次（原子换帧）。
+ * 尤其是**缩放提交**那一刻：`canvas.width = 新宽度` 会立即清空位图，
+ * 直接渲染的话读者会先看到一片白再慢慢填回来。
+ *
+ * 这与 pdf.js 官方做的**是同一件事**：`BasePDFPageView.#showCanvas`
+ * （`pdfjs-dist/web/pdf_viewer.mjs:4969-4986`）同样用
+ * `ctx.drawImage(tempCanvas, 0, 0)` 把旧帧搬到新画布上再显示，
+ * 靠 `minDurationToUpdateCanvas`（默认 500ms）决定要不要更新。
+ * 差别只在实现位置：官方每次 `_createCanvas()` **新建**一个 canvas，把旧的
+ * 留成单槽 `#tempCanvas`；本组件复用一个 canvas，所以需要一个小池子。
+ *
+ * ⚠️ **它解决的**是「每渲一页就新分配一张整页位图」的**分配抖动**，
+ * 不是 2G+ 那种**驻留**问题 —— 2026-10-09 实测：池化 + 卸载时归零之后，
+ * 累计分配从 770MB / 611 次降到 396MB / 409 次，而**驻留始终只有 20–40MB**。
+ * 「打开 200 页 PDF 涨到 2G+」的主因在别处，是整份 PDF 过 Tauri IPC
+ * 被 `serde_json` 展开成十进制数字数组（≈19–23 倍文件大小的瞬时峰值），
+ * 见 `src-tauri/src/tauri_commands.rs` 的 `read_opened_pdf_bytes` 注释。
+ * 不要把这两个量混在一起读。
+ *
+ * 容量 3 的依据：同时活跃的页面最多 5 张（nearest ± 2），但真正并发执行
+ * 「渲进暂存画布」这一段的时间窗很窄；池满时等待归还，不会无限增长。
+ * 池内画布**保留 backing store**（这正是省掉分配的目的），
+ * 稳态代价是 3 张位图常驻（dpr2 的 A4 约 23MB）。
+ */
+const SCRATCH_CANVAS_POOL_SIZE = 3;
+const scratchCanvasPool: HTMLCanvasElement[] = [];
+const scratchCanvasWaiters: Array<() => void> = [];
+let scratchCanvasesInUse = 0;
+
+export interface ScratchCanvasLease {
+  canvas: HTMLCanvasElement;
+  release: () => void;
+}
+
+export async function acquireScratchCanvas(): Promise<ScratchCanvasLease> {
+  for (;;) {
+    const pooled = scratchCanvasPool.pop();
+    if (pooled) {
+      scratchCanvasesInUse += 1;
+      return { canvas: pooled, release: makeScratchRelease(pooled) };
+    }
+    if (scratchCanvasesInUse < SCRATCH_CANVAS_POOL_SIZE) {
+      scratchCanvasesInUse += 1;
+      const created = typeof document === "undefined" ? null : document.createElement("canvas");
+      if (created) return { canvas: created, release: makeScratchRelease(created) };
+      scratchCanvasesInUse -= 1;
+      throw new Error("scratch canvas unavailable");
+    }
+    await new Promise<void>((resolve) => {
+      scratchCanvasWaiters.push(resolve);
+    });
+  }
+}
+
+function makeScratchRelease(canvas: HTMLCanvasElement): () => void {
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    scratchCanvasesInUse -= 1;
+    scratchCanvasPool.push(canvas);
+    // 唤醒一个等待者；它会重新走一遍 pop。
+    scratchCanvasWaiters.shift()?.();
+  };
+}
+
+/**
+ * dev-only：把画布池的占用暴露给内存探针（`devRuntimeCensus` 会读它）。
+ *
+ * 为什么必须报出来：池里的画布**不在 DOM 里** —— `document.querySelectorAll("canvas")`
+ * 完全看不到它们，而它们**保留着 backing store**（这正是省掉重复分配的目的，见上）。
+ * 于是「关闭标签后画布数归零、footprint 却仍留一截」这种读数会被误读成「有东西泄漏」，
+ * 实际其中一部分正是这里按设计常驻的位图。
+ *
+ * 走 `window` 通道而不是导出函数：`devRuntimeCensus` 在**入口图**里，静态 import 本模块
+ * 会把 readerCore 从懒加载块拖进入口包 —— 为一个 dev 读数改变生产的打包结构不值得。
+ * 生产构建（DEV=false）下这段不执行，也没有任何调用方。
+ */
+if (
+  (import.meta as { env?: { DEV?: boolean } }).env?.DEV &&
+  typeof window !== "undefined"
+) {
+  (window as unknown as Record<string, unknown>).__r0nixScratchPoolCensus = () => ({
+    pooled: scratchCanvasPool.length,
+    inUse: scratchCanvasesInUse,
+    bytes: scratchCanvasPool.reduce((sum, canvas) => sum + canvas.width * canvas.height * 4, 0),
+    sizes: scratchCanvasPool.map((canvas) => `${canvas.width}x${canvas.height}`),
+  });
+}
+
 export const I18N = {
 "zh-CN": {
     outline:"大纲",
@@ -213,6 +356,13 @@ export const I18N = {
     readerView:"阅读",
     translationView:"翻译",
     imageLabelView:"图片标注",
+    companionToolbar:"伴读：就当前这段问一句",
+    companionNoBlock:"这一页还没解析出可提问的段落，等文字识别完成后再试",
+    /** 伴读锚点的无障碍名。内容优先用模型那句疑问，没有时退到这一句。 */
+    companionOpen:"打开伴读提示",
+    companionNoProse:"页眉、页脚与标题不参与伴读 —— 请在正文段落上唤出。",
+    /** 手动唤出但该块没有批注卡可展开（被「暂不提示」或预算/请求未成）。 */
+    companionDismissedHint:"这一段当前没有伴读批注（可能已被「暂不提示」）。",
     fullTranslation:"全文翻译",
     exitFullTranslation:"返回阅读",
     exportImages:"导出图片",
@@ -231,6 +381,16 @@ export const I18N = {
     sidePanelNotes:"笔记",
     sidePanelTranslation:"翻译",
     sidePanelResources:"资源",
+    sidePanelHistory:"历史",
+    assistHistory:"AI 记录",
+    assistHistoryIntro:"翻译、问问 AI、解释的结果会自动存进这份文档的历史，重启后仍可回看。",
+    assistHistoryEmpty:"还没有记录。划词后使用翻译 / 问问 AI / 解释，结果会出现在这里。",
+    assistHistoryClear:"清空",
+    assistHistoryCleared:"已清空历史记录",
+    historyKindTranslate:"翻译",
+    historyKindAsk:"问问 AI",
+    historyKindExplain:"解释",
+    historyKindFullTranslation:"全文翻译",
     resources:"文件资源",
     resourcesIntro:"查看当前 PDF 中已识别的图片、链接和 DOI。",
     resourceImages:"图片",
@@ -315,6 +475,11 @@ export const I18N = {
     readerView:"Reader",
     translationView:"Translation",
     imageLabelView:"Image labels",
+    companionToolbar:"Companion: ask about this passage",
+    companionNoBlock:"No question-ready passage on this page yet; wait for text recognition",
+    companionOpen:"Open companion hint",
+    companionNoProse:"Headers, footers and headings are not companion targets \u2014 pick a body paragraph.",
+    companionDismissedHint:"No companion note on this passage right now (it may have been dismissed with \u201cNot now\u201d).",
     fullTranslation:"Full translation",
     exitFullTranslation:"Back to reader",
     exportImages:"Export images",
@@ -333,6 +498,16 @@ export const I18N = {
     sidePanelNotes:"Notes",
     sidePanelTranslation:"Translation",
     sidePanelResources:"Resources",
+    sidePanelHistory:"History",
+    assistHistory:"AI records",
+    assistHistoryIntro:"Translate / Ask AI / Explain results are saved to this document's history and survive restarts.",
+    assistHistoryEmpty:"No records yet. Use Translate / Ask AI / Explain on a selection and results will appear here.",
+    assistHistoryClear:"Clear",
+    assistHistoryCleared:"History cleared",
+    historyKindTranslate:"Translate",
+    historyKindAsk:"Ask AI",
+    historyKindExplain:"Explain",
+    historyKindFullTranslation:"Full translation",
     resources:"File resources",
     resourcesIntro:"Browse detected images, links, and DOIs in this PDF.",
     resourceImages:"Images",
@@ -681,6 +856,31 @@ export function isAnnotationTool(tool: ToolType): tool is ReaderAnnotationTool {
   return tool ==="highlight" || tool ==="underline" || tool ==="strike" || tool ==="text";
 }
 
+/**
+ * 行类标注工具：交互载体是**文本选区**而不是 overlay 拖拽。
+ *
+ * 2026-10-09 用户裁决：「标注应该和选择文本是同一个操作，左键选择」——
+ * highlight/underline/strike 激活时文本层保持可选（与 select 工具同一通路），
+ * mouseup 上的非空选区直接落成对应类型的标注，不再走 overlay 坐标绘制。
+ * `text`（便签）是唯一例外：它放置的是对话框而非行内划线，保留拖放定位。
+ *
+ * 穷举断言：往 `ReaderAnnotationKind` 里加新 kind（且它不是 wavy/text）时，
+ * `Record<LineAnnotationTool, true>` 会因缺成员当场报编译错 —— 新行类工具
+ * 必须显式决定「进不进选择式交互」，不能静默落到 overlay 拖拽的老路上。
+ */
+export type LineAnnotationTool = Exclude<ReaderAnnotationTool, "text">;
+const LINE_TOOL_COVERAGE: Record<LineAnnotationTool, true> = {
+  highlight: true,
+  underline: true,
+  strike: true,
+};
+
+export function isLineAnnotationTool(tool: ToolType): tool is LineAnnotationTool {
+  // 判定直接查穷举表：新 kind 必须先在这张表里登记（否则上面的 Record 编译报错），
+  // 运行时行为与编译期覆盖天然一致。
+  return tool in LINE_TOOL_COVERAGE;
+}
+
 export function normalizeRect(startX: number, startY: number, currentX: number, currentY: number) {
   const left = Math.max(0, Math.min(startX, currentX));
   const top = Math.max(0, Math.min(startY, currentY));
@@ -691,6 +891,125 @@ export function normalizeRect(startX: number, startY: number, currentX: number, 
     y: top,
     width: Math.max(0.002, right - left),
     height: Math.max(0.002, bottom - top),
+  };
+}
+
+/**
+ * 一行正文在**归一化页面坐标**里的典型高度。
+ *
+ * 与 `readingCompanion.ts` 的同名常量同源（A4 4.2mm ≈ 0.0141、
+ * US Letter ≈ 0.0150，取偏保守的一侧）。这里复制一份而不是跨目录 import，
+ * 是因为两个模块的依赖方向相反：readerCore 是渲染层最底层的纯工具，
+ * 不该为了一个数字把 services/ 拉进来。改一处必须同步改另一处 ——
+ * `scripts/test-reader-annotations.mjs` 的对齐断言会同时校验两者。
+ */
+const LINE_HEIGHT_FALLBACK = 0.014;
+
+/**
+ * 把用户拖出来的划线矩形**吸附到真实行盒**上。
+ *
+ * ## 为什么必须有这一步（2026-10-08 实测「只能看到波浪线」的真正成因）
+ *
+ * `normalizeRect` 的兜底是 `height: Math.max(0.002, …)`。而划线这个手势
+ * 天然是**横着划一道**——手沿着一行文字从左拖到右，垂直位移接近 0 ——
+ * 于是高度落到 0.002，即页面高度的 0.2%。A4（842pt）上是 **1.7px**。
+ *
+ * 1.7px 高的盒子里：
+ * - `highlight` 的半透明黄底（`--annotation-highlight-fill`，alpha 0.28）
+ *   画在 1.7px 上，等于一条若有若无的细缝；
+ * - `underline` / `strike` 的渐变线分别定位在盒子的 82%~100% 与 45%~57%，
+ *   在 1.7px 里就是**亚像素**，浏览器直接不画。
+ *
+ * 于是表现就是「highlight / underline / strike / text 全都看不见，
+ * 只有波浪线在」—— 而波浪线之所以看得见，是因为它由 PageCanvas 画在
+ * **文本层内部**，跟着每个文字片段自己的行盒走，从来不经过这个矩形。
+ *
+ * ⚠️ 这也解释了为什么之前查 z-index 查不出问题：层叠顺序确实曾经错过一次
+ * （已修），但即使层序完全正确，1.7px 的矩形本身也画不出东西。
+ * 两个缺陷叠在一起，症状却只有一个。
+ *
+ * ## 吸附规则
+ *
+ * - 命中行：纵向与原矩形有重叠、且横向与之有重叠的那些行（都取自
+ *   `PdfReadingBlock.lines`，即 pymupdf `get_text("dict")` 的行级 bbox，
+ *   是解析器给出的几何，不是我们猜的）；
+ * - 纵向：取命中行���并集。横向：保留用户拖的范围，只在必要时**收窄**到
+ *   命中行的横向并集（用户拖出了行边界时不外扩——外扩会把高亮涂到
+ *   相邻行的字上）；
+ * - 命中不到行（无 `lines` 的老数据 / markdown 来源 / 表格图注）
+ *   时退回 `height = LINE_HEIGHT_FALLBACK`，保证「至少有一行高」，
+ *   而不是留一条1.7px 的缝让读者以为功能坏了；
+ * - **不动 `text` 批注**：它的矩形是固定尺寸的对话框，不是行内划线。
+ */
+export function snapAnnotationRectToLines(
+  rect: ReaderAnnotationRect,
+  lines: readonly { rect?: ReaderAnnotationRect }[] | undefined,
+): ReaderAnnotationRect {
+  // ⚠️ 脏坐标必须在这里**收敛成安全值**，不能原样返回。
+  // NaN 会一路传染：写入侧的 `Math.max(0, Math.min(1, NaN))` 仍是 NaN
+  //（Math.min 与 NaN 运算恒得 NaN），于是 style 里出现 `left: NaN%`，
+  // 浏览器丢弃整条声明，标注**静默不显示** —— 而数据里明明有。
+  // 症状与「保存失败」无法区分，所以这一层必须自己兜住。
+  const safe = (value: number, fallback: number) => (Number.isFinite(value) ? value : fallback);
+  const cleanRect: ReaderAnnotationRect = {
+    x: safe(rect.x, 0),
+    y: safe(rect.y, 0),
+    width: safe(rect.width, 0),
+    height: safe(rect.height, 0),
+  };
+  // 收敛前先记住「原本是不是脏的」—— 收敛后脏数据与退化矩形长得一样（都是 0 宽），
+  // 但处理方式相反：退化矩形要原样交给上层判定（它表示这一划根本没画出来），
+  // 脏数据必须返回收敛值，否则 NaN 就在这里原样漏出去了。
+  const wasDirty = cleanRect.x !== rect.x || cleanRect.y !== rect.y || cleanRect.width !== rect.width || cleanRect.height !== rect.height;
+
+  // 退化矩形（零宽/零高）不是「需要吸附」的情形 —— 它表示这一划根本没画出来，
+  // 交给上层判定（commitDraftAnnotation 会提示读者重划）。这里原样返回，
+  // 替它编一个尺寸反而会把一次失败的手势伪装成一次成功的划线。
+  if (!(cleanRect.width > 0) || !(cleanRect.height > 0)) {
+    return wasDirty ? cleanRect : rect;
+  }
+
+  const hits = (lines ?? []).filter((line) => {
+    const lineRect = line?.rect;
+    if (!lineRect) return false;
+    if (!(lineRect.width > 0) || !(lineRect.height > 0)) return false;
+    const overlapX =
+      Math.min(cleanRect.x + cleanRect.width, lineRect.x + lineRect.width) - Math.max(cleanRect.x, lineRect.x);
+    const overlapY =
+      Math.min(cleanRect.y + cleanRect.height, lineRect.y + lineRect.height) - Math.max(cleanRect.y, lineRect.y);
+    return overlapX > 0 && overlapY > 0;
+  });
+
+  if (hits.length === 0) {
+    return {
+      x: cleanRect.x,
+      y: cleanRect.y,
+      width: cleanRect.width,
+      height: Math.max(cleanRect.height, LINE_HEIGHT_FALLBACK),
+    };
+  }
+
+  let top = Number.POSITIVE_INFINITY;
+  let bottom = Number.NEGATIVE_INFINITY;
+  let left = Number.POSITIVE_INFINITY;
+  let right = Number.NEGATIVE_INFINITY;
+  for (const line of hits) {
+    const lineRect = line.rect as ReaderAnnotationRect;
+    top = Math.min(top, lineRect.y);
+    bottom = Math.max(bottom, lineRect.y + lineRect.height);
+    left = Math.min(left, lineRect.x);
+    right = Math.max(right, lineRect.x + lineRect.width);
+  }
+
+  // 横向保留用户意图（他拖到哪就是哪），只收窄不外扩。
+  const snappedX = Math.max(cleanRect.x, left);
+  const snappedRight = Math.min(cleanRect.x + cleanRect.width, right);
+  return {
+    x: snappedX,
+    y: top,
+    // 纵向取行并集：用户横划时这是唯一能给出可见高度的信息。
+    height: Math.max(bottom - top, LINE_HEIGHT_FALLBACK),
+    width: Math.max(0.002, snappedRight - snappedX),
   };
 }
 
@@ -733,27 +1052,38 @@ export function createTextRect(x: number, y: number) {
 }
 
 /**
- * 波浪线的波形标记。SVG data URI 而非 border：需要波形，直线画不出「波浪」。
- * 颜色写死 #b91c1c 的理由见下面 case"wavy" 的注释（纸面不随主题反色）。
+ * 手工 wavy 标注的波形图为什么不能写死颜色。
+ *
+ * 波形是 SVG data URI，而 data URI 内部无法引用外部 CSS 变量。旧实现在这里
+ * 写死 `stroke='%23b91c1c'` 并注释「因为纸面不随主题反色所以没问题」——
+ * 深色反色下沉到 canvas（见 PDFViewer.css）之后那条前提已经不成立，
+ * 深红落在深色纸面上几乎看不见。
+ *
+ * 现在波形图挪进 tokens.css 的 `--manual-wavy-image`，且只作 mask 使用：
+ * mask 只取 alpha 通道，颜色由 `--annotation-wavy-stroke` 经 background-color
+ * 染上，于是它第一次跟上了主题。消费端规则见 PDFViewer.css 的
+ * `[data-annotation-kind="wavy"]`。
  */
-const WAVY_MARKER_IMAGE =
-  "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='6'><path d='M0 4.5 Q 3 1 6 4.5 T 12 4.5' fill='none' stroke='%23b91c1c' stroke-width='1.6' stroke-linecap='round'/></svg>\")";
 
 export function getAnnotationBadgeStyle(kind: ReaderAnnotationKind): CSSProperties {
   switch (kind) {
     case"highlight":
-      return { backgroundColor:"rgba(250, 204, 21, 0.18)", color:"#a16207" };
+      return { backgroundColor:"var(--annotation-highlight-fill)", color:"var(--state-warn-fg)" };
     case"underline":
-      return { backgroundColor:"rgba(37, 99, 235, 0.12)", color:"#1d4ed8" };
+      return { backgroundColor:"var(--annotation-underline-fill)", color:"var(--annotation-underline-line)" };
     case"strike":
-      return { backgroundColor:"rgba(220, 38, 38, 0.12)", color:"#b91c1c" };
+      return { backgroundColor:"var(--annotation-strike-fill)", color:"var(--annotation-strike-line)" };
     case"text":
       return { backgroundColor:"var(--reader-accent-soft)", color:"var(--reader-accent)" };
     case"wavy":
       // 波浪线是 **AI 划的**，不是用户划的。用「虚线描边」而不是实心底色，
       // 是为了与实心的 strike 区分：形状承载语义（这是 AI 的推测），
       // 颜色只承载强度。见 docs/design-system.md §11.8。
-      return { backgroundColor:"transparent", color:"#b91c1c", border:"1px dashed rgba(185, 28, 28, 0.55)" };
+      return {
+        backgroundColor:"transparent",
+        color:"var(--annotation-wavy-stroke)",
+        border:"1px dashed color-mix(in srgb, var(--annotation-wavy-stroke) 55%, transparent)",
+      };
   }
 }
 
@@ -763,48 +1093,54 @@ export function getAnnotationOverlayStyle(annotation: ReaderAnnotation, selected
     top:`${annotation.rect.y * 100}%`,
     width:`${annotation.rect.width * 100}%`,
     height:`${annotation.rect.height * 100}%`,
-    boxShadow: selected ?"0 0 0 2px rgba(24,24,27,0.32)" :"0 0 0 1px rgba(24,24,27,0.12)",
+    // 描边走令牌：深色下 --content-primary 是浅色，自动从「暗描边」翻成「浅描边」，
+    // 不需要在这里再写一份深浅两套值（写死深色时深色主题下会看不见选中框）。
+    boxShadow: selected
+      ? "0 0 0 2px color-mix(in srgb, var(--content-primary) 32%, transparent)"
+      : "0 0 0 1px color-mix(in srgb, var(--content-primary) 12%, transparent)",
   };
 
   switch (annotation.kind) {
     case"highlight":
       return {
         ...base,
-        backgroundColor:"rgba(250, 204, 21, 0.28)",
-        border:"1px solid rgba(202, 138, 4, 0.35)",
+        backgroundColor:"var(--annotation-highlight-fill)",
+        border:"1px solid var(--annotation-highlight-border)",
       };
     case"underline":
       return {
         ...base,
+        // 渐变的两个色标都要走令牌：color-mix 允许 var()，且能在深色下换值。
         backgroundImage:
-"linear-gradient(to bottom, transparent 82%, rgba(37, 99, 235, 0.9) 82%, rgba(37, 99, 235, 0.9) 100%)",
-        backgroundColor:"rgba(37, 99, 235, 0.06)",
+          "linear-gradient(to bottom, transparent 82%, var(--annotation-underline-line) 82%, var(--annotation-underline-line) 100%)",
+        backgroundColor:"var(--annotation-underline-fill)",
       };
     case"strike":
       return {
         ...base,
         backgroundImage:
-"linear-gradient(to bottom, transparent 45%, rgba(220, 38, 38, 0.9) 45%, rgba(220, 38, 38, 0.9) 57%, transparent 57%)",
-        backgroundColor:"rgba(220, 38, 38, 0.05)",
+          "linear-gradient(to bottom, transparent 45%, var(--annotation-strike-line) 45%, var(--annotation-strike-line) 57%, transparent 57%)",
+        backgroundColor:"var(--annotation-strike-fill)",
       };
     case"text":
-      // 这个气泡【刻意】在两主题下都是深色、文字恒为白 —— 它坐在 PDF 纸面上，
-      // 而纸面不随 UI 主题反色（见 tokens.css 的 --surface-paper 说明）。
-      // 因此这里不能用 text-content-inverse / text-accent-on 之类的令牌：
-      // 深色主题下它们会翻成深色字，落在深色气泡上直接消失。
+      // 文本批注气泡：**刻意**在两主题下都是深底白字，不跟随 UI 主题。
+      // 它要压在 PDF 纸面上，而纸面在深色下会被反相 —— 一个跟随主题的浅色气泡
+      // 落在深色纸面上虽然能看见，但读者刚扫过去时会以为那是页面本身的一部分
+      // （图表、页眉都可能是一片浅色）。恒定深底让它永远读作「不属于这一页的东西」。
       return {
         ...base,
-        backgroundColor:"rgba(24, 24, 27, 0.92)",
-        border:"1px solid rgba(255,255,255,0.14)",
-        color:"#ffffff",
+        backgroundColor:"var(--annotation-note-bg)",
+        border:"1px solid var(--annotation-note-border)",
+        color:"var(--annotation-note-fg)",
       };
     case"wavy":
-      // 波浪线【刻意】在两主题下都是同一个 #b91c1c，理由与上面的 case"text" 相同：
-      // 它落在 PDF 纸面上，而纸面不随 UI 主题反色（见 tokens.css 的 --surface-paper）。
-      // 这里用 SVG data URI 而不是 border —— 需要的是「波形」，直线做不到。
+      // 手工/历史 wavy 标注的兜底渲染。**当前路径下 `wavy` 是 AI-only**
+      // （见本文件的 WAVY_IS_NOT_A_USER_TOOL 断言），AI 新留的波浪线由
+      // textLayerMarker 在文本层内部画，不走这个覆盖层 —— 这里只服务
+      // 水合进来的旧数据。
       return {
         ...base,
-        backgroundImage: WAVY_MARKER_IMAGE,
+        backgroundImage:"var(--manual-wavy-image)",
         backgroundRepeat:"repeat-x",
         backgroundPosition:"left bottom",
         backgroundSize:"12px 6px",
@@ -870,14 +1206,78 @@ export function getPdfTextLayerGeometry(layer: HTMLElement): PdfTextLayerGeometr
   return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
 }
 
-export function hasPdfTextLayerGeometryChanged(previous: PdfTextLayerGeometry | null, next: PdfTextLayerGeometry) {
+/**
+ * 文本层**尺寸**是否变了（= 真的重排了：缩放、换文档、字号/排版变化）。
+ *
+ * ★ 这里曾经有一个 `hasPdfTextLayerGeometryChanged`（同时比较 left/top/width/height），
+ * 已**删除** —— 它不是「更宽松的版本」，而是一个坐标系错误。`left/top` 是**视口坐标**，
+ * 滚动时每帧都变。于是缓存的 span 几何在滚动中被结构性打废，任何一次取用都要把整层
+ * span 重量一遍（200 页文档实测每批 225 个 span）。而 `left/top` 变化在语义上只说明
+ * 「整层平移了」，span 之间的相对几何**一点没变** —— 平移可以直接搬运缓存，重排不可以。
+ *
+ * 之所以删而不是留着：「同时判四边」看起来更保守、更容易被下一个作者复用，
+ * 而它的失效模式是**静默**的（功能全对，只是每帧多量 225 次矩形）。
+ * `check-pdf-virtualization.mjs` 有一条负断言禁止它回来。
+ *
+ * 实测（2026-10-10，WebKit，200 页重页）：`getBoundingClientRect` 29k 次 / 6s、
+ * 合计 924ms，正好等于同期慢帧相对 17ms 基线的超额总量（≈900ms）；而 Chromium
+ * 同样 37k 次只要 187ms，所以这条路径只在 WebKit 上炸。修法就是不让滚动打废缓存。
+ */
+export function hasPdfTextLayerGeometryResized(previous: PdfTextLayerGeometry | null, next: PdfTextLayerGeometry) {
   if (!previous) return true;
+  // 尺寸用容差比较：子像素抖动（dpr 换算）不该被当成重排，否则缓存又会每帧失效。
+  const epsilon = 0.5;
   return (
-    previous.left !== next.left ||
-    previous.top !== next.top ||
-    previous.width !== next.width ||
-    previous.height !== next.height
+    Math.abs(previous.width - next.width) > epsilon ||
+    Math.abs(previous.height - next.height) > epsilon
   );
+}
+
+/**
+ * 把已缓存的 span 几何整体平移 (dx, dy)。
+ *
+ * 只调 `rect.left/top` 与 `centerY` 即可 —— 宽高不变。消费者（命中测试、按行分组、
+ * 标注区段换算）都在视口坐标系里一致地使用这些矩形，所以整体平移对它们完全等价于
+ * 重新量一遍，但代价从「每个 span 一次强制布局冲刷」降到「一次对象分配」。
+ */
+export function shiftPdfTextSpans(spans: PdfTextSpan[], dx: number, dy: number): PdfTextSpan[] {
+  if (!dx && !dy) return spans;
+  return spans.map((span) => ({
+    node: span.node,
+    text: span.text,
+    rect: new DOMRect(span.rect.left + dx, span.rect.top + dy, span.rect.width, span.rect.height),
+    centerY: span.centerY + dy,
+  }));
+}
+
+/**
+ * 视口中心落在**哪一页** —— 命中测试交给浏览器，不要自己维护页顶几何缓存。
+ *
+ * 这里是全仓踩过最隐蔽的一次静默回归的现场（2026-10-10）：
+ * 曾经用「每页页顶的几何数组 + 二分查找」按 `scrollHeight` 为失效指纹缓存，
+ * 但缓存里存的是 `rect.top - rootRect.top - scrollTop`，比较基准却是
+ * `scrollTop + clientHeight / 2` —— 两边不在同一坐标系，等价于把阈值写成了
+ * `3 × scrollTop`。scrollTop = 0 时两种写法结果相同，所以**首屏与当时的 e2e
+ * 一直全绿**；一旦阅读位置在深处（恢复上次位置 / 深跳），活跃窗口就整体超前
+ * `2 × scrollTop ÷ 页高` 页，**屏幕上正在看的那一页根本不在活跃集合里**，
+ * 于是正文整片空白；点缩略图会直接改写活跃集合、所以立刻可见，再滚一下又空白。
+ * 实测（60 页夹具，scrollTop = 23938）判定成第 58 页，而视口里是第 29–30 页。
+ *
+ * 结论与 `elementsFromPoint` 那次一致：**别维护 DOM 的影分身**。
+ * 「视口中心下面是谁」是浏览器已经做好的事 —— 一次 hit test，
+ * 代价与读一次 `clientHeight` 同级，且不存在失效时机问题。
+ * 用 `elementFromPoint`（单个元素）而不是 `elementsFromPoint`（整条栈）。
+ *
+ * 取不到（点在页间空白、整页被 `visibility: hidden` 等）时返回 null，
+ * 由调用方回退到上一次的页码 —— 回退值一定在活跃集合里，不会造成空白。
+ */
+export function pageNumberAtViewportCenter(root: HTMLElement): number | null {
+  const rect = root.getBoundingClientRect();
+  if (rect.width <= 0 || rect.height <= 0) return null;
+  const hit = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
+  const block = hit?.closest("[data-pdf-page]") as HTMLElement | null;
+  const pageNo = Number(block?.dataset.pdfPage);
+  return Number.isInteger(pageNo) && pageNo > 0 ? pageNo : null;
 }
 
 export function getPdfSpanAtPoint(
@@ -1029,11 +1429,58 @@ export function collectPdfParagraphSpansFromTarget(target: HTMLElement, cachedSp
 }
 
 export function textFromPdfSpans(spans: HTMLElement[]) {
-  return spans
-    .map((span) => span.textContent?.replace(/\s+/g,"").trim() ||"")
-    .filter(Boolean)
-    .join("")
-    .replace(/\s+([,.;:!?，。；：！？])/g,"$1")
+  /**
+   * 历史 bug（2026-10-06 实测）：旧实现把每个 span 内的空白全部剥掉再无缝拼接，
+   * 本意是合并 pdf.js 把单词劈成多个 span 的断词（"Fig" + "ure"），但副作用是
+   * 词与词之间的空格也一起消失了 —— 划词文本变成
+   * "Figure1Schematicoftwo-channel..."，模型拿到的是一堆字符，翻译与提问质量
+   * 随之崩塌。
+   *
+   * 现在按**几何间距**决定连接符：
+   *   - span 内部空白折叠成单个空格（不再删除）；
+   *   - 同一行内 span 间有水平空隙 → 空格（词距）；
+   *   - 跨行的竖直间距超过约 0.6em → 段落分隔（"\n\n"），否则 → 空格（同段换行）；
+   *   - 水平无缝隙（断词）→ 直接连上；前段以连字符结尾时也直接连。
+   *
+   * 文本层此刻必然在 DOM 里（这个函数只被 textLayer 的 span 组调用），
+   * getClientRects 的开销可以接受。
+   */
+  const joinKind = (previous: HTMLElement, next: HTMLElement): "" | " " | "\n\n" => {
+    const previousRects = previous.getClientRects();
+    const nextRects = next.getClientRects();
+    if (!previousRects.length || !nextRects.length) return " ";
+    const last = previousRects[previousRects.length - 1];
+    const first = nextRects[0];
+    const fontSize = Number.parseFloat(window.getComputedStyle(previous).fontSize) || 12;
+    const verticalGap = first.top - last.bottom;
+    if (verticalGap > fontSize * 0.6) return "\n\n";
+    const horizontalGap = first.left - last.right;
+    if (horizontalGap > fontSize * 0.2) return " ";
+    return "";
+  };
+
+  const parts: Array<{ element: HTMLElement; text: string }> = [];
+  for (const span of spans) {
+    const text = (span.textContent ?? "").replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    parts.push({ element: span, text });
+  }
+
+  let output = "";
+  for (let index = 0; index < parts.length; index += 1) {
+    const part = parts[index];
+    if (index === 0) {
+      output = part.text;
+      continue;
+    }
+    const join = joinKind(parts[index - 1].element, part.element);
+    // 行尾连字符 + 无缝拼接属于跨行断词（"state-" / "of" → "state-of"），去连字符。
+    const previousEndsHyphen = /-$/.test(output);
+    if (join === "" && previousEndsHyphen) output = output.slice(0, -1) + part.text;
+    else output += join + part.text;
+  }
+  return output
+    .replace(/\s+([,.;:!?，。；：！？])/g, "$1")
     .trim();
 }
 
@@ -1076,66 +1523,19 @@ export const PDF_TEXT_BEARING_BLOCK_KINDS = new Set<PdfReadingBlock["kind"]>([
 "equation",
 ]);
 
-export function collectPdfBlockSpans(block: PdfReadingBlock | null, spans: PdfTextSpan[], layer: HTMLElement): HTMLElement[] {
-  // Text-bearing structured blocks share the PDF.js text-layer geometry. The
-  // block kind is metadata for translation/quoting, not a reason to fall back
-  // to a second paragraph heuristic for titles, tables, quotes, or footnotes.
-  if (!block?.rect || !PDF_TEXT_BEARING_BLOCK_KINDS.has(block.kind)) return [];
-  const layerRect = layer.getBoundingClientRect();
-  if (layerRect.width <= 0 || layerRect.height <= 0) return [];
-  const paddingX = Math.min(0.012, 8 / layerRect.width);
-  const paddingY = Math.min(0.012, 8 / layerRect.height);
-  const left = block.rect.x - paddingX;
-  const top = block.rect.y - paddingY;
-  const right = block.rect.x + block.rect.width + paddingX;
-  const bottom = block.rect.y + block.rect.height + paddingY;
-  return spans
-    .filter(({ rect }) => {
-      const centerX = (rect.left + rect.width / 2 - layerRect.left) / layerRect.width;
-      const centerY = (rect.top + rect.height / 2 - layerRect.top) / layerRect.height;
-      return centerX >= left && centerX <= right && centerY >= top && centerY <= bottom;
-    })
-    .map(({ node }) => node);
-}
-
-export function drawSpanGroupHighlightElements(group: HTMLElement[], host: HTMLElement, existing: HTMLDivElement[]) {
-  const hostRect = host.getBoundingClientRect();
-  const spans = group
-    .map((node) => ({ node, rect: node.getBoundingClientRect() }))
-    .filter((item) => item.rect.width > 0 && item.rect.height > 0)
-    .sort((left, right) => left.rect.top - right.rect.top || left.rect.left - right.rect.left);
-  if (spans.length === 0) return [];
-
-  // A single union rectangle fills the whitespace between lines and can span
-  // both columns. Keep the native text-layer geometry, but draw one compact
-  // rectangle for each continuous line segment instead.
-  const highlightRects = groupPdfTextHighlightRects(
-    spans.map(({ rect }) => ({
-      left: rect.left,
-      top: rect.top,
-      right: rect.right,
-      bottom: rect.bottom,
-    })),
-  );
-  const elements = highlightRects.map((highlightRect, index) => {
-    const lineHeight = highlightRect.bottom - highlightRect.top;
-    const padX = Math.min(5, Math.max(2, lineHeight * 0.24));
-    const padY = Math.min(4, Math.max(2, lineHeight * 0.18));
-    const { left, top, right, bottom } = highlightRect;
-    const element = existing[index] || document.createElement("div");
-    element.className ="pdf-assist-block-highlight";
-    element.style.left =`${Math.max(0, left - hostRect.left - padX)}px`;
-    element.style.top =`${Math.max(0, top - hostRect.top - padY)}px`;
-    const leftOffset = Math.max(0, left - hostRect.left - padX);
-    const maxWidth = Math.max(0, hostRect.right - hostRect.left - leftOffset);
-    element.style.width =`${Math.min(maxWidth, right - left + padX * 2)}px`;
-    element.style.height =`${Math.min(hostRect.height, bottom - top + padY * 2)}px`;
-    if (element.parentElement !== host) host.appendChild(element);
-    return element;
-  });
-  for (const stale of existing.slice(elements.length)) stale.remove();
-  return elements;
-}
+/**
+ * ⚠️ 本文件曾有两个「按块并集框操作 span」的函数，都已删除，不要恢复：
+ *
+ * - `collectPdfBlockSpans` —— 按 `block.rect` 并集框收 span。
+ * - `drawSpanGroupHighlightElements` —— 按段落矩形画绝对定位覆盖 div。
+ *
+ * 两者是「点一下选了两段」「波浪线贴在整段底部」「双栏糊成一片」这三个
+ * 实测 bug 的共同根因：段落 rect 是**并集框**，拿它做逐 span 的取舍或做
+ * 覆盖矩形，粒度必然错。
+ *
+ * 现在一律走 `pdfReader/textLayerMarker.ts`：段落边界用解析器的行级 bbox
+ * （`PdfReadingBlock.lines`），标注渲染用 pdf.js 官方的行内切分算法。
+ */
 
 export function getNormalizedSpanGroupRect(group: HTMLElement[], layer: HTMLElement): ReaderAnnotationRect | undefined {
   const layerRect = layer.getBoundingClientRect();
@@ -1192,18 +1592,13 @@ export function mergeDomPdfReadingBlocks(domBlocks: PdfReadingBlock[], structure
       documentId: best.documentId || domBlock.documentId,
       depth: best.depth,
       tableAlign: best.tableAlign,
+      // ⚠️ 刻意**不**吸收 structured 块的 lines：保留 domBlock 自己的行几何。
+      // 波浪线区间命中、锚点定位、整句扩展都拿行 rect 与 text layer 的
+      // getBoundingClientRect 对表 —— DOM 行与 text layer 同源（都量自渲染后的
+      // span），pymupdf 的 bbox 走的是另一套坐标系，混进来会让命中整体偏移。
+      // DOM 行 text 与 pymupdf 行 text 的差异只影响「句末标点判断的精度」，
+      // 不影响几何正确性。
     };
   });
 }
 
-export function getAssistAnchorFromHighlights(highlights: HTMLDivElement[], fallbackX: number, fallbackY: number) {
-  const rects = highlights
-    .map((highlight) => highlight.getBoundingClientRect())
-    .filter((rect) => rect.width > 0 && rect.height > 0);
-  if (rects.length === 0) return { x: fallbackX, y: fallbackY };
-  const rect = combineClientRects(rects);
-  return {
-    x: rect.left + rect.width / 2,
-    y: rect.bottom + 8,
-  };
-}

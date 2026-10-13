@@ -54,4 +54,19 @@ assert.match(rust, /tokio::time::sleep\(CANCELED_REQUEST_TTL\)\.await/);
 assert.match(rust, /cancel_tile_request\(request_id: String\)[\s\S]{0,260}mark_request_canceled\(request_id\)\.await/);
 assert.match(rust, /cancel_llm_chat_completion\(request_id: String\)[\s\S]{0,220}mark_request_canceled\(request_id\)\.await/);
 
+// 字节过 IPC 必须保持 base64（不是 `Vec<u8>`）。
+// macOS 上 Tauri 的 IPC 是纯文本通道（`InvokeResponseBody::Raw` 也走
+// `format_result` → `serde_json::to_string(&Vec<u8>)`），`Vec<u8>` 会变成
+// **十进制数字数组**：3.55 字符/字节 × Rust 侧 3 份副本，再过 `JSON.parse`
+// 出 7.2 字节/元素的 JS 数字数组 —— 端到端 ≈ 19–23 倍文件大小的瞬时峰值。
+// 这是「打开 200 页 PDF 内存 2G+」的主因，依据见 read_opened_pdf_bytes 头部注释。
+assert.match(rust, /pub async fn read_opened_pdf_bytes\([\s\S]{0,140}-> Result<String, String>/);
+assert.doesNotMatch(
+  rust,
+  /read_opened_pdf_bytes[\s\S]{0,400}-> Result<Vec<u8>, String>/,
+  "PDF bytes must not cross the macOS IPC as a JSON number array",
+);
+assert.match(rust, /result\.map\(\|bytes\| BASE64\.encode\(&bytes\)\)/);
+assert.match(bridge, /typeof raw === 'string'\) return base64ToBytes\(raw\)/);
+
 console.log("pdf-open-cancellation: ok");

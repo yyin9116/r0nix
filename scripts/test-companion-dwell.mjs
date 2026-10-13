@@ -8,6 +8,7 @@ import {
   measureBlockVisibility,
   pickFocusBlock,
   shouldHintForBlock,
+  isNonProseRegion,
 } from "../src/services/companionDwell.ts";
 
 // ── 几何夹具 ────────────────────────────────────────────────────────────────
@@ -197,4 +198,54 @@ assert.equal(shouldHintForBlock([], { page: 3 }), true);
 assert.equal(shouldHintForBlock([3], { page: 3 }), false, "同页已提示过不得再提示");
 assert.equal(shouldHintForBlock([3], { page: 4 }), true);
 
-console.log(`companion dwell: ok（${swept} 条网格性质样本）`);
+// ── 版面区域过滤（isNonProseRegion）─────────────────────────────────────────
+//
+// 伴读是主动功能，误报比漏报贵得多：页眉挂上提示会让读者直接关掉整个功能。
+// 这里刻意把「页眉页脚页码」三类钉住 —— 它们是实测中最容易被盯上的目标。
+
+// 版心正中的普通正文段：必须放行，否则功能形同虚设。
+const BODY = { kind: "text", text: "这是一个正常的正文段落，".repeat(8), rect: { x: 0.15, y: 0.4, width: 0.7, height: 0.08 } };
+assert.equal(isNonProseRegion(BODY), false, "★ 版心正文必须放行");
+
+// 顶部条带 = 页眉（论文标题 + 作者 + arXiv 水印常在这里）。
+assert.equal(
+  isNonProseRegion({ ...BODY, rect: { x: 0.15, y: 0.02, width: 0.7, height: 0.02 } }),
+  true,
+  "★ 顶部条带视为页眉"
+);
+// 底部条带 = 页脚 / 页码。
+assert.equal(
+  isNonProseRegion({ ...BODY, rect: { x: 0.15, y: 0.96, width: 0.7, height: 0.02 } }),
+  true,
+  "★ 底部条带视为页脚"
+);
+// 纯页码出现在版心中央也要拒 —— 有些模板把页码排在正文之间。
+assert.equal(isNonProseRegion({ ...BODY, text: "12" }), true, "★ 纯数字页码即使在版心也拒");
+assert.equal(isNonProseRegion({ ...BODY, text: "Page 3 of 18" }), true, "★ Page N of M 形式也拒");
+// 非正文块型：图、表、公式、代码、辅助区（页眉页脚的显式标记）。
+for (const kind of ["image", "table", "equation", "code", "auxiliary"]) {
+  assert.equal(isNonProseRegion({ ...BODY, kind }), true, `★ ${kind} 不该参与伴读`);
+}
+// 孤立短窄行：arXiv 水印、版权声明。
+assert.equal(
+  isNonProseRegion({ ...BODY, text: "Preprint. Do not distribute.", rect: { x: 0.2, y: 0.5, width: 0.3, height: 0.015 } }),
+  true,
+  "★ 孤立短窄行视为水印"
+);
+// 标题层级：depth > 0 即标题（MinerU 的 text_level）。
+assert.equal(isNonProseRegion({ ...BODY, depth: 1 }), true, "★ 标题不参与伴读");
+assert.equal(isNonProseRegion({ ...BODY, depth: 0 }), false, "depth 0 是正文，不是标题");
+
+// 退化输入：没有 rect / 没有文本时无法判断，返回 true 更安全（宁可不提示）。
+assert.equal(isNonProseRegion({ kind: "text", text: "有文本" }), true, "无 rect 时保守拒绝");
+assert.equal(isNonProseRegion({ kind: "text", text: "   ", rect: BODY.rect }), true, "空白文本拒");
+assert.equal(isNonProseRegion({ kind: "text", text: "正文", rect: { x: 0, y: 0.4, width: 0, height: 0.1 } }), true, "零宽拒");
+
+// 反向：宽正文即便靠近版心顶部也不该被条带误杀 —— 阈值留了余量。
+assert.equal(
+  isNonProseRegion({ ...BODY, rect: { x: 0.15, y: 0.075, width: 0.7, height: 0.05 } }),
+  false,
+  "★ 条带阈值不得吃进紧贴版心的正文首行"
+);
+
+console.log(`companion dwell: ok（${swept} 条网格性质样本 + 版面过滤）`);

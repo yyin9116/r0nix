@@ -729,7 +729,6 @@ pub fn get_pdf_reading_blocks_json(
             r#"
 import fitz
 import json
-import re
 
 def check_cancelled():
     if cancel_probe is not None and cancel_probe.is_cancelled():
@@ -749,31 +748,86 @@ try:
         page_w = float(rect.width) or 1.0
         page_h = float(rect.height) or 1.0
 
-        for block_index, block in enumerate(page.get_text("blocks")):
+        # get_text("dict") 而不是 get_text("blocks")：后者只给块级并集框。
+        # 学术论文常见「整栏一块」的版面，一个 block 横跨 5–10 个自然段，
+        # 此时并集框既不能切段落也不能定位标注（波浪线贴在并集框底部，
+        # 看起来像「跑到整段下面去了」）。dict多一层 lines[]，是解析器
+        # 自己算出的行几何，不是我们猜的。
+        for block_index, block in enumerate(page.get_text("dict")["blocks"]):
             check_cancelled()
-            if len(block) < 5:
+            if int(block.get("type", 0)) == 1:
+                # 图片块：dict 里没有行，保留并集框供图片索引使用。
+                bbox = [float(v) for v in block["bbox"]]
+                if bbox[2] <= bbox[0] or bbox[3] <= bbox[1]:
+                    continue
+                left = max(0.0, min(page_w, min(bbox[0], bbox[2]) - page_x0))
+                top = max(0.0, min(page_h, min(bbox[1], bbox[3]) - page_y0))
+                right = max(0.0, min(page_w, max(bbox[0], bbox[2]) - page_x0))
+                bottom = max(0.0, min(page_h, max(bbox[1], bbox[3]) - page_y0))
+                if right <= left or bottom <= top:
+                    continue
+                items.append({
+                    "id": f"pymupdf-{page_index + 1}-{block_index}",
+                    "page": page_index + 1,
+                    "kind": "image",
+                    "text": "",
+                    "rect": {
+                        "x": left / page_w,
+                        "y": top / page_h,
+                        "width": (right - left) / page_w,
+                        "height": (bottom - top) / page_h,
+                    },
+                    "source": "pymupdf",
+                })
                 continue
 
-            x0, y0, x1, y1 = map(float, block[:4])
-            raw_text = "" if block[4] is None else str(block[4])
-            text = re.sub(r"\s+", " ", raw_text).strip()
-            block_type = int(block[6]) if len(block) > 6 else 0
-            kind = "image" if block_type == 1 else "text"
+            lines = []
+            for line in block.get("lines", []):
+                spans = line.get("spans", [])
+                if not spans:
+                    continue
+                # 行内文本按span 原样拼接：pymupdf 已经把词间的空格放进去了，
+                # 不再用 re.sub(r"\s+", " ") —— 那会把整段的换行压平成空格，
+                # 于是「整段」在文本上真的变成了一行（2026-10-07 实测）。
+                line_text = "".join(str(span.get("text", "")) for span in spans)
+                line_bbox = [float(v) for v in line["bbox"]]
+                if not line_text.strip():
+                    continue
+                if line_bbox[2] <= line_bbox[0] or line_bbox[3] <= line_bbox[1]:
+                    continue
+                lines.append({
+                    "text": line_text,
+                    "rect": {
+                        "x": max(0.0, min(page_w, line_bbox[0] - page_x0)) / page_w,
+                        "y": max(0.0, min(page_h, line_bbox[1] - page_y0)) / page_h,
+                        "width": (max(0.0, min(page_w, line_bbox[2] - page_x0))
+                                  - max(0.0, min(page_w, line_bbox[0] - page_x0))) / page_w,
+                        "height": (max(0.0, min(page_h, line_bbox[3] - page_y0))
+                                   - max(0.0, min(page_h, line_bbox[1] - page_y0))) / page_h,
+                    },
+                })
 
-            if not text and kind != "image":
+            if not lines:
                 continue
 
-            left = max(0.0, min(page_w, min(x0, x1) - page_x0))
-            top = max(0.0, min(page_h, min(y0, y1) - page_y0))
-            right = max(0.0, min(page_w, max(x0, x1) - page_x0))
-            bottom = max(0.0, min(page_h, max(y0, y1) - page_y0))
+            # 块文本以 "\n" 连接行：保住「这里换行了」这个事实，
+            # 翻译与提问时才知道它是一段多行，不是一个长句。
+            text = "\n".join(line["text"] for line in lines).strip()
+            if not text:
+                continue
+
+            bbox = [float(v) for v in block["bbox"]]
+            left = max(0.0, min(page_w, min(bbox[0], bbox[2]) - page_x0))
+            top = max(0.0, min(page_h, min(bbox[1], bbox[3]) - page_y0))
+            right = max(0.0, min(page_w, max(bbox[0], bbox[2]) - page_x0))
+            bottom = max(0.0, min(page_h, max(bbox[1], bbox[3]) - page_y0))
             if right <= left or bottom <= top:
                 continue
 
             items.append({
                 "id": f"pymupdf-{page_index + 1}-{block_index}",
                 "page": page_index + 1,
-                "kind": kind,
+                "kind": "text",
                 "text": text,
                 "rect": {
                     "x": left / page_w,
@@ -781,6 +835,7 @@ try:
                     "width": (right - left) / page_w,
                     "height": (bottom - top) / page_h,
                 },
+                "lines": lines,
                 "source": "pymupdf",
             })
 

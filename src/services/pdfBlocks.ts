@@ -216,17 +216,26 @@ export function buildDomPdfReadingBlocks(layer: HTMLElement, pageNo: number): Pd
     return Math.min(...left.map((span) => span.rect.left)) - Math.min(...right.map((span) => span.rect.left));
   });
 
-  const blocks: DomTextSpan[][] = [];
+  // ⚠️ 块的元素是**行**（行的元素才是 span），不是 span 平铺。
+  // 行分组在这里已经算好了（上面 lines 的聚类），必须一路带到产物上：
+  // 伴读的写入侧（pickFocusLine 挑行）与渲染侧（整句扩展、波浪线区间命中）
+  // 都靠 `block.lines` 的**真实行盒**工作。不带出来，下游只能拿块级 rect
+  // 配常数行高去猜 —— 2026-10-08 实测那条猜出来的细带与文字行中心差 1px，
+  // 波浪线全部静默消失（数据在、屏幕上没有）。
+  const blocks: DomTextSpan[][][] = [];
   for (const line of lineSegments) {
     const previous = blocks[blocks.length - 1];
-    const previousBottom = previous ? Math.max(...previous.map((span) => span.rect.bottom)) : 0;
+    const previousSpans = previous?.flat() ?? [];
+    const previousBottom = previousSpans.length
+      ? Math.max(...previousSpans.map((span) => span.rect.bottom))
+      : 0;
     const lineTop = Math.min(...line.map((span) => span.rect.top));
     const lineLeft = Math.min(...line.map((span) => span.rect.left));
     const lineRight = Math.max(...line.map((span) => span.rect.right));
     const gap = lineTop - previousBottom;
     const lineHeight = Math.max(...line.map((span) => span.rect.height));
-    const previousLeft = previous ? Math.min(...previous.map((span) => span.rect.left)) : 0;
-    const previousRight = previous ? Math.max(...previous.map((span) => span.rect.right)) : 0;
+    const previousLeft = previousSpans.length ? Math.min(...previousSpans.map((span) => span.rect.left)) : 0;
+    const previousRight = previousSpans.length ? Math.max(...previousSpans.map((span) => span.rect.right)) : 0;
     const overlapsPreviousColumn = !previous || Math.min(lineRight, previousRight) - Math.max(lineLeft, previousLeft) > Math.min(lineRight - lineLeft, previousRight - previousLeft) * 0.36;
     const indentationDelta = lineLeft - previousLeft;
     // A fixed pixel indentation threshold breaks at different zoom levels
@@ -239,20 +248,33 @@ export function buildDomPdfReadingBlocks(layer: HTMLElement, pageNo: number): Pd
       gap > lineHeight * 1.45 ||
       startsIndentedParagraph;
     if (startsNewParagraph) {
-      blocks.push([...line]);
+      blocks.push([line]);
     } else {
-      previous.push(...line);
+      previous.push(line);
     }
   }
 
   return blocks
-    .map((block, index) => ({
-      id: `pdfjs-dom-${pageNo}-${index}`,
-      page: pageNo,
-      kind: "text" as const,
-      text: block.map((span) => span.text).join(" ").replace(/\s+([,.;:!?，。；：！？])/g, "$1").trim(),
-      rect: mergeRects(block.map((span) => span.rect), layerRect),
-      source: "pdfjs-dom" as const,
-    }))
+    .map((block, index) => {
+      const blockSpans = block.flat();
+      return {
+        id: `pdfjs-dom-${pageNo}-${index}`,
+        page: pageNo,
+        kind: "text" as const,
+        text: blockSpans.map((span) => span.text).join(" ").replace(/\s+([,.;:!?，。；：！？])/g, "$1").trim(),
+        rect: mergeRects(blockSpans.map((span) => span.rect), layerRect),
+        lines: block
+          .map((line) => {
+            const rect = mergeRects(line.map((span) => span.rect), layerRect);
+            if (!rect) return null;
+            return {
+              text: line.map((span) => span.text).join(" ").replace(/\s+([,.;:!?，。；：！？])/g, "$1").trim(),
+              rect,
+            };
+          })
+          .filter((line): line is NonNullable<typeof line> => line !== null && line.text.length > 0),
+        source: "pdfjs-dom" as const,
+      };
+    })
     .filter((block) => block.text.length > 0);
 }

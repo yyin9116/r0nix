@@ -53,6 +53,37 @@ export function view(text) {
   });
 }
 
+/** `/` 前面是这个字符时，它只可能是正则字面量的开头，不可能是除号。 */
+const REGEX_CAN_FOLLOW = new Set(["(", "[", "{", ",", ";", ":", "=", "!", "&", "|", "?", "+", "-", "*", "%", "~", "^", "<", ">", ""]);
+/** `/` 前面是这个关键字时同理（`return /…/`、`typeof /…/`、`case /…/`）。 */
+const REGEX_KEYWORDS = new Set(["return", "typeof", "instanceof", "in", "of", "new", "delete", "void", "case", "do", "else", "yield", "await", "throw"]);
+
+/**
+ * 从 `text[start]`（=== `/`）尝试读出一个正则字面量，返回它的结束偏移；不像正则则返回 -1。
+ *
+ * 判错的代价是**不对称**的，所以这个启发式够用：把除号误判成正则，最多是少看一小段
+ * 代码里的注释（本仓这些片段里没有注释）；把正则误判成除号，则会让字符类里的引号
+ * 带偏整个文件 —— 后者正是要根除的那个失效。
+ */
+function scanRegexLiteral(text, start) {
+  let i = start + 1;
+  let inClass = false;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === "\n") return -1; // 正则字面量不跨行；跨行说明这其实是除号
+    if (c === "\\") { i += 2; continue; }
+    if (inClass) { if (c === "]") inClass = false; i += 1; continue; }
+    if (c === "[") { inClass = true; i += 1; continue; }
+    if (c === "/") {
+      i += 1;
+      while (i < text.length && /[a-z]/i.test(text[i])) i += 1; // flags
+      return i;
+    }
+    i += 1;
+  }
+  return -1;
+}
+
 /**
  * 去掉源码里的注释，返回**行数不变**的文本（注释位置换成空格，换行原样保留）。
  *
@@ -63,21 +94,55 @@ export function view(text) {
  * 比多一条违规严重得多。**
  *
  * 用状态机而不是正则：字符串里的 `//` 与 `/*` 不能当注释开（`https://…`、
- * 正则字面量、`"/*"`）。代价是模板串里的 `${}` 未做嵌套解析 —— 本仓够用，
- * 真需要时再加深。
+ * 正则字面量、`"/*"`）。
+ *
+ * ★ 2026-10-10：补上**正则字面量**识别。原先的状态机不认 `/.../`，于是
+ * `readerCore.ts` 的 `.replace(/[\\/:*?"<>|]/g, "-")`（**字符类里带一个双引号**）
+ * 会让它从这个 `"` 进入「字符串」状态，此后整份文件被错位解析：实测
+ * readerCore + App.tsx 合计 196 行注释**没有被剥掉**，以「代码」的身份留在视图里。
+ * 而负断言扫的正是这个视图 —— 它命中的会是注释里的词（本仓 App.tsx 另有 2 处
+ * 同类写法，`assistantMarkdown.ts` 1 处）。加文本层几何负断言时就真的被自己的
+ * 注释绊红了一次，才顺藤查到根上。
+ *
+ * 代价是模板串里的 `${}` 未做嵌套解析 —— 本仓够用，真需要时再加深。
  */
 export function stripComments(text) {
   let out = "";
   let i = 0;
   let state = "code"; // code | line | block | sq | dq | tpl
+  /** 最近一个「有效」字符（跳过空白与注释），用来判断 `/` 是除号还是正则开头。 */
+  let lastSignificant = "";
+  /** 最近一个标识符（同上），用来识别 `return /…/` 这类关键字前缀。 */
+  let lastWord = "";
   while (i < text.length) {
     const c = text[i];
     const n = text[i + 1];
     if (state === "code") {
       if (c === "/" && n === "/") { state = "line"; i += 2; out += "  "; continue; }
       if (c === "/" && n === "*") { state = "block"; i += 2; out += "  "; continue; }
-      if (c === "'" || c === '"' || c === "`") { state = c === "'" ? "sq" : c === '"' ? "dq" : "tpl"; out += c; i += 1; continue; }
-      out += c; i += 1; continue;
+      if (c === "/") {
+        if (REGEX_CAN_FOLLOW.has(lastSignificant) || REGEX_KEYWORDS.has(lastWord)) {
+          const end = scanRegexLiteral(text, i);
+          if (end > 0) {
+            out += text.slice(i, end);
+            lastSignificant = "/";
+            lastWord = "";
+            i = end;
+            continue;
+          }
+        }
+        out += c; lastSignificant = c; lastWord = ""; i += 1; continue;
+      }
+      if (c === "'" || c === '"' || c === "`") {
+        state = c === "'" ? "sq" : c === '"' ? "dq" : "tpl";
+        out += c; lastSignificant = c; lastWord = ""; i += 1; continue;
+      }
+      out += c;
+      if (!/\s/.test(c)) {
+        lastSignificant = c;
+        lastWord = /[A-Za-z0-9_$]/.test(c) ? lastWord + c : "";
+      }
+      i += 1; continue;
     }
     if (state === "line") {
       if (c === "\n") { state = "code"; out += c; }
@@ -87,6 +152,15 @@ export function stripComments(text) {
       if (c === "\n") { out += c; i += 1; continue; }   // 保住行号
       if (c === "*" && n === "/") { state = "code"; i += 2; out += "  "; continue; }
       i += 1; continue;
+    }
+    // 字符串 / 模板串内部
+    if (c === "\n") {
+      // ★ 自愈闸：单引号与双引号字符串**不可能**跨行，走到这里就说明前面某处判错了
+      // （正则里的引号、属性访问里的撇号…）。不复位的话，一次失步会污染到文件结尾，
+      // 而症状是「注释变成代码」这类静默错误。复位后爆炸半径被限制在一行以内。
+      // 模板串可以合法跨行，所以不在这里复位。
+      if (state === "sq" || state === "dq") state = "code";
+      out += c; i += 1; continue;
     }
     // 字符串内部：转义符后一个字符原样吞掉
     if (c === "\\") { out += c + (text[i + 1] ?? ""); i += 2; continue; }
@@ -137,6 +211,32 @@ export function selfTest() {
     ["行数不变（保住行号）", stripped.split("\n").length, src.split("\n").length],
   ];
   for (const [name, got, want] of commentCases) {
+    if (got !== want) failures.push([`stripComments · ${name}`, got, want]);
+  }
+
+  // ---- 正则字面量：`readerCore.ts` 那条 `.replace(/[\\/:*?"<>|]/g, "-")` 的原形 ----
+  // 字符类里带一个双引号 —— 不认正则的状态机会从这里进入「字符串」状态，
+  // 此后整份文件错位（实测 196 行注释因此没被剥掉，以「代码」身份留在视图里）。
+  const regexSrc = [
+    'const s = name.replace(/[\\\\/:*?"<>|]/g, "-");',
+    "// 注释里的暗号 4321",
+    "const real = 7;",
+  ].join("\n");
+  const regexStripped = stripComments(regexSrc);
+  const regexCases = [
+    ["正则里的引号不再带偏状态（后面的注释仍被剥掉）", regexStripped.includes("4321"), false],
+    ["正则字面量本身原样保留", regexStripped.includes('/[\\\\/:*?"<>|]/g'), true],
+    ["后续代码未被吞掉", regexStripped.includes("const real = 7;"), true],
+    ["行数不变", regexStripped.split("\n").length, regexSrc.split("\n").length],
+  ];
+  // ---- 自愈闸：一行里的未闭合引号不得污染后面所有行 ----
+  const leakSrc = ['const a = "未闭合;', "// 暗号 9876", "const real = 2;"].join("\n");
+  const leakStripped = stripComments(leakSrc);
+  regexCases.push(
+    ["失步被限制在当行（后续行注释仍被剥掉）", leakStripped.includes("9876"), false],
+    ["失步不吞掉后续代码", leakStripped.includes("const real = 2;"), true],
+  );
+  for (const [name, got, want] of regexCases) {
     if (got !== want) failures.push([`stripComments · ${name}`, got, want]);
   }
   return failures;

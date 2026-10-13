@@ -13,11 +13,17 @@ const WebBrowser = lazy(() => import("./components/WebBrowser").then((module) =>
 const Settings = lazy(() => import("./components/Settings").then((module) => ({ default: module.Settings })));
 import type { LibraryFilter, PdfViewState, ReaderAnnotation, ReaderAnnotationRect, ReaderCollection, ReaderDocument, ReaderNote, Tab } from "./types";
 import * as api from "./services/pdfApi";
+import { readDevAutoOpenPath, readDevAutoCloseAfterMs, readDevAutoCloseActions, readDevAutoCycle } from "./services/rustPdf";
+// dev-only：worker 台账与画布统考。生产构建里该模块整段不执行（内部有 DEV 守卫）。
+import { runtimeCensus, terminateWorkers } from "./services/devRuntimeCensus";
 import {
   loadUserSettings,
+  loadUserSettingsFromWorkspace,
   sanitizeUserSettings,
   saveUserSettings,
+  saveUserSettingsToWorkspace,
   withDefaultDir,
+  USER_SETTINGS_EVENT,
   type AppLanguage,
   type UserSettings,
 } from "./services/userSettings";
@@ -37,14 +43,17 @@ import {
   type PersistenceWarning,
 } from "./services/localStore";
 import { loadStoredAnnotations, saveStoredAnnotations } from "./services/readerAnnotations";
+import { loadStoredApiKey, storeApiKey } from "./services/secretStore";
 import { describeFileOpenError } from "./services/fileOpenError";
 import { dismissCompanionBlock, dismissalForRemovedAnnotation, loadDismissedBlocks } from "./services/readingCompanion";
-import { debugWarn } from "./services/debugLogger";
+import { debugError, debugLog, debugWarn } from "./services/debugLogger";
 import { resolveAccentToken } from "./theme/accent";
 import type { LlmServiceConfig } from "./services/readingAssistant";
 import { START_PAGE_URL } from "./constants/startPage";
 import { downloadDirectHttpResource, downloadPdfToNativeTemp, downloadPdfViaProxy, removeManagedWebPdfTemp, DIRECT_PDF_MAX_BYTES } from "./services/webProxy";
+import { importDocumentIntoWorkspace } from "./services/workspace";
 import { documentIdForPath, documentPathKey, migrateDocumentArtifacts } from "./services/documentArtifacts";
+import { getAppToasts } from "./services/appToasts";
 
 const DOCUMENTS_KEY = "r0nix_reader_documents_v2";
 const COLLECTIONS_KEY = "r0nix_reader_collections_v1";
@@ -86,26 +95,32 @@ function cleanupManagedWebPdfTemp(path: string) {
 
 const APP_I18N = {
   "zh-CN": {
-    libraryTab: "\u8d44\u6599\u5e93",
-    collectionTab: "\u96c6\u5408",
-    settingsTab: "\u8bbe\u7f6e",
-    webNewTab: "\u65b0\u5efa\u6807\u7b7e",
-    collectionPrompt: "\u96c6\u5408\u540d\u79f0",
-    collectionExists: "\u96c6\u5408\u5df2\u5b58\u5728",
-    tabClose: "\u5173\u95ed\u6807\u7b7e",
-    pinnedCannotClose: "\u5df2\u56fa\u5b9a\u6807\u7b7e\uff08\u65e0\u6cd5\u5173\u95ed\uff09",
-    unsavedMarkdownClose: "\u6b64 Markdown \u5305\u542b\u672a\u4fdd\u5b58\u4fee\u6539\uff0c\u786e\u5b9a\u5173\u95ed\u6807\u7b7e\u5417\uff1f",
+    libraryTab: "资料库",
+    collectionTab: "集合",
+    settingsTab: "设置",
+    webNewTab: "新建标签",
+    startPageTab: "起始页",
+    collectionPrompt: "集合名称",
+    tabClose: "关闭标签",
+    pinnedCannotClose: "已固定标签（无法关闭）",
+    unsavedMarkdownClose: "此 Markdown 包含未保存修改，确定关闭标签吗？",
+    openDocumentDialog: "打开文档",
+    importFolderDialog: "导入文件夹",
+    downloadFilterName: "下载文件",
   },
   "en-US": {
     libraryTab: "Library",
     collectionTab: "Collection",
     settingsTab: "Settings",
     webNewTab: "New Tab",
+    startPageTab: "Start Page",
     collectionPrompt: "Collection name",
-    collectionExists: "Collection already exists",
     tabClose: "Close tab",
     pinnedCannotClose: "Pinned tab (cannot close)",
     unsavedMarkdownClose: "This Markdown tab has unsaved changes. Close it anyway?",
+    openDocumentDialog: "Open Document",
+    importFolderDialog: "Import Folder",
+    downloadFilterName: "Downloaded file",
   },
 } as const;
 
@@ -505,7 +520,9 @@ export default function App() {
   const [tabs, setTabs] = useState<Tab[]>(storedTabs.tabs);
   const [activeTabId, setActiveTabId] = useState(storedTabs.activeTabId);
   const [busyMessage, setBusyMessage] = useState("");
-  const [isSidebarOpen, setIsSidebarOpen] = useState(false);
+  // 资料库侧栏默认展开：它是这个应用的起点（打开文件、集合、快捷链接都在这里），
+  // 收起状态下首屏是一整块空白，用户第一眼看不到任何入口。
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [tabContextMenu, setTabContextMenu] = useState<{ x: number; y: number; tabId: string } | null>(null);
   const [settingsFocusSection, setSettingsFocusSection] = useState<"quick-links" | null>(null);
   const [settingsFocusToken, setSettingsFocusToken] = useState(0);
@@ -537,6 +554,12 @@ export default function App() {
   const activePanelKey = activeTab ? `${activeTab.type}-${activeTab.id}` : "empty";
   const resolvedAccent = useMemo(() => resolveAccentToken(settings.themeAccent, theme), [settings.themeAccent, theme]);
   const uiText = useMemo(() => getUiText(settings.language), [settings.language]);
+  /**
+   * 右下角状态提示文案。与 uiText 分开是因为它有参数（文件名、数量、错误信息），
+   * 形状是函数而不是字符串 —— 混在一张表里会让 `Record<Lang, …>` 变成联合类型，
+   * 取值时处处要判别。判别成本只在一个地方付一次。
+   */
+  const toasts = useMemo(() => getAppToasts(settings.language), [settings.language]);
   const aiModelConfig = useMemo<LlmServiceConfig>(
     () => ({
       baseUrl: settings.aiModelPath,
@@ -710,12 +733,8 @@ export default function App() {
     const showWarning = (warning: PersistenceWarning) => {
       updateBusyMessage(
         warning.kind === "read"
-          ? settings.language === "zh-CN"
-            ? `本地数据读取异常：${warning.key}，已保留原始数据。`
-            : `Local data read issue: ${warning.key}; the original data was preserved.`
-          : settings.language === "zh-CN"
-            ? `本地数据写入失败：${warning.key}，已保留旧数据。`
-            : `Local data write failed: ${warning.key}; the previous value was preserved.`,
+          ? toasts.localDataReadIssue({ key: warning.key })
+          : toasts.localDataWriteIssue({ key: warning.key }),
         5200
       );
     };
@@ -728,7 +747,7 @@ export default function App() {
     };
     window.addEventListener(PERSISTENCE_WARNING_EVENT, onWarning);
     return () => window.removeEventListener(PERSISTENCE_WARNING_EVENT, onWarning);
-  }, [settings.language, updateBusyMessage]);
+  }, [toasts, updateBusyMessage]);
 
   useEffect(() => {
     if (settings.themeMode !== "system") {
@@ -760,9 +779,59 @@ export default function App() {
   }, [theme]);
 
   const persistSettings = useCallback((next: UserSettings) => {
-    const clean = sanitizeUserSettings(next);
+    // 必须显式 `dropApiKey: false`：`sanitizeUserSettings` 默认按「从磁盘 hydrate」处理，
+    // 会把刚输入的 API Key 清成空串（表现为输入框打不进字）。落盘剥离由 saveUserSettings 负责。
+    const clean = sanitizeUserSettings(next, { dropApiKey: false });
     setSettings(clean);
     saveUserSettings(clean);
+    // 设置正文写进工作区文件（localStorage 只是降级缓存）。
+    // fire-and-forget：磁盘写失败不该打断交互，内存态已经是新值。
+    void saveUserSettingsToWorkspace(clean);
+    // 密钥走工作区内的 0600 文件（localStorage 契约：永不落密钥）。
+    // fire-and-forget，失败静默。
+    void storeApiKey(clean.aiApiKey);
+  }, []);
+
+  /**
+   * 启动时从工作区 hydrate 设置。
+   *
+   * 第一帧用 localStorage 同步渲染（避免设置面板先空白再闪），随后异步读工作区
+   * 文件覆盖。localStorage 里可能有更旧的版本，所以这里**无条件**以文件为准 ——
+   * 文件才是权威来源。
+   *
+   * 只在用户没动过设置时覆盖：hydrate 回来之前用户已经改了，文件就会把他刚敲的
+   * 值倒回去，那比读到旧值更糟。
+   */
+  useEffect(() => {
+    let canceled = false;
+    let userTouchedSettings = false;
+    const markTouched = () => {
+      userTouchedSettings = true;
+    };
+    window.addEventListener(USER_SETTINGS_EVENT, markTouched);
+    void loadUserSettingsFromWorkspace().then((fromWorkspace) => {
+      if (canceled || !fromWorkspace) return;
+      setSettings((prev) => (userTouchedSettings ? prev : { ...fromWorkspace, aiApiKey: prev.aiApiKey }));
+      // 同步回 localStorage 降级缓存：下次启动第一帧就能直接读到，不必等异步 hydrate。
+      saveUserSettings(fromWorkspace);
+    });
+    return () => {
+      canceled = true;
+      window.removeEventListener(USER_SETTINGS_EVENT, markTouched);
+    };
+  }, []);
+
+  // 启动时从本地密钥文件恢复 API Key（会话内存 + 本地文件持久化的组合）。
+  // 只回填内存态，不经过 saveUserSettings —— localStorage 与设置文件依旧零密钥。
+  useEffect(() => {
+    let canceled = false;
+    void loadStoredApiKey().then((key) => {
+      if (canceled || !key) return;
+      setSettings((prev) => (prev.aiApiKey === key ? prev : { ...prev, aiApiKey: key }));
+    });
+    return () => {
+      canceled = true;
+    };
   }, []);
 
   const openLibraryTab = useCallback((filter: LibraryFilter, title: string) => {
@@ -828,13 +897,13 @@ export default function App() {
     const id = `col-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     setCollections((prev) => {
       if (prev.some((item) => item.name.toLowerCase() === clean.toLowerCase())) {
-        updateBusyMessage(uiText.collectionExists, 1800);
+        updateBusyMessage(toasts.collectionExists, 1800);
         return prev;
       }
       return [...prev, { id, name: clean, paths: [], createdAt: new Date().toISOString() }];
     });
     pinLibraryTab(`collection:${id}`, clean);
-  }, [pinLibraryTab, uiText.collectionExists, uiText.collectionPrompt, updateBusyMessage]);
+  }, [pinLibraryTab, toasts, uiText.collectionPrompt, updateBusyMessage]);
 
   const openSettingsTab = useCallback((focusSection?: "quick-links") => {
     if (focusSection) {
@@ -901,7 +970,7 @@ export default function App() {
       const nextTab: Tab = {
         id: `web-${Date.now()}`,
         type: "web",
-        title: normalized === START_PAGE_URL ? (settings.language === "zh-CN" ? "起始页" : "Start Page") : normalized ? shortHostSafe(normalized) : uiText.webNewTab,
+        title: normalized === START_PAGE_URL ? uiText.startPageTab : normalized ? shortHostSafe(normalized) : uiText.webNewTab,
         url: normalized,
         pinned: false,
       };
@@ -917,7 +986,7 @@ export default function App() {
         return [...prev, nextTab];
       });
     },
-    [settings.language, uiText.webNewTab]
+    [uiText.startPageTab, uiText.webNewTab]
   );
 
   const upsertDocumentStub = useCallback((path: string) => {
@@ -1075,7 +1144,7 @@ export default function App() {
       const existingDoc = documents.find((item) => samePath(item.path, path));
       try {
         if (!options?.silentBusy) {
-          updateBusyMessage(markdown ? "Opening Markdown..." : "Opening PDF...");
+          updateBusyMessage(markdown ? toasts.openingMarkdown : toasts.openingPdf);
         }
 
         if (markdown) {
@@ -1153,7 +1222,7 @@ export default function App() {
         cancelledOpeningPathsRef.current.delete(openKey);
       }
     },
-    [documents, releasePdfFileAfterTabCommit, settings.language, tabs, updateBusyMessage, upsertDocumentFromOpen]
+    [documents, releasePdfFileAfterTabCommit, settings.language, tabs, toasts, updateBusyMessage, upsertDocumentFromOpen]
   );
 
   useEffect(() => {
@@ -1169,6 +1238,194 @@ export default function App() {
     void openPdfByPath(activeTab.filePath, activeTab.title, { silentBusy: true });
   }, [activeTab, openPdfByPath]);
 
+  /**
+   * dev-only：内存/性能量测的自动化入口 —— 环境变量 `R0NIX_AUTO_OPEN` 指定路径时，
+   * 启动即打开它（**支持 `;` 分隔的多个路径，顺序打开**）。
+   *
+   * 为什么需要：真实 Tauri 的 IPC 路径（base64 编码 → 传输 → JS 解码）只能在真实
+   * 应用进程里量，浏览器探针走 `file.arrayBuffer()` 会完全绕开它；而 macOS 上驱动
+   * 真实应用的 UI 需要辅助功能权限（本机未授权）。
+   *
+   * 为什么支持多个：单个文档只能量到「瞬时峰值 → 回落」，量不到**驻留**。
+   * pdf.js 的 `documentCache` 按 fileId 持有文档、worker 持有那份 `Uint8Array`，
+   * 只要标签还开着，**每个已打开文档就固定占住一份原始字节 + 解码缓存** ——
+   * 顺序打开 N 份大文档，才能看出「每多一份，驻留增加多少」，也才是
+   * 「用了一段时间不下降」的真正形状。
+   *
+   * 双重守卫：`import.meta.env.DEV` 是编译期常量（生产构建里整段被 tree-shake），
+   * 且 Rust 侧命令在 release 恒返回 null。
+   *
+   * ⚠️ 要让它生效，必须用 `cargo run --no-default-features` 启动。`src-tauri/Cargo.toml`
+   * 里 `custom-protocol` 在 default features 中，而 tauri 的构建脚本是
+   * `dev = !has_feature("custom-protocol")` —— 一旦 `custom-protocol` 生效（即默认
+   * 的 `cargo run`），Tauri 就**忽略 devUrl、直接服务编译期嵌进二进制的 `dist/`**，
+   * 于是跑的是上一次 `npm run build` 的产物：本段代码作为 DEV 分支已被 tree-shake，
+   * 静默失效，症状是「什么都没发生」。
+   *
+   * 只执行一次：`openPdfByPath` 是 useCallback，其依赖随渲染变化会让本 effect 重跑，
+   * 而每次重跑都会**把同一份文件重新打开一遍** —— 探针读数会被这种重复打开严重污染。
+   */
+  const autoOpenAttemptedRef = useRef(false);
+  /**
+   * `handleCloseTab` 的镜像，专供自动化钩子调用「**真实的**关标签」。
+   *
+   * 为什么必须是 ref：`handleCloseTab` 定义在本 effect **之后**（App 组件体里靠后），
+   * 把它写进本 effect 的依赖数组会在渲染到本行时就命中 TDZ 而抛错。ref 在提交后由
+   * 一个专门的 effect 赋值，异步回调里读到的永远是最新实现。
+   *
+   * 为什么不能用 `api.closeFile` 代替：那是**两件不同的事**。`closeFile` 只销毁
+   * pdf.js 文档与 Rust 句柄，标签仍留在界面上、viewer 与它的画布都没卸载；
+   * `handleCloseTab` 才移除标签、卸载 viewer，再排队释放文件 —— 也就是**用户按了
+   * 关闭按钮**的那条路径。上一轮把前者当成「关标签」，读数因而无法指向真正的持有者。
+   */
+  const closeTabRef = useRef<((id: string) => void) | null>(null);
+  useEffect(() => {
+    // 与 PDFViewer / PageCanvas 里的 DEV_PROBE 同一写法：本项目没有引入 vite/client 类型，
+    // `import.meta.env` 无类型声明，故用断言取编译期常量（生产构建里此分支被 tree-shake）。
+    if (!(import.meta as { env?: { DEV?: boolean } }).env?.DEV) return;
+    if (autoOpenAttemptedRef.current) return;
+    autoOpenAttemptedRef.current = true;
+    void (async () => {
+      try {
+        const raw = await readDevAutoOpenPath();
+        if (!raw) return;
+        const paths = raw
+          .split(";")
+          .map((value) => value.trim())
+          .filter(Boolean);
+        if (paths.length === 0) return;
+        debugLog("api.autoOpen", "effect mounted", { count: paths.length });
+        // 关闭**动作**清单（`R0NIX_AUTO_CLOSE_ACTIONS`）。不设时默认 `["file"]`，
+        // 与历史行为一致：只销毁文档，**不**移除标签。
+        const closeActions = (await readDevAutoCloseActions()) ?? ["file"];
+        const closeAfterMs = await readDevAutoCloseAfterMs();
+        // 循环模式（`R0NIX_AUTO_CYCLE=1`）：每打开一份就立刻关掉它 —— 于是「文档数」
+        // 等于「轮数」，在**同一个进程**里重复「打开 → 关闭」。
+        const cycleMode = await readDevAutoCycle();
+        debugLog("api.autoOpen", "plan", {
+          paths: paths.length,
+          cycleMode,
+          closeAfterMs,
+          closeActions,
+        });
+
+        /**
+         * 关闭一份「自动打开」的文档：定位它的标签 → 按清单执行动作 → 前后各留一次普查。
+         *
+         * 抽成闭包是有意的：它有两个调用方 —— 常规的「全部打开后再关」，以及循环模式
+         * 的「每打开一份就关掉它」。两处各写一遍迟早会漂移成两套语义，而这一段的
+         * 每个细节都是踩出来的（见下面两处 ⚠️）。
+         */
+        const closeAutoOpenedPath = async (autoOpenPath: string) => {
+          // 复用项目既有的 `latestTabsRef`（`openPdfByPath` 的失败分支用的是同一招）：
+          // 闭包里的 `tabs` 是 effect 建立那一刻的快照，异步回调里必然过期。
+          //
+          // ⚠️ 必须**轮询等标签登记出来**，不能只看一眼。clean store 下实测
+          // `candidateCount: 0`（那一刻 `latestTabsRef` 里只有 1 条），根因是打开一份
+          // 大扫描件后主线程被 canvas 渲染占满，把 `tabs` 镜像进 ref 的那个 passive
+          // effect 被推迟到几百毫秒之后 —— 固定 300ms 会**静默跳过关闭**，读数于是与
+          // 「不关」组几乎一致，最容易被误读成「关闭不释放内存」。
+          //
+          // ⚠️ 还要遍历**全部**同路径标签再挑带 `fileId` 的那条：同一路径可能存在多条
+          // 标签（历史遗留的无 `fileId` 标签会排在前面，`find` 恰好取到它）。
+          const closeDeadline = Date.now() + 8000;
+          let candidates: Tab[] = [];
+          let tab: Tab | null = null;
+          while (!tab) {
+            candidates = latestTabsRef.current.filter(
+              (item) => item.filePath && samePath(item.filePath, autoOpenPath),
+            );
+            tab = [...candidates].reverse().find((item) => item.fileId) ?? null;
+            if (tab || Date.now() >= closeDeadline) break;
+            await new Promise((resolve) => setTimeout(resolve, 150));
+          }
+          // 找不到也要留痕：静默跳过会把「钩子失效」伪装成「什么都没发生」，
+          // 这正是本 session 反复踩到的同一类坑。
+          debugLog("api.autoOpen", "closing", {
+            autoOpenPath,
+            candidateCount: candidates.length,
+            tabId: tab?.id ?? null,
+            hasFileId: Boolean(tab?.fileId),
+            tabCount: latestTabsRef.current.length,
+          });
+          if (!tab || !tab.fileId) return;
+          // 「关闭前」的人口普查：此刻文档已开、标签仍在 —— 这就是「不关」那一档的形态。
+          // worker 的 `pending` 数与画布/DOM 的普查是**唯一**能把「残留归谁」分开的证据：
+          // 它们都落在 WebContent 的 footprint 里，进程读数完全是同一个数。
+          debugLog("api.autoOpen", "census · 关闭前", runtimeCensus());
+          for (const action of closeActions) {
+            if (action === "file") {
+              // 只销毁 pdf.js 文档与 Rust 句柄；**标签仍在界面上**，viewer 与画布都没卸载。
+              await api.closeFile(tab.fileId);
+            } else if (action === "tab") {
+              // 真实关标签：移除标签 → 卸载 viewer → 排队释放文件句柄。
+              closeTabRef.current?.(tab.id);
+              // 等 React 提交：标签要先从 state 里消失，viewer 才会卸载。500ms 够 ——
+              // `releasePdfFileAfterTabCommit` 的 `setTimeout(…, 0)` 与 passive effect
+              // 都在这个量级（这个钩子此处的 300ms 让位实测已够）。
+              await new Promise((resolve) => setTimeout(resolve, 500));
+            } else if (action === "workers") {
+              // 强制终结全部仍在世的 worker，并回读台账 —— `pending` 归零才算数。
+              debugLog("api.autoOpen", "terminateWorkers", terminateWorkers());
+            } else {
+              // 拼错的动作名必须留痕：静默忽略会让整组对照失去意义，
+              // 症状是「跑了两组、读数一样」，最容易被读成结论。
+              debugLog("api.autoOpen", "unknown close action", { action, closeActions });
+            }
+          }
+          debugLog("api.autoOpen", "census · 关闭后", { actions: closeActions, ...runtimeCensus() });
+        };
+        // 顺序打开（不是并发）：并发会让两份文档的瞬时峰值叠在一起，
+        // 分不清「单份峰值」与「累积驻留」。
+        // ⚠️ 实测（探针复核）：多路径时**第二份之后 `openPdfByPath` 不再 resolve**
+        // —— `rust open_pdf success` 已打出，但循环里的 `opened` 不打印，于是循环卡在
+        // 第二份，**后面的关闭阶段永远到不了**。探针的「打开后立即关闭」组就是这样
+        // 静默失效的：读数与「不关」组几乎一致才暴露出来。
+        // 结论：**关闭组必须用单路径**（`PROBE_TAURI_DOCS=1`）；要量「多份驻留」就
+        // 用多路径、但别同时配 `R0NIX_AUTO_CLOSE_MS`。内因未查明（PDF 分支本身很短：
+        // `api.openFile` → `upsertDocumentFromOpen` → `return true`）。
+        for (const autoOpenPath of paths) {
+          await openPdfByPath(autoOpenPath, undefined, { silentBusy: true });
+          debugLog("api.autoOpen", "opened", { autoOpenPath });
+          // 循环模式：每打开一份立刻关掉，重复 N 轮（N = 文档数）。这是区分
+          // **泄漏**（每轮线性累加）与**水位**（首次冲高后复用、不再增长）的唯一
+          // 可靠对照 —— 跨会话比较受系统内存压力影响，能差出几百 MB。
+          if (cycleMode) await closeAutoOpenedPath(autoOpenPath);
+        }
+        // 常规第二阶段：把刚打开的文档再关掉。
+        // 打开只能量出「驻留多少」，关闭才能分开「按设计驻留（关掉就还）」与「泄漏」。
+        // ⚠️ 延迟用的是页面定时器，而 WKWebView 对**不可见窗口**会节流 `setTimeout`：
+        // 窗口被遮挡时长定时器实测根本不触发（钩子静默失效）。所以 `0` 是有用的取值 ——
+        // 「打开后立即关闭」，不走定时器，适合用 A/B 两次运行比较释放量。
+        //
+        // 循环模式下这一阶段**必须跳过**：那时每份文档在打开的当下就被关掉了，标签
+        // 早已不在，再来一轮只会打出 `hasFileId: false` 的「找不到」日志，把
+        // 「已经关完了」伪装成「关不掉」。
+        if (cycleMode) {
+          debugLog("api.autoOpen", "cycles done", { cycles: paths.length, closeActions });
+        } else if (closeAfterMs !== null) {
+          // 让出一拍再开始找标签（`closeAfterMs` 为 0 时也要让）。
+          await new Promise((resolve) => setTimeout(resolve, Math.max(closeAfterMs, 300)));
+          debugLog("api.autoOpen", "closing start", { count: paths.length });
+          for (const autoOpenPath of paths) {
+            await closeAutoOpenedPath(autoOpenPath);
+          }
+        }
+      } catch (error) {
+        // 自动化钩子不该影响正常启动（不向 UI 抛错），但**必须留下诊断**：
+        // 这条链路一旦失败，症状就是「什么都没发生」，静默等于把失败伪装成正常。
+        debugError("api.autoOpen", "failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })();
+    // 故意不返回 cleanup：`openPdfByPath` 是 useCallback，identity 随渲染变化 →
+    // 本 effect 的 cleanup 会在**第一份文档刚打开后**就执行。若把 cleanup 里的
+    // `cancelled` 当早退条件，多文档循环会在第一份之后被判定为「已取消」，第二份
+    // 永远不开始 —— 症状是日志停在第一份 `opened`，且没有任何报错。单文档场景下
+    // 这个坑不可见，只有多文档才暴露。一次性钩子用 ref 守卫足够。
+  }, [openPdfByPath]);
+
   useEffect(() => {
     if (!isTauriRuntime()) return;
 
@@ -1180,7 +1437,7 @@ export default function App() {
         if (event.payload.type !== "drop") return;
         const droppedPath = event.payload.paths.find(isSupportedDropPath);
         if (!droppedPath) {
-          updateBusyMessage("只支持拖入 PDF 或 Markdown 文件。", 2400);
+          updateBusyMessage(toasts.dropUnsupportedFile, 2400);
           return;
         }
         void openPdfByPath(droppedPath);
@@ -1200,7 +1457,7 @@ export default function App() {
       disposed = true;
       unlisten?.();
     };
-  }, [openPdfByPath, updateBusyMessage]);
+  }, [openPdfByPath, toasts, updateBusyMessage]);
 
   const updatePdfTabViewState = useCallback((tabId: string, viewState: NonNullable<Tab["pdfViewState"]>) => {
     setTabs((prev) =>
@@ -1261,11 +1518,11 @@ export default function App() {
     async (rawUrl: string, options?: { preferPdf?: boolean }) => {
       const normalized = normalizeUrl(rawUrl);
       if (!normalized) {
-        updateBusyMessage("No resource URL to download", 1800);
+        updateBusyMessage(toasts.noDownloadUrl, 1800);
         return null;
       }
       try {
-        updateBusyMessage(options?.preferPdf ? "Downloading PDF..." : "Downloading resource...");
+        updateBusyMessage(options?.preferPdf ? toasts.downloadingPdf : toasts.downloadingResource);
 
         let bytes: ArrayBuffer | null = null;
         let finalUrl = normalized;
@@ -1298,32 +1555,32 @@ export default function App() {
           anchor.click();
           anchor.remove();
           window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
-          updateBusyMessage(`Downloaded ${fileName}`, 2200);
+          updateBusyMessage(toasts.downloaded({ fileName }), 2200);
           return { savePath: "", fileName, finalUrl };
         }
         const savePath = await save({
           defaultPath: withDefaultDir(fileName, settings.defaultSaveDir),
           filters: [
             {
-              name: options?.preferPdf ? "PDF" : "Downloaded file",
+              name: options?.preferPdf ? "PDF" : uiText.downloadFilterName,
               extensions: options?.preferPdf ? ["pdf"] : [],
             },
           ],
         });
         if (!savePath || typeof savePath !== "string") {
-          updateBusyMessage("Download cancelled", 1500);
+          updateBusyMessage(toasts.downloadCancelled, 1500);
           return null;
         }
         await writeNativeBinaryFile(savePath, new Uint8Array(bytes));
-        updateBusyMessage(`Saved ${fileName}`, 2200);
+        updateBusyMessage(toasts.saved({ fileName }), 2200);
         return { savePath, fileName, finalUrl };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        updateBusyMessage(`Download failed: ${message}`, 3600);
+        updateBusyMessage(toasts.downloadFailed({ message }), 3600);
         return null;
       }
     },
-    [settings.defaultSaveDir, settings.proxyEnabled, settings.proxyUrl, updateBusyMessage]
+    [settings.defaultSaveDir, settings.proxyEnabled, settings.proxyUrl, toasts, uiText.downloadFilterName, updateBusyMessage]
   );
 
   const openPdfFromUrl = useCallback(
@@ -1351,7 +1608,7 @@ export default function App() {
           }
 
           if (isTauriRuntime()) {
-            updateBusyMessage("正在下载 PDF...");
+            updateBusyMessage(toasts.downloadingPdfFromUrl);
             const downloaded = await downloadPdfToNativeTemp(
               normalized,
               settings.proxyEnabled && settings.proxyUrl.trim() ? settings.proxyUrl : undefined,
@@ -1463,8 +1720,30 @@ export default function App() {
         }
       }
     },
-    [openPdfByPath, settings.proxyEnabled, settings.proxyUrl, updateBusyMessage, upsertDocumentFromOpen]
+    [openPdfByPath, settings.language, settings.proxyEnabled, settings.proxyUrl, toasts, updateBusyMessage, upsertDocumentFromOpen]
   );
+
+  /**
+   * 把文件复制进工作区，返回工作区内的稳定路径；失败则退回原路径。
+   *
+   * 「资料库」和「最近打开」的区别就在这一步：只存原路径的话，原件被移动、
+   * 改名或从下载目录清掉之后，列表里的条目就全成了死链。复制一份进来，
+   * 用户换机器、备份工作区就能带走整个库。
+   *
+   * 复制失败**不阻断导入** —— 用户此刻真正想看到的是这份文档能打开，
+   * 而不是一条「存储空间不足」。原路径仍然可用，只是它不属于资料库。
+   */
+  const localizeDocumentPath = useCallback(async (path: string) => {
+    if (!isTauriRuntime()) return path;
+    const managed = await importDocumentIntoWorkspace(path).catch((error) => {
+      debugWarn("workspace.import", "failed to copy the document into the workspace", {
+        path,
+        error,
+      });
+      return null;
+    });
+    return managed || path;
+  }, []);
 
   const openPdfDialog = useCallback(async () => {
     if (isTauriRuntime()) {
@@ -1472,10 +1751,13 @@ export default function App() {
         const selected = await open({
           multiple: false,
           filters: [{ name: "Documents", extensions: ["pdf", "md", "markdown"] }],
-          title: "Open Document",
+          title: uiText.openDocumentDialog,
         });
         if (typeof selected === "string") {
-          await openPdfByPath(selected);
+          // 先复制进工作区再打开：打开原路径会让资料库里留下一个指向
+          // 下载目录 / 外接硬盘的死链，文件一被清理就打不开了。
+          const managed = await localizeDocumentPath(selected);
+          await openPdfByPath(managed);
           return;
         }
       } catch {
@@ -1508,7 +1790,7 @@ export default function App() {
 
       const ext = pickedFile.name.split(".").pop()?.toLowerCase();
       const markdown = ext === "md" || ext === "markdown";
-      updateBusyMessage(markdown ? "Opening Markdown..." : "Opening PDF...");
+      updateBusyMessage(markdown ? toasts.openingMarkdown : toasts.openingPdf);
       const opened = await api.uploadFile(pickedFile);
       try {
         let markdownText = "";
@@ -1537,27 +1819,34 @@ export default function App() {
     } catch (error) {
       updateBusyMessage(describeFileOpenError(error, settings.language), 3600);
     }
-  }, [openPdfByPath, settings.language, updateBusyMessage, upsertDocumentFromOpen]);
+  }, [localizeDocumentPath, openPdfByPath, settings.language, toasts, updateBusyMessage, upsertDocumentFromOpen]);
 
   const importFolder = useCallback(async () => {
     try {
-      const selected = await open({ directory: true, multiple: false, title: "Import Folder" });
+      const selected = await open({ directory: true, multiple: false, title: uiText.importFolderDialog });
       if (typeof selected !== "string" || !selected.trim()) return;
-      updateBusyMessage("Scanning folder...");
+      updateBusyMessage(toasts.scanningFolder);
       const pdfPaths = await collectNativeImportablePaths(selected);
       if (pdfPaths.length === 0) {
-        updateBusyMessage("No documents found in folder", 2200);
+        updateBusyMessage(toasts.noDocumentsInFolder, 2200);
         return;
       }
+      // 逐份复制而非一次性全量：几百份 PDF 同时复制会长时间占住主线程等待，
+      // 而且中途失败时无法告诉用户「哪几份进来了」。串行 + 单份失败可跳过。
+      let imported = 0;
       for (const path of pdfPaths) {
-        upsertDocumentStub(path);
+        const managedPath = await localizeDocumentPath(path);
+        upsertDocumentStub(managedPath);
+        if (managedPath !== path) imported += 1;
       }
-      updateBusyMessage(`Imported ${pdfPaths.length} document${pdfPaths.length > 1 ? "s" : ""}`, 2400);
+      const total = pdfPaths.length;
+      const copied = imported === total ? "" : ` (${imported}/${total} copied locally)`;
+      updateBusyMessage(toasts.importedDocuments({ count: total, copied }), 2800);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      updateBusyMessage(`Import failed: ${message}`, 3200);
+      updateBusyMessage(toasts.importFailed({ message }), 3200);
     }
-  }, [updateBusyMessage, upsertDocumentStub]);
+  }, [localizeDocumentPath, toasts, uiText.importFolderDialog, updateBusyMessage, upsertDocumentStub]);
 
   const handleCloseTab = useCallback(
     (id: string) => {
@@ -1599,10 +1888,16 @@ export default function App() {
     [activeTabId, closeWebTabNative, releasePdfFileAfterTabCommit, tabs, uiText.unsavedMarkdownClose]
   );
 
+  // dev-only：把真实的关标签实现镜像进 ref，供 `R0NIX_AUTO_CLOSE_ACTIONS=tab` 使用。
+  // 放在定义之后，避开 TDZ；identity 变化时同步刷新。
+  useEffect(() => {
+    closeTabRef.current = handleCloseTab;
+  }, [handleCloseTab]);
+
   const handleOpenExternal = useCallback(async (url: string) => {
     const normalized = normalizeHttpUrl(url);
     if (!normalized) {
-      updateBusyMessage("Only HTTP(S) links can be opened externally", 2600);
+      updateBusyMessage(toasts.externalLinkHttpOnly, 2600);
       return;
     }
     try {
@@ -1614,9 +1909,9 @@ export default function App() {
       window.open(normalized, "_blank", "noopener,noreferrer");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      updateBusyMessage(`Failed to open external link: ${message}`, 3200);
+      updateBusyMessage(toasts.externalLinkFailed({ message }), 3200);
     }
-  }, [updateBusyMessage]);
+  }, [toasts, updateBusyMessage]);
 
   const focusLibrarySearch = useCallback(() => {
     setActiveTabId(DEFAULT_ACTIVE_TAB_ID);
@@ -1668,9 +1963,9 @@ export default function App() {
           doc.id === docId ? { ...doc, trashedAt: doc.trashedAt || new Date().toISOString() } : doc
         )
       );
-      updateBusyMessage("Moved to Trash", 1800);
+      updateBusyMessage(toasts.movedToTrash, 1800);
     },
-    [updateBusyMessage]
+    [toasts, updateBusyMessage]
   );
 
   const handleDeleteDocuments = useCallback(
@@ -1715,12 +2010,9 @@ export default function App() {
         }
       }
 
-      updateBusyMessage(
-        targets.length === 1 ? "Document permanently deleted" : `Permanently deleted ${targets.length} documents`,
-        2200
-      );
+      updateBusyMessage(toasts.permanentlyDeleted({ count: targets.length }), 2200);
     },
-    [documents, releasePdfFileAfterTabCommit, removeDocumentTabs, updateBusyMessage]
+    [documents, releasePdfFileAfterTabCommit, removeDocumentTabs, toasts, updateBusyMessage]
   );
 
   const handleDeleteDocument = useCallback(
@@ -1735,12 +2027,9 @@ export default function App() {
       const idSet = new Set(docIds);
       if (idSet.size === 0) return;
       setDocuments((prev) => prev.map((doc) => (idSet.has(doc.id) ? { ...doc, trashedAt: undefined } : doc)));
-      updateBusyMessage(
-        idSet.size === 1 ? "Restored from Trash" : `Restored ${idSet.size} documents from Trash`,
-        2000
-      );
+      updateBusyMessage(toasts.restoredFromTrash({ count: idSet.size }), 2000);
     },
-    [updateBusyMessage]
+    [toasts, updateBusyMessage]
   );
 
   const handleBatchDeleteDocuments = useCallback(
@@ -1753,7 +2042,7 @@ export default function App() {
   const handleExportList = useCallback(
     async (docs: ReaderDocument[], title: string) => {
       if (docs.length === 0) {
-        updateBusyMessage("Nothing to export", 1600);
+        updateBusyMessage(toasts.nothingToExport, 1600);
         return;
       }
 
@@ -1768,7 +2057,7 @@ export default function App() {
           ],
         });
         if (typeof selectedPath !== "string" || !selectedPath.trim()) {
-          updateBusyMessage("Export cancelled", 1500);
+          updateBusyMessage(toasts.exportCancelled, 1500);
           return;
         }
 
@@ -1778,13 +2067,13 @@ export default function App() {
           : documentsToCsv(docs);
 
         await writeNativeTextFile(finalPath, content);
-        updateBusyMessage(`Exported ${docs.length} item${docs.length === 1 ? "" : "s"}`, 2200);
+        updateBusyMessage(toasts.exported({ count: docs.length }), 2200);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        updateBusyMessage(`Export failed: ${message}`, 3200);
+        updateBusyMessage(toasts.exportFailed({ message }), 3200);
       }
     },
-    [settings.defaultSaveDir, updateBusyMessage]
+    [settings.defaultSaveDir, toasts, updateBusyMessage]
   );
 
   const handleOpenWebsite = useCallback(
@@ -1805,9 +2094,7 @@ export default function App() {
       const normalized = normalizeUrl(nextUrl);
       const nextTitle =
         normalized === START_PAGE_URL
-          ? settings.language === "zh-CN"
-            ? "起始页"
-            : "Start Page"
+          ? uiText.startPageTab
           : normalized
             ? shortHostSafe(normalized)
             : uiText.webNewTab;
@@ -1819,7 +2106,7 @@ export default function App() {
         )
       );
     },
-    [settings.language, uiText.webNewTab]
+    [uiText.startPageTab, uiText.webNewTab]
   );
 
   const addNote = useCallback((path: string, page: number, content: string, kind: ReaderNote["kind"] = "note", reference?: string, source?: Pick<ReaderNote, "blockId" | "sourceRect">) => {
@@ -2022,6 +2309,15 @@ export default function App() {
             setTabContextMenu(null);
           }}
           onTabClose={handleCloseTab}
+          onTabsReorder={(nextTabs) => {
+            // 排序只改顺序，不改内容。用函数式更新而不是闭包里的 `tabs`：
+            // 拖拽过程中 onReorder 会连续触发，闭包值可能是上一帧的。
+            //
+            // ⚠️ 不用 latestTabsRef 兜底：Reorder 的 onReorder 回传的是**完整新数组**
+            //（库的 Group.mjs 里 `newOrder.map(getValue).filter(...)`），不是局部增量。
+            // 局部增量会让 tabs 丢掉未出现在增量里的标签。
+            setTabs(nextTabs);
+          }}
           onToggleSidebar={() => setIsSidebarOpen((value) => !value)}
           onNewTab={() => openWebTab(undefined, { forceNew: true })}
           isSidebarOpen={isSidebarOpen}
@@ -2080,7 +2376,7 @@ export default function App() {
           <Suspense
             fallback={
               <div className="absolute inset-0 flex items-center justify-center text-xs text-content-muted">
-                {settings.language === "zh-CN" ? "正在加载视图..." : "Loading view..."}
+                {toasts.loadingView}
               </div>
             }
           >
@@ -2150,6 +2446,9 @@ export default function App() {
                 language={settings.language}
                 companionEnabled={settings.companionEnabled}
                 companionIntensity={settings.companionIntensity}
+                companionAutoAnnotate={settings.companionAutoAnnotate}
+                companionMarkerIntensity={settings.companionAutoAnnotateIntensity}
+                companionQuickAsk={settings.companionQuickAsk}
                 notes={activeNotes}
                 annotations={activeAnnotations}
                 onOpenFileDialog={() => {
@@ -2245,18 +2544,10 @@ export default function App() {
                   try {
                     await saveMarkdownFile(activeTab.filePath, activeTab.fileId, next);
                     markMarkdownTabSaved(activeTab.filePath, next);
-                    updateBusyMessage(
-                      settings.language === "zh-CN" ? "Markdown 已保存" : "Markdown saved",
-                      1800
-                    );
+                    updateBusyMessage(toasts.markdownSaved, 1800);
                   } catch (error) {
                     const message = error instanceof Error ? error.message : String(error);
-                    updateBusyMessage(
-                      settings.language === "zh-CN"
-                        ? `Markdown 保存失败: ${message}`
-                        : `Markdown save failed: ${message}`,
-                      3200
-                    );
+                    updateBusyMessage(toasts.markdownSaveFailed({ message }), 3200);
                     throw error;
                   }
                 }}

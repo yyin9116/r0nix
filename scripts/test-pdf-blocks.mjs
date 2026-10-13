@@ -75,6 +75,39 @@ const indentedContinuation = [
 const indentedBlocks = buildDomPdfReadingBlocks(new TestLayer(indentedContinuation, rect(0, 0, 540, 700)), 9);
 assert.equal(indentedBlocks.length, 1, "wrapped lines with a modest indent must stay in one paragraph");
 
+// ── 块必须带出**真实行盒**（block.lines）────────────────────────────────────
+// 2026-10-08 事故：DOM 块此前不带 lines，伴读写入侧拿不到行 → 存块级 rect；
+// 渲染侧同样拿不到行 → 编「y=块顶、h=常数」的细带，与文字行中心差 1px，
+// 波浪线区间命中全灭（数据在、屏幕上没有）。行分组在这里明明已经算过，
+// 丢掉它等于让下游全部瞎猜。
+assert.ok(
+  indentedBlocks[0].lines && indentedBlocks[0].lines.length === 3,
+  `a wrapped paragraph must expose one line entry per visual line, got ${indentedBlocks[0].lines?.length}`,
+);
+assert.deepEqual(
+  indentedBlocks[0].lines.map((line) => line.text),
+  ["A paragraph starts here", "and continues on the next line", "with the final sentence."],
+  "line text must follow the visual line order",
+);
+const firstLineRect = indentedBlocks[0].lines[0].rect;
+assert.ok(
+  firstLineRect && firstLineRect.height > 0 && firstLineRect.height < indentedBlocks[0].rect.height,
+  "each line rect must be a real line box, not a copy of the block rect",
+);
+assert.ok(
+  Math.abs(firstLineRect.y - indentedBlocks[0].rect.y) < 0.05,
+  "the first line box must sit at the top of the block, so line-center hit tests align with the text layer",
+);
+// 双栏：每个块各自的 lines 只含本栏的行。
+assert.ok(
+  twoColumnBlocks.every((block) => block.lines.length === 3),
+  "column blocks must expose their own three lines",
+);
+assert.ok(
+  twoColumnBlocks.every((block) => block.lines.every((line) => Number.isFinite(line.rect.y) && line.rect.height > 0)),
+  "line rects must be finite normalized boxes",
+);
+
 const separatedParagraphs = [
   new TestSpan("First paragraph.", rect(24, 30, 180, 12)),
   new TestSpan("Second paragraph.", rect(24, 72, 180, 12)),

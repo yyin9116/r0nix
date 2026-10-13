@@ -57,11 +57,93 @@ export async function listPdfs(): Promise<string[]> {
   return await invoke<string[]>('list_pdfs');
 }
 
+/**
+ * 读取已打开 PDF 的原始字节，交给 pdf.js。
+ *
+ * Rust 侧以 **base64 字符串**返回，不是 `Vec<u8>`。这不是风格差异：
+ * Tauri 2 在 macOS 上的 IPC 只能传文本，`Vec<u8>` 会被 `serde_json` 展开成
+ * **十进制数字数组**（3.55 字符/字节），再被 `JSON.parse` 成一个 JS 数字数组
+ * （V8 实测量到 7.2 字节/元素）—— 端到端 ≈ 19–23 倍文件大小的瞬时峰值，
+ * 是「打开 200 页 PDF 内存 2G+」的主因。逐条源码依据见
+ * `src-tauri/src/tauri_commands.rs` 里 `read_opened_pdf_bytes` 的头部注释。
+ *
+ * 兼容分支：测试桩与旧构建可能仍回传 `Uint8Array` / `number[]`，
+ * 一并接住，免得只因为载荷形态变化就在打开文档这一步炸掉。
+ */
 export async function readOpenedPdfBytes(fileId: string, requestId?: string): Promise<Uint8Array> {
   const raw = await invoke<unknown>('read_opened_pdf_bytes', { fileId, requestId });
+  if (typeof raw === 'string') return base64ToBytes(raw);
   if (raw instanceof Uint8Array) return raw;
   if (Array.isArray(raw)) return Uint8Array.from(raw as number[]);
   throw new Error('read_opened_pdf_bytes returned invalid payload');
+}
+
+/**
+ * dev-only：读取「启动即自动打开」的路径，供内存/性能量测自动化使用。
+ *
+ * 真实 Tauri 的 IPC 路径（base64 编码 + 传输 + JS 解码）只能在真实应用里量 ——
+ * 浏览器探针走 `file.arrayBuffer()`，完全绕过它。而 macOS 上驱动真实应用的 UI
+ * 需要辅助功能权限（本机未授权），所以由环境变量 `R0NIX_AUTO_OPEN` 注入路径。
+ *
+ * Rust 侧 `dev_auto_open_path` 在 **release 构建恒返回 null**，
+ * 且调用点有 `import.meta.env.DEV` 守卫 → 生产环境这段永远不会执行。
+ */
+export async function readDevAutoOpenPath(): Promise<string | null> {
+  const value = await invoke<string | null>('dev_auto_open_path');
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+/**
+ * dev-only：自动打开的文档在多少毫秒后关闭（`R0NIX_AUTO_CLOSE_MS`）。
+ *
+ * 与 `readDevAutoOpenPath` 配套 —— 打开只能量「驻留多少」，关闭才能量
+ * 「是否真的释放」，而后者是「驻留 vs 泄漏」的分水岭。**`0` = 打开后立即关闭**，
+ * 用于绕开 WKWebView 对不可见窗口的 `setTimeout` 节流（长定时器实测不触发）。
+ * release 恒为 null。
+ */
+export async function readDevAutoCloseAfterMs(): Promise<number | null> {
+  const value = await invoke<number | null>('dev_auto_close_after_ms');
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+/**
+ * dev-only：自动打开的文档在多少毫秒后执行**哪些关闭动作**（`R0NIX_AUTO_CLOSE_ACTIONS`）。
+ *
+ * 为什么需要「动作」而不是一个开关：`closeFile` 与「用户按了标签上的关闭按钮」
+ * 是**两件不同的事** —— 前者只销毁 pdf.js 文档与 Rust 句柄，标签仍留在界面上、
+ * viewer 与它的画布都没卸载；后者走 `handleCloseTab`，会移除标签、卸载 viewer，
+ * 再排队释放文件。把两者混为一谈，会把「没卸载」误读成「卸载了也不释放」。
+ *
+ * 取值是逗号分隔的动作名，按顺序执行：
+ *  · `file`    —— `api.closeFile(fileId)`（只销毁文档，**不**移除标签）
+ *  · `tab`     —— `handleCloseTab(tabId)`（真实关标签：卸载 viewer + 释放文件）
+ *  · `workers` —— 强制 `terminate()` 全部仍在世的 Web Worker
+ *
+ * 不设该变量时**默认 `["file"]`**，与历史行为一致。未知动作名会被原样返回，
+ * 由调用点记成警告 —— 静默忽略拼错的动作名会让整组对照失去意义。
+ * release 构建恒为 null。
+ */
+export async function readDevAutoCloseActions(): Promise<string[] | null> {
+  const value = await invoke<string | null>('dev_auto_close_actions');
+  if (typeof value !== 'string') return null;
+  const actions = value
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+  return actions.length > 0 ? actions : null;
+}
+
+/**
+ * dev-only：**循环模式**（`R0NIX_AUTO_CYCLE=1`）—— 每打开一份就立刻关掉它，
+ * 于「文档数」等于「轮数」，在同一进程内重复「打开 → 关闭」。
+ *
+ * 为什么需要它：单轮只量得到「关掉后还剩多少」；要判断剩下的是**泄漏**（每轮线性
+ * 累加）还是**水位**（首次冲高后复用、不再增长），必须在同一进程内比第 1 轮与第 N 轮。
+ * 跨会话比较受系统内存压力影响，能差出几百 MB。
+ * release 构建恒为 false。
+ */
+export async function readDevAutoCycle(): Promise<boolean> {
+  return (await invoke<boolean>('dev_auto_cycle')) === true;
 }
 
 export async function requestTiles(

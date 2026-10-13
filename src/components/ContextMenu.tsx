@@ -40,6 +40,7 @@ export function ContextMenu({ x, y, isOpen, title, actions, onClose }: ContextMe
 
   return (
     <div
+      data-reader-context-menu=""
       style={{ top: adjustedY, left: adjustedX }}
       className="fixed z-[120] w-64 bg-surface-panel/95 backdrop-blur-xl border border-border-subtle/80 shadow-2xl rounded-xl overflow-hidden font-sans text-[13px] text-content-primary"
       onMouseDown={(event) => event.stopPropagation()}

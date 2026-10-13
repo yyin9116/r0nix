@@ -1,6 +1,6 @@
 [package]
 name = "r0nix"
-version = "0.0.6"
+version = "0.0.7"
 description = "PDF Reader with Swiss Design"
 authors = ["you"]
 edition = "2021"
@@ -25,10 +25,18 @@ thiserror = "1.0"
 # Lazy static for global state
 once_cell = "1.19"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+# API Key 持久化：存 macOS 钥匙串而非 localStorage（密钥绝不落 WebView 存储）
+keyring = "2.3"
 
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# `probe_pdf_memory_footprint` 用它读 `getrusage(RUSAGE_SELF).ru_maxrss`：
+# 本环境禁止 `ps`，进程 RSS 只能在进程内自己量。只被 `--ignored` 的内存探针使用，
+# 不进产物。
+[dev-dependencies]
+libc = "0.2"
 
 [package.metadata.cargo-llvm-cov]
 output-path = "target/llvm-cov"

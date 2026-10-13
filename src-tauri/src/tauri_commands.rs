@@ -3,6 +3,7 @@ use crate::py_render::{
     extract_pdf_image_json, get_page_count as get_pdf_page_count, get_page_images_json,
     get_pdf_reading_blocks_json, render_page_png, render_page_svg, render_page_svg_crop,
 };
+use crate::workspace;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use image::codecs::png::PngEncoder;
 use image::{imageops, ColorType, ImageEncoder, RgbaImage};
@@ -916,11 +917,48 @@ pub async fn list_pdfs() -> Result<Vec<String>, String> {
     Ok(manager.list_documents())
 }
 
+/// 把已打开的 PDF 原件读给前端（pdf.js 需要一份原始字节）。
+///
+/// ## 为什么返回 base64 字符串，而不是 `Vec<u8>`
+///
+/// 因为 **Tauri 在 macOS 上的 IPC 是纯文本通道，而且没有任何「二进制旁路」**。
+/// 这不是猜测，是 tauri-2.10.2 源码里的三条事实（2026-10-09 核对）：
+///
+/// 1. `impl<T: Serialize> IpcResponse for T` → `serde_json::to_string(&self)`
+///    （`tauri/src/ipc/mod.rs:181-187`）。`Vec<u8>` 是 `Serialize`，于是**每一个字节
+///    变成一串十进制数字**（平均 3.55 字符/字节，实测 20MiB → 71MiB 文本）。
+/// 2. 即使改用「二进制」的 `InvokeResponseBody::Raw(Vec<u8>)` 也**没有用**：
+///    `tauri/src/ipc/protocol.rs:390-403` 对 `cfg!(target_os = "macos" | "ios")`
+///    显式跳过 channel 快速通路，仍然走 `format_result` → `serde_json::to_string(&Vec<u8>)`。
+/// 3. `format_callback.rs` 的 `serialize_js_with` 对这个 `[` 开头的长度 >10KiB 的
+///    载荷会再套一层 `Serialized`（转义成单引号 JS 字面量），于是**同一份文本在
+///    Rust 侧同时存在 3 份**（serde_json 字符串 / 转义副本 / `format!` 拼接副本）。
+///
+/// 端到端放大倍数（2026-10-09 实测，20MiB 样本）：Rust 侧 ≈ 11.6x，
+/// WebView 侧 `JSON.parse` 出的 JS 数字数组就是 **7.2x**（V8 每个元素 8 字节），
+/// 合计 **≈ 19–23x 文件大小、全是瞬时峰值**。一份 90MiB 的扫描版 PDF 光过桥就要 2GB ——
+/// 这正是「打开 200 页 PDF 内存 2G+」的主因（画布那条路只占 20–40MB 驻留，
+/// 见 `readerCore.ts` 的暂存画布注释）。
+///
+/// base64 把每一份副本从 3.55x 降到 **1.34x**，且不再产生 JS 数字数组，
+/// 同样的文件过桥峰值从 ≈19N 掉到 ≈7N。它**不是**「pdf.js/PyMuPDF 该给我而没给」的东西 ——
+/// 它发生在两者之外，是宿主 IPC 通道的固有限制。
+///
+/// ## 真正的终局（尚未实施，需要一次真机验证）
+///
+/// pdf.js 自己就有流式读取：`getDocument({ url, rangeChunkSize })` 会走
+/// `Range: bytes=` 分块拉取，内存与**分块**成正比而不是与文件成正比。
+/// 但它**只在 `http(s)` scheme 下启用**：`pdf.mjs:13327` 的
+/// `this.isHttp = /^https?:/i.test(source.url)` 与 `:13257` 的
+/// `if (disableRange || !isHttp) return` 会把 `asset://`、以及任何自建 scheme
+/// 直接踢回「整文件下载」。所以想吃到 pdf.js 的成熟流式路径，前端拿到的 URL
+/// 必须是 http(s) —— 也就是要在 Tauri 里起一个仅监听 127.0.0.1 + 随机端口 + 令牌的
+/// 本机 HTTP 服务（带 `Accept-Ranges`/`Content-Range`）。见 README/评审记录。
 #[tauri::command]
 pub async fn read_opened_pdf_bytes(
     file_id: String,
     request_id: Option<String>,
-) -> Result<Vec<u8>, String> {
+) -> Result<String, String> {
     let path = resolve_file_path(&file_id).await?;
     let request_id = request_id.filter(|value| !value.trim().is_empty());
     let cancel_flag = Arc::new(AtomicBool::new(false));
@@ -983,7 +1021,96 @@ pub async fn read_opened_pdf_bytes(
     if let Some(request_id) = request_id.as_deref() {
         PDF_BYTE_READ_CANCEL_FLAGS.lock().await.remove(request_id);
     }
-    result
+    // base64（STANDARD，带 padding）而不是 Vec<u8>：理由见本函数头部第 1–3 条。
+    // 这一步的额外峰值是 4/3N，换掉的是「3 份 3.55N 文本 + 7.2N 数字数组」。
+    result.map(|bytes| BASE64.encode(&bytes))
+}
+
+/// dev-only 的自动化钩子：让应用**启动即打开指定文件**。
+///
+/// 为什么需要它：内存足迹的量测必须在**真实 Tauri 进程**里做 —— 浏览器（Playwright）
+/// 走的是 `file.arrayBuffer()`，完全绕过 Tauri IPC，量不到那段峰值；而 macOS 上驱动
+/// 真实应用的 UI 需要辅助功能权限（本机 `UI elements enabled = false`，AppleScript
+/// 点不动「打开文件」对话框）。所以留一个只读环境变量的入口。
+///
+/// 路径来自环境变量 `R0NIX_AUTO_OPEN`。**release 构建恒返回 `None`**
+/// （`cfg!(debug_assertions)` 是编译期常量），因此生产行为与没有这个命令完全一致。
+#[tauri::command]
+pub fn dev_auto_open_path() -> Option<String> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var("R0NIX_AUTO_OPEN")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// dev-only 的自动化钩子：自动打开的文档在 N 毫秒后**关闭**。
+///
+/// 为什么需要它：`dev_auto_open_path` 只能量到「打开后驻留多少」，量不到
+/// **「关标签后是否真的释放」** —— 而这正是「2GB 不下降」到底属于
+/// 「按设计驻留、关掉就还」还是「泄漏」的分水岭。macOS 上驱动真实应用 UI 需要
+/// 辅助功能权限（本机未授权），点不动标签上的关闭按钮，所以同样留一个环境变量入口。
+///
+/// 值来自 `R0NIX_AUTO_CLOSE_MS`，解析失败视为「不关」。**`0` 有明确含义：打开后立即关闭**
+/// —— 完全不用定时器，因为 WKWebView 对**不可见窗口**会节流 `setTimeout`，长定时器实测
+/// 根本不触发（窗口被遮挡时整个钩子静默失效）。要量「关闭是否释放」，用 `0` 做 A/B 对比
+/// 比等待一个延迟更可靠。
+/// **release 构建恒返回 `None`**，生产行为与没有这个命令完全一致。
+#[tauri::command]
+pub fn dev_auto_close_after_ms() -> Option<u64> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var("R0NIX_AUTO_CLOSE_MS")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+/// dev-only 的自动化钩子：关闭动作**清单**（`R0NIX_AUTO_CLOSE_ACTIONS`）。
+///
+/// 为什么不能只有一个「关闭」：`closeFile` 与「用户按了标签上的关闭按钮」是两件事。
+/// 前者只销毁 pdf.js 文档与 Rust 句柄，**标签仍留在界面上、viewer 与画布都没卸载**；
+/// 后者走 `handleCloseTab`，移除标签、卸载 viewer，再排队释放文件。上一轮把前者
+/// 当成「关标签」，读数因而无法指向真正的持有者。
+///
+/// 取值逗号分隔，按顺序执行：`file` / `tab` / `workers`。未知动作原样返回，由前端
+/// 记成警告 —— 静默忽略拼错的动作名会让整组对照失去意义。
+/// **release 构建恒返回 `None`**，生产行为与没有这个命令完全一致。
+#[tauri::command]
+pub fn dev_auto_close_actions() -> Option<String> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    std::env::var("R0NIX_AUTO_CLOSE_ACTIONS")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// dev-only 的自动化钩子：**循环模式**（`R0NIX_AUTO_CYCLE=1`）。
+///
+/// 语义：不「全部打开后再关」，而是**每打开一份就立刻关掉它**，于是「文档数」等于
+/// 「轮数」—— 在**同一个进程**里重复「打开 → 关闭」若干轮。
+///
+/// 为什么这个对照不可替代：单轮只能得到「关掉后还剩多少」。要判断剩下的是
+/// **泄漏**（每轮线性累加）还是**水位**（首次冲高后复用、不再增长），必须在同一进程内
+/// 比较第 1 轮与第 N 轮的稳态 —— 跨会话比较受系统内存压力影响，能差出几百 MB
+/// （探针自己的注释就写了「内存绝对值不可跨会话比」）。
+///
+/// **release 构建恒返回 `false`**，生产行为与没有这个命令完全一致。
+#[tauri::command]
+pub fn dev_auto_cycle() -> bool {
+    if !cfg!(debug_assertions) {
+        return false;
+    }
+    std::env::var("R0NIX_AUTO_CYCLE")
+        .map(|value| {
+            let value = value.trim().to_ascii_lowercase();
+            value == "1" || value == "true" || value == "yes"
+        })
+        .unwrap_or(false)
 }
 
 #[tauri::command]
@@ -1967,6 +2094,347 @@ pub async fn close_webview_tab(app: AppHandle, tab_id: String) -> Result<(), Str
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// 本地工作区 —— 设置、密钥、资料库、伴读历史的唯一落盘根目录
+//
+// 见 workspace.rs 的布局说明。原来的做法把设置散在 localStorage、伴读历史散在
+// app_data_dir 顶层，密钥在系统钥匙串 —— 三处各有一套生命周期。现在统一收口。
+// ---------------------------------------------------------------------------
+
+fn app_data_dir_or_err(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map_err(|err| format!("app data dir unavailable: {err}"))
+}
+
+fn workspace_layout_or_err(app: &AppHandle) -> Result<workspace::WorkspaceLayout, String> {
+    let app_data = app_data_dir_or_err(app)?;
+    workspace::ensure_layout(&app_data)
+}
+
+/// 设置面板的「本地存储」面板数据源：路径 + 占用。
+#[tauri::command]
+pub async fn workspace_info(app: AppHandle) -> Result<workspace::WorkspaceInfo, String> {
+    Ok(workspace::into_info(&workspace_layout_or_err(&app)?))
+}
+
+/// 切换工作区根目录。旧内容会先整份复制到新位置，复制成功后才改指针。
+#[tauri::command]
+pub async fn set_workspace_root(
+    app: AppHandle,
+    path: String,
+) -> Result<workspace::WorkspaceInfo, String> {
+    let target = ensure_non_empty_path(&path)?;
+    let app_data = app_data_dir_or_err(&app)?;
+    let layout = tokio::task::spawn_blocking(move || workspace::relocate(&app_data, &target))
+        .await
+        .map_err(|err| format!("workspace relocate task failed: {err}"))??;
+    Ok(workspace::into_info(&layout))
+}
+
+/// 清空派生缓存。文档 / 设置 / 密钥 / 历史都不在这里面。
+#[tauri::command]
+pub async fn clear_workspace_cache(app: AppHandle) -> Result<usize, String> {
+    let layout = workspace_layout_or_err(&app)?;
+    tokio::task::spawn_blocking(move || workspace::clear_cache(&layout))
+        .await
+        .map_err(|err| format!("workspace cache task failed: {err}"))?
+}
+
+/// 把 PDF 复制一份进工作区 documents/，返回工作区内的稳定路径。
+///
+/// 资料库导入走这里：原件被移动、改名或删除之后，副本仍可打开 ——
+/// 这是「本地资料库」和「最近打开列表」的根本区别。
+#[tauri::command]
+pub async fn import_document_to_workspace(
+    app: AppHandle,
+    source_path: String,
+) -> Result<String, String> {
+    let source = ensure_non_empty_path(&source_path)?;
+    if !ensure_importable_extension(&source) {
+        return Err("only pdf, md, or markdown files can be imported".to_string());
+    }
+    let layout = workspace_layout_or_err(&app)?;
+    tokio::task::spawn_blocking(move || {
+        let file_name = workspace::managed_document_file_name(&source);
+        let target = workspace::resolve_in(&layout.documents_dir, &file_name)?;
+        if target == source {
+            return Ok(target.to_string_lossy().into_owned());
+        }
+        std::fs::copy(&source, &target).map_err(|err| {
+            format!(
+                "failed to copy {} into the workspace: {err}",
+                source.display()
+            )
+        })?;
+        Ok(target.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|err| format!("workspace import task failed: {err}"))?
+}
+
+/// 删除工作区内的文档副本。路径必须真的落在 documents/ 下。
+#[tauri::command]
+pub async fn remove_workspace_document(app: AppHandle, path: String) -> Result<(), String> {
+    let requested = ensure_non_empty_path(&path)?;
+    let layout = workspace_layout_or_err(&app)?;
+    let documents_dir = layout.documents_dir.clone();
+    let resolved = workspace::resolve_in(&documents_dir, &requested.to_string_lossy())?;
+    // resolve_in 只做词法校验；再比一次父目录，挡住符号链接与拼接技巧。
+    if resolved.parent() != Some(documents_dir.as_path()) {
+        return Err("refusing to remove a path outside the workspace documents folder".to_string());
+    }
+    match tokio::fs::remove_file(&resolved).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("failed to remove workspace document: {error}")),
+    }
+}
+
+/// 在访达 / 资源管理器里打开工作区目录，让用户能自己看到、备份、搬走这些文件。
+#[tauri::command]
+pub async fn reveal_workspace(app: AppHandle) -> Result<String, String> {
+    let layout = workspace_layout_or_err(&app)?;
+    let root = layout.root.to_string_lossy().into_owned();
+    open_directory_in_file_manager(&root).await?;
+    Ok(root)
+}
+
+async fn open_directory_in_file_manager(path: &str) -> Result<(), String> {
+    let target = path.to_string();
+    tokio::task::spawn_blocking(move || {
+        #[cfg(target_os = "macos")]
+        let mut command = {
+            let mut command = std::process::Command::new("open");
+            command.arg(&target);
+            command
+        };
+        #[cfg(target_os = "windows")]
+        let mut command = {
+            let mut command = std::process::Command::new("explorer");
+            command.arg(&target);
+            command
+        };
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let mut command = {
+            let mut command = std::process::Command::new("xdg-open");
+            command.arg(&target);
+            command
+        };
+        command
+            .spawn()
+            .map(|_| ())
+            .map_err(|err| format!("failed to open the workspace folder: {err}"))
+    })
+    .await
+    .map_err(|err| format!("reveal workspace task failed: {err}"))?
+}
+
+// ---------------------------------------------------------------------------
+// 秘密存储（工作区内 0600 文件）
+//
+// ⚠️ 为什么不再用 macOS 钥匙串：钥匙串对**每次读取**都弹授权框要密码，
+// 而 API Key 每次启动都要读 —— 于是变成「开软件先输密码」。用户明确要求
+// 改为本地文件存储，密钥随工作区一起被备份、搬走、清除。
+//
+// 安全边界没有丢，只是换了位置：
+// - 工作区目录 0700、secrets.json 0600（仅当前系统账号可读）；
+// - 永不进 localStorage（契约由 userSettings.ts + test-settings-security.mjs 钉住）；
+// - 写盘走临时文件 + rename，避免半截文件把密钥写坏成不可恢复的乱码。
+//
+// 钥匙串只保留一条**用户主动点击**才走的迁移通道（migrate_keychain_secret）。
+// ---------------------------------------------------------------------------
+
+const SECRET_SERVICE: &str = "r0nix";
+pub const SECRET_ACCOUNT_API_KEY: &str = "ai-api-key";
+const SECRETS_FILE: &str = "secrets.json";
+
+#[derive(Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct SecretsFile {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    secrets: HashMap<String, String>,
+}
+
+fn read_secrets_file(path: &Path) -> Result<SecretsFile, String> {
+    match std::fs::read_to_string(path) {
+        Ok(raw) => serde_json::from_str(&raw)
+            // 损坏的密钥文件不能静默当成「没存」：那样用户会以为密钥丢了并覆盖它。
+            // 返回 None 表示「无法解析」，由调用方决定是报错还是走迁移。
+            .map_err(|err| format!("secrets file is corrupted: {err}")),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(SecretsFile {
+            version: 1,
+            secrets: HashMap::new(),
+        }),
+        Err(err) => Err(format!("failed to read secrets file: {err}")),
+    }
+}
+
+fn write_secrets_file(path: &Path, file: &SecretsFile) -> Result<(), String> {
+    let serialized = serde_json::to_string_pretty(file)
+        .map_err(|err| format!("failed to serialize secrets: {err}"))?;
+    // 临时文件 + rename：rename 在同一文件系统内是原子的，
+    // 因此磁盘上不会出现「写了一半的密钥文件」。
+    let temp = path.with_extension("json.tmp");
+    std::fs::write(&temp, serialized).map_err(|err| format!("failed to write secrets: {err}"))?;
+    workspace::restrict_secret_permissions_public(&temp);
+    std::fs::rename(&temp, path).map_err(|err| format!("failed to commit secrets: {err}"))?;
+    workspace::restrict_secret_permissions_public(path);
+    Ok(())
+}
+
+fn keyring_entry(account: &str) -> Result<keyring::Entry, String> {
+    keyring::Entry::new(SECRET_SERVICE, account)
+        .map_err(|err| format!("keychain unavailable: {err}"))
+}
+
+/// 写入秘密；空串语义为「删除」。
+#[tauri::command]
+pub async fn store_secret(app: AppHandle, account: String, secret: String) -> Result<(), String> {
+    let layout = workspace_layout_or_err(&app)?;
+    tokio::task::spawn_blocking(move || {
+        if account.trim().is_empty() {
+            return Err("secret account is empty".to_string());
+        }
+        let path = workspace::resolve_in(&layout.config_dir, SECRETS_FILE)?;
+        let mut file = read_secrets_file(&path)?;
+        file.version = 1;
+        if secret.is_empty() {
+            // 删除不存在的条目不算错（幂等）。
+            file.secrets.remove(&account);
+        } else {
+            file.secrets.insert(account, secret);
+        }
+        write_secrets_file(&path, &file)
+    })
+    .await
+    .map_err(|err| format!("store secret task failed: {err}"))?
+}
+
+/// 读取秘密；不存在返回 `null`（而非错误），前端据此区分「没存过」与「存失败」。
+#[tauri::command]
+pub async fn load_secret(app: AppHandle, account: String) -> Result<Option<String>, String> {
+    let layout = workspace_layout_or_err(&app)?;
+    tokio::task::spawn_blocking(move || {
+        let path = workspace::resolve_in(&layout.config_dir, SECRETS_FILE)?;
+        let file = read_secrets_file(&path)?;
+        Ok(file.secrets.get(&account).cloned())
+    })
+    .await
+    .map_err(|err| format!("load secret task failed: {err}"))?
+}
+
+/// 一次性把钥匙串里的旧密钥搬进工作区文件，然后删掉钥匙串条目。
+///
+/// 只在用户**主动点击**设置里的迁移按钮时调用 —— 启动流程绝不碰钥匙串，
+/// 否则又会回到「每次启动都要输密码」。
+#[tauri::command]
+pub async fn migrate_keychain_secret(app: AppHandle) -> Result<Option<String>, String> {
+    let layout = workspace_layout_or_err(&app)?;
+    tokio::task::spawn_blocking(move || {
+        let path = workspace::resolve_in(&layout.config_dir, SECRETS_FILE)?;
+        let mut file = read_secrets_file(&path)?;
+        // 工作区已有密钥就什么都不做：文件是现在的权威，钥匙串只是历史。
+        if let Some(existing) = file.secrets.get(SECRET_ACCOUNT_API_KEY) {
+            if !existing.is_empty() {
+                let _ = keyring_entry(SECRET_ACCOUNT_API_KEY)?.delete_password();
+                return Ok(Some(existing.clone()));
+            }
+        }
+        let entry = keyring_entry(SECRET_ACCOUNT_API_KEY)?;
+        let legacy = match entry.get_password() {
+            Ok(value) => value,
+            Err(keyring::Error::NoEntry) => return Ok(None),
+            Err(err) => {
+                return Err(format!(
+                    "macOS refused to release the keychain entry (that prompt asking for your password is exactly what we are removing): {err}"
+                ))
+            }
+        };
+        if legacy.is_empty() {
+            return Ok(None);
+        }
+        file.version = 1;
+        file.secrets
+            .insert(SECRET_ACCOUNT_API_KEY.to_string(), legacy.clone());
+        write_secrets_file(&path, &file)?;
+        // 搬完就删钥匙串条目：留着它等于留一个每次读取都要授权的旧入口。
+        let _ = entry.delete_password();
+        Ok(Some(legacy))
+    })
+    .await
+    .map_err(|err| format!("keychain migration task failed: {err}"))?
+}
+
+/// 应用数据目录（macOS: ~/Library/Application Support/<id>）。
+/// 工作区之外的宿主目录，读者用它来展示「工作区在哪」。
+#[tauri::command]
+pub async fn app_data_dir(app: AppHandle) -> Result<String, String> {
+    Ok(app_data_dir_or_err(&app)?.to_string_lossy().into_owned())
+}
+
+// ---------------------------------------------------------------------------
+// 工作区 JSON 存储 —— 设置、伴读历史、资料库索引的落盘通道。
+//
+// 为什么不用通用 read_text_file / write_text_file：
+// - read_text_file 只放行 md/markdown，读 .json 会被扩展名白名单直接拒绝；
+// - write_text_file 面向「用户选的文件路径」，父目录得自己保证存在，
+//   而 `assist-history/` 首次写入时尚不存在；放开它等于扩大任意写覆盖面。
+// 因此这里提供专用通道，并把路径强制限制在工作区之内：
+// 前端只传相对 key，拼路径、越界校验、目录创建都在这里做。
+//
+// ⚠️ 旧实现自己写了一套校验，并且**拒绝任何含路径分隔符的 key**；
+// 而 assistHistory 传的恰恰是 `assist-history/<id>.json`。于是每次写入都被拒，
+// 历史静默退回 localStorage，重启即丢。校验逻辑已迁到 workspace::resolve_in，
+// 那里逐段放行合法的多级 key。
+// ---------------------------------------------------------------------------
+
+/// 读工作区 JSON。文件不存在返回 `Ok(None)`（区别于「读失败」），
+/// 调用方据此实现「首次打开该 PDF 还没有历史」。
+#[tauri::command]
+pub async fn read_app_data_json(app: AppHandle, key: String) -> Result<Option<String>, String> {
+    let layout = workspace_layout_or_err(&app)?;
+    let path = workspace::resolve_in(&layout.root, &key)?;
+    tokio::task::spawn_blocking(move || {
+        // NotFound 是正常状态（该文档尚无历史），不当作错误。
+        match std::fs::read_to_string(&path) {
+            Ok(content) => Ok(Some(content)),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(format!("failed to read workspace json: {err}")),
+        }
+    })
+    .await
+    .map_err(|err| format!("workspace read task failed: {err}"))?
+}
+
+/// 写工作区 JSON，父目录不存在时自动创建。
+#[tauri::command]
+pub async fn write_app_data_json(
+    app: AppHandle,
+    key: String,
+    content: String,
+) -> Result<(), String> {
+    let layout = workspace_layout_or_err(&app)?;
+    let path = workspace::resolve_in(&layout.root, &key)?;
+    tokio::task::spawn_blocking(move || {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|err| format!("failed to create workspace dir: {err}"))?;
+        }
+        // 临时文件 + rename：断电 / 崩溃时不会留下半截 JSON，
+        // 下次启动读到的是上一个完整版本，而不是一个解析失败的残片。
+        let temp = path.with_extension("json.tmp");
+        std::fs::write(&temp, content)
+            .map_err(|err| format!("failed to write workspace json: {err}"))?;
+        std::fs::rename(&temp, &path)
+            .map_err(|err| format!("failed to commit workspace json: {err}"))
+    })
+    .await
+    .map_err(|err| format!("workspace write task failed: {err}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1974,9 +2442,13 @@ mod tests {
         ensure_allowed_binary_write_path, ensure_allowed_text_write_path,
         ensure_importable_extension, ensure_markdown_extension, ensure_pdf_extension,
         is_managed_import_temp_path, is_managed_web_pdf_path, is_pdf_url, is_request_canceled,
-        normalize_download_url, parse_webview_url, sanitize_file_name, wait_for_request_canceled,
-        CANCELED_REQUESTS, PDF_BYTE_READ_CANCEL_FLAGS, PDF_PAGE_COUNT_CANCEL_FLAGS,
+        normalize_download_url, parse_webview_url, read_secrets_file, sanitize_file_name,
+        wait_for_request_canceled, write_secrets_file, CANCELED_REQUESTS,
+        PDF_BYTE_READ_CANCEL_FLAGS, PDF_PAGE_COUNT_CANCEL_FLAGS, SECRETS_FILE,
+        SECRET_ACCOUNT_API_KEY,
     };
+    use crate::workspace;
+    use std::collections::HashMap;
     use std::{
         path::Path,
         sync::{
@@ -1985,6 +2457,165 @@ mod tests {
         },
         time::Duration,
     };
+
+    /// 密钥文件往返：这条链路是「不输密码」方案的全部依赖，必须端到端验过。
+    #[test]
+    fn secrets_file_round_trips_without_touching_the_keychain() {
+        let dir = std::env::temp_dir().join("r0nix-secrets-roundtrip");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join(SECRETS_FILE);
+
+        // 首次写入
+        let mut secrets = HashMap::new();
+        secrets.insert(
+            SECRET_ACCOUNT_API_KEY.to_string(),
+            "sk-local-file".to_string(),
+        );
+        write_secrets_file(
+            &path,
+            &super::SecretsFile {
+                version: 1,
+                secrets,
+            },
+        )
+        .expect("writing secrets must succeed");
+
+        let read = read_secrets_file(&path).expect("reading secrets must succeed");
+        assert_eq!(
+            read.secrets.get(SECRET_ACCOUNT_API_KEY).map(String::as_str),
+            Some("sk-local-file"),
+            "the API key must survive a round trip through the local file"
+        );
+
+        // 文件权限必须是 0600：工作区里可能有密钥，它不能对同机其他账号可读。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path)
+                .expect("stat secrets")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "secrets.json must be 0600, got {mode:o}");
+        }
+
+        // 不留临时文件残骸
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "the commit temp file must be renamed away, not left behind"
+        );
+
+        // 删除语义：空串等价于移除，且删除不存在的键必须幂等
+        let mut current = read_secrets_file(&path).expect("re-read");
+        current.secrets.remove(SECRET_ACCOUNT_API_KEY);
+        write_secrets_file(&path, &current).expect("clearing must succeed");
+        let cleared = read_secrets_file(&path).expect("re-read after clear");
+        assert!(
+            !cleared.secrets.contains_key(SECRET_ACCOUNT_API_KEY),
+            "an empty secret must remove the entry"
+        );
+        write_secrets_file(&path, &cleared).expect("clearing again must be idempotent");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 损坏的密钥文件必须**报错**而不是当成「没存过」。
+    ///
+    /// 后者会让用户以为密钥丢了、重新输入，然后覆盖掉本来还能救回来的内容。
+    #[test]
+    fn a_corrupted_secrets_file_is_reported_instead_of_looking_empty() {
+        let dir = std::env::temp_dir().join("r0nix-secrets-corrupt");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let path = dir.join(SECRETS_FILE);
+        std::fs::write(&path, "{ truncated").expect("write corrupt file");
+
+        let result = read_secrets_file(&path);
+        assert!(
+            result.is_err(),
+            "a corrupt secrets file must not read as empty"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 缺文件必须读成「空集合」，这是首次启动的正常状态。
+    #[test]
+    fn a_missing_secrets_file_reads_as_empty() {
+        let dir = std::env::temp_dir().join("r0nix-secrets-missing");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let read =
+            read_secrets_file(&dir.join(SECRETS_FILE)).expect("missing file is not an error");
+        assert!(read.secrets.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 工作区 JSON 通道必须真的接受多级 key（伴读历史一直是多级的）。
+    #[test]
+    fn workspace_json_keys_accept_nested_history_paths() {
+        let root = std::env::temp_dir().join("r0nix-workspace-json-keys");
+        let path = workspace::resolve_in(&root, "assist-history/doc-42.json")
+            .expect("a nested key must resolve");
+        assert_eq!(path, root.join("assist-history").join("doc-42.json"));
+        // 越界仍然要挡住
+        assert!(workspace::resolve_in(&root, "config/../../escape.json").is_err());
+    }
+
+    /// 切换工作区必须先复制再改指针，失败时旧数据仍在。
+    #[test]
+    fn relocating_the_workspace_copies_before_switching() {
+        let app_data = std::env::temp_dir().join("r0nix-workspace-relocate-src");
+        let target = std::env::temp_dir().join("r0nix-workspace-relocate-dst");
+        let _ = std::fs::remove_dir_all(&app_data);
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::create_dir_all(&app_data).expect("create app data");
+
+        let layout = workspace::ensure_layout(&app_data).expect("layout");
+        std::fs::write(layout.config_dir.join("settings.json"), "{\"probe\":true}")
+            .expect("seed a file");
+
+        let moved = workspace::relocate(&app_data, &target).expect("relocate");
+        assert_eq!(moved.root, target);
+        assert!(
+            moved.is_custom,
+            "a relocated workspace must be flagged custom"
+        );
+        assert!(
+            target.join("config").join("settings.json").exists(),
+            "existing data must be copied to the new location"
+        );
+        assert!(
+            layout.root.join("config").join("settings.json").exists(),
+            "the old copy must be left intact as a fallback"
+        );
+
+        let _ = std::fs::remove_dir_all(&app_data);
+        let _ = std::fs::remove_dir_all(&target);
+    }
+
+    /// 目标非空时必须拒绝：把工作区塞进一个装满别的文件的目录会毁掉那些文件。
+    #[test]
+    fn relocating_into_a_non_empty_folder_is_refused() {
+        let app_data = std::env::temp_dir().join("r0nix-workspace-relocate-busy-src");
+        let target = std::env::temp_dir().join("r0nix-workspace-relocate-busy-dst");
+        let _ = std::fs::remove_dir_all(&app_data);
+        let _ = std::fs::remove_dir_all(&target);
+        std::fs::create_dir_all(&app_data).expect("create app data");
+        std::fs::create_dir_all(&target).expect("create target");
+        std::fs::write(target.join("someone-elses-file.txt"), "keep me").expect("seed");
+
+        let result = workspace::relocate(&app_data, &target);
+        assert!(result.is_err(), "a non-empty target must be refused");
+        assert!(
+            target.join("someone-elses-file.txt").exists(),
+            "existing files in the target must be left alone"
+        );
+
+        let _ = std::fs::remove_dir_all(&app_data);
+        let _ = std::fs::remove_dir_all(&target);
+    }
 
     #[tokio::test]
     async fn llm_cancellation_is_visible_to_the_request_waiter() {
@@ -2399,6 +3030,146 @@ mod tests {
         assert_eq!(pages.first(), Some(&1));
         assert_eq!(pages.last(), Some(&1000));
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    #[ignore = "manual memory probe: prints peak RSS across the PyMuPDF stages"]
+    fn probe_pdf_memory_footprint() {
+        use crate::pdf_manager::PdfManager;
+        use crate::py_render::{
+            ensure_test_pdf_with_text_pages, get_pdf_reading_blocks_json, render_page_png,
+        };
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        /// `ru_maxrss` 在 macOS 是**字节**、在 Linux 是 KiB —— 单位别混。
+        fn report(label: &str) {
+            let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+            let bytes = if cfg!(target_os = "macos") {
+                usage.ru_maxrss as f64
+            } else {
+                usage.ru_maxrss as f64 * 1024.0
+            };
+            println!(
+                "[mem-probe] {label:<30} peak RSS = {:>8.1} MiB",
+                bytes / 1048576.0
+            );
+        }
+
+        let path = std::env::temp_dir().join(format!(
+            "r0nix-mem-probe-{}.pdf",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system clock")
+                .as_nanos()
+        ));
+        ensure_test_pdf_with_text_pages(&path, 200).expect("create memory fixture");
+        let size = std::fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        println!(
+            "[mem-probe] fixture: {} pages, {:.2} MiB",
+            200,
+            size as f64 / 1048576.0
+        );
+        report("1. 夹具落盘后（基线）");
+
+        let path_str = path.to_str().expect("fixture path");
+        let mut manager = PdfManager::new();
+        manager
+            .open_document("mem-probe".to_string(), path_str)
+            .expect("open fixture document");
+        report("2. open_document 之后");
+
+        // 模拟真实打开流程：阅读块按 24 页分块抽完（与 extracts_a_1000_page 同一路径）。
+        for start_page in (1..=200usize).step_by(24) {
+            let end_page = (start_page + 23).min(200);
+            let raw = get_pdf_reading_blocks_json(path_str, Some(start_page), Some(end_page), None)
+                .expect("extract reading blocks");
+            std::hint::black_box(raw.len());
+        }
+        report("3. 200 页 reading blocks 抽完");
+
+        let png = render_page_png(path_str, 1, 2.0).expect("render page 1");
+        std::hint::black_box(png.len());
+        report("4. render_page_png 一页后");
+
+        manager
+            .close_document("mem-probe")
+            .expect("close fixture document");
+        report("5. close_document 之后");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 量「整份 PDF 过 base64 IPC」这条路的**峰值 RSS**。
+    ///
+    /// 为什么必须单独量：真实 Tauri 打开文档时，Rust 主进程与 WebView 是**两个不同进程**，
+    /// 峰值 RSS 可以直接相加。而 Playwright 探针走的是浏览器 `file.arrayBuffer()` 路径，
+    /// **完全绕过这条 IPC 通路**，所以它量不到这一段 —— 只能在这里补齐。
+    ///
+    /// 复现的是 `read_opened_pdf_bytes` 的实际峰值链（该函数本体是 async tauri command，
+    /// 起不来完整 app 上下文，所以按同样顺序展开）：
+    /// `Vec<u8>`(N) → `BASE64.encode`(1.33N) → `serde_json::to_string`(≈1.35N)。
+    ///
+    /// 夹具由 `scripts/probe-pdf-memory-footprint.mjs` 生成（每页独立位图的扫描件）。
+    /// 用法：
+    /// ```text
+    /// node scripts/probe-pdf-memory-footprint.mjs 200          # 产出 /tmp/scanned-200.pdf
+    /// R0NIX_MEM_FIXTURE=/tmp/scanned-200.pdf \
+    ///   cargo test --lib probe_pdf_base64_ipc_peak -- --ignored --nocapture
+    /// ```
+    /// 注意 `ru_maxrss` 是**峰值且单调不减**，所以「drop 之后」不会回落 —— 这不是泄漏，
+    /// 只看各步之间的**增量**。
+    #[test]
+    #[ignore = "manual memory probe: peak RSS of the base64 IPC byte path"]
+    fn probe_pdf_base64_ipc_peak() {
+        use base64::Engine as _;
+
+        fn report(label: &str) {
+            let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+            unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+            let bytes = if cfg!(target_os = "macos") {
+                usage.ru_maxrss as f64
+            } else {
+                usage.ru_maxrss as f64 * 1024.0
+            };
+            println!(
+                "[ipc-probe] {label:<32} peak RSS = {:>8.1} MiB",
+                bytes / 1048576.0
+            );
+        }
+
+        let path = std::env::var("R0NIX_MEM_FIXTURE")
+            .unwrap_or_else(|_| "/tmp/scanned-200.pdf".to_string());
+        let size = match std::fs::metadata(&path) {
+            Ok(meta) => meta.len(),
+            Err(_) => {
+                println!(
+                    "[ipc-probe] 跳过：找不到夹具 {path}\n\
+                     [ipc-probe] 先跑 node scripts/probe-pdf-memory-footprint.mjs 200 生成它"
+                );
+                return;
+            }
+        };
+        println!(
+            "[ipc-probe] 夹具 {path} = {:.1} MiB",
+            size as f64 / 1048576.0
+        );
+        report("0. 基线");
+
+        let bytes = std::fs::read(&path).expect("read fixture");
+        report("1. 读入 Vec<u8>（N）");
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        report("2. base64 编码（+1.33N）");
+
+        let json = serde_json::to_string(&encoded).expect("serialize base64 payload");
+        report("3. JSON 序列化（+1.35N）");
+
+        std::hint::black_box((&bytes, &json));
+        drop(json);
+        drop(encoded);
+        drop(bytes);
+        report("4. 全部 drop 后（峰值不回落）");
     }
 
     #[test]

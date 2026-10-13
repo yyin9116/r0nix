@@ -5,8 +5,9 @@
 .pdf-page-block {
   position: relative;
   box-shadow: none;
-  /* 纸张色：PDF 页面本体，深色下也是白纸（见 tokens.css --surface-paper） */
-  background: var(--surface-paper);
+  /* 承载底色：canvas 铺满之前用户看到的就是它。深色下它是 --surface-paper 的
+     反色（--surface-paper-veil），与「反色后的 canvas」同色 —— 翻页时不闪白。 */
+  background: var(--surface-paper-veil);
   overflow-anchor: none;
   content-visibility: auto;
   contain-intrinsic-size: 842px 595px;
@@ -16,9 +17,54 @@
   border-bottom: 1px solid color-mix(in srgb, var(--reader-accent) 10%, transparent);
 }
 
+/*
+ * 深色下的「纸面反色」只作用在 canvas 上。
+ *
+ * ⚠️ 迁移前这条规则挂在 .pdf-page-block 上（Tailwind 的 dark:invert +
+ * dark:hue-rotate-180），把**整棵子树**一起反了 —— 文本层、标注层、伴读锚点
+ * 全在内。后果（2026-10-08 实测）：
+ *   · 波浪线用 color-mix(var(--reader-accent) 72%, transparent)。深色下 accent
+ *     是近白（zinc → #f4f4f5），被 invert 之后变成近黑，压在被反色的深色纸面上
+ *     —— 彻底看不见。锚点、划词底色、选区高亮同理。
+ *   · 任何后续加在这一层上的 UI 覆盖层都会继承这个 bug，且看不出原因。
+ *
+ * 所以滤镜下沉到 canvas：PDF 内容是位图，反色它是「阅读偏好」；而文本层与
+ * 标注层是**用主题色画上去的 UI**，它们必须原样保留主题色，不能被二次反色。
+ *
+ * hue-rotate(180) 保留：invert 会把页面里的彩色图（论文图表）反成负片色，
+ * 补一次 180° hue 旋转把它们转回可辨认的色相。这是 pdf.js 官方 dark mode 的做法。
+ */
+:root:where([data-theme="dark"], .dark) .pdf-page-canvas {
+  filter: invert(1) hue-rotate(180deg);
+}
+
 .pdf-page-block--focused {
   border-color: color-mix(in srgb, var(--reader-accent) 42%, transparent);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--reader-accent) 10%, transparent), 0 0 16px color-mix(in srgb, var(--reader-accent) 14%, transparent);
+}
+
+/*
+ * ★ 页流内的 UI chrome 必须**抵消**缩放预览。
+ *
+ * 预览缩放是写在**页流**上的（`flow.style.transform = scale(v)`，见 applyZoomPreview），
+ * 于是页流里的每一个后代都被放大 —— 包括挂在批注栏里的伴读批注卡。
+ * 页面、canvas、文本层、标注层**都应该**被放大（它们用页面归一化坐标锚定），
+ * 但批注卡是 UI：宽度是 264px 常量、字号是 CSS px，跟着放大就变成
+ * 「缩放时侧栏卡片被抻大、松手又弹回」——读者报告的「伴读气泡随右键缩放放大」。
+ *
+ * 为什么用 CSS 变量而不是逐节点写 transform：逆比例每帧都变，
+ * 逐节点写就是每帧 N 次样式写入 + N 次失效；变量只需在**写预览 transform 的同一处**
+ * 写一次，剩下的交给 CSS（合成器线程即可完成）。这也让「谁写 transform 谁写逆变换」
+ * 成为一条位置上的约束，不需要在别处记得补一笔。
+ *
+ * `--reader-zoom-preview-inv` 的缺省值是 1：没有预览缩放时（绝大多数帧）
+ * 这条规则是恒等变换，不会给常态渲染增加任何成本。
+ *
+ * 新加「页流内的固定尺寸 UI」时，请一并挂上这个类 —— 否则它会被缩放预览抻大，
+ * 而且只在缩放的那一瞬间表现得出来，很难在静态截图里发现。
+ */
+.pdf-flow-ui-chrome {
+  transform: scale(var(--reader-zoom-preview-inv, 1));
 }
 
 .pdf-page-focus-glow {
@@ -205,16 +251,129 @@
   cursor: pointer;
 }
 
-.pdf-assist-block-highlight {
-  position: absolute;
-  z-index: 4;
+/*
+ * ── text layer 内的标注（TextLayerMarker）────────────────────────────────
+ *
+ * 结构照抄 pdf.js 官方 pdf_viewer.css 的 `.textLayer .highlight` 规则族
+ * （v5.4，约 944–992 行），因为切分算法也是照抄官方 `TextHighlighter._renderMatches`
+ * —— 两者必须成对使用，改一边就要改另一边。
+ *
+ * 其中**最关键的一条是 `.appended { position: initial }`**：
+ * 上面的 `.textLayer span` 给所有 span 都加了 `position: absolute`，
+ * 而 marker 切出来的片段是**行内流式 span**（跟着文字基线走）。
+ * 不把它拉回 static，片段会脱离行盒飞到页面左上角 —— 表现为「划线全跑到一处」。
+ * 这也是为什么此前用覆盖 div 的方案看起来"稳"：它压根没碰这条规则。
+ */
+
+.textLayer .r0nix-marker {
+  --marker-bg-color: color-mix(in srgb, var(--reader-accent) 18%, transparent);
+  --marker-line-color: var(--reader-accent);
+}
+
+/* 段落激活底色：读者视线所在的那一段。 */
+.textLayer .r0nix-marker-active {
+  margin: -1px;
+  padding: 1px;
+  background-color: var(--marker-bg-color);
+  border-radius: 4px;
+}
+
+/*
+ * AI 波浪线。刻意不用 `background-image` 画波形 —— 那只能整块平铺，
+ * 贴不到每个片段自己的基线上。这里的 `text-decoration` 由浏览器按行盒计算，
+ * 多行、跨栏、每行长度不同都能各画各的。
+ *
+ * `underline-offset` 用 em 而不是 px：字号随缩放变，字号变时波浪线与文字的间距必须等比。
+ */
+/*
+ * ⚠️ 选择器必须用 `[class*="..."]` 而不是精确类名。
+ * 每条 AI 标注的 class 是 `r0nix-marker-wavy-{annotation.id}`（带 id 后缀），
+ * 这样多条标记才能各自独立增删。用 `.r0nix-marker-wavy` 精确匹配会**一条都选不中** ——
+ * 表现为「标注在数据里、锚点在屏幕上，但纸面上没有线」，且不报任何错。
+ */
+.textLayer [class*="r0nix-marker-wavy"] {
+  text-decoration-line: underline;
+  text-decoration-style: wavy;
+  text-decoration-color: color-mix(in srgb, var(--reader-accent) 72%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.16em;
+  text-decoration-skip-ink: none;
+  /* 波浪线是唯一的「消歧手段」（见 types.ts 的 ReaderAnnotationKind 注释），
+     所以它不能被任何 hover 效果盖掉，也不参与过渡动画。 */
+  transition: none;
+}
+
+/*
+ * 被切分出来的行内片段。缺 `position: initial` 就会飞出页面（见上方注释）。
+ * 用 `[class*=]` 同样是為了匹配带 id 后缀的波浪线 class。
+ */
+.appended:is(.textLayer .r0nix-marker-active),
+.appended:is(.textLayer [class*="r0nix-marker-wavy"]) {
+  position: initial;
+}
+
+/* 跨行接角：首片段左圆角、中段不圆、尾片段右圆角。 */
+.r0nix-marker-active.begin,
+.appended.r0nix-marker-active.begin {
+  border-radius: 4px 0 0 4px;
+}
+
+.r0nix-marker-active.end,
+.appended.r0nix-marker-active.end {
+  border-radius: 0 4px 4px 0;
+}
+
+.r0nix-marker-active.middle {
+  border-radius: 0;
+}
+
+/*
+ * 片段是行内流式内容，不能吃掉指针事件 —— 否则落在文字上的点击到不了伴读锚点，
+ * 表现为「锚点看得见、点不动」（这正是此前用覆盖 div 时
+ * `.page-text-overlay.is-assist .textLayer span { pointer-events: auto }` 的由来）。
+ * 交互统一交给上层：段落命中由 PageCanvas 在宿主上判定。
+ */
+.textLayer .r0nix-marker,
+.textLayer .r0nix-marker * {
   pointer-events: none;
-  border-radius: 5px;
-  background: var(--accent-soft);
-  box-shadow:
-    inset 0 0 0 1px color-mix(in srgb, var(--accent) 26%, transparent),
-    0 0 0 2px color-mix(in srgb, var(--accent) 8%, transparent);
-  transition: opacity var(--duration-fast) ease, transform var(--duration-fast) ease;
+}
+
+/*
+ * 手工/历史 wavy 标注的波形图（兜底路径，当前 wavy 是 AI-only，见 readerCore.ts）。
+ *
+ * 为什么颜色要绕这一圈：波形是 SVG data URI，而 data URI 内部无法引用
+ * 外部 CSS 变量 —— 颜色是写死在字符串里的。早先的实现就这么写死并注释
+ * 「因为纸面不随主题反色所以没问题」，而深色反色下沉到 canvas 之后
+ * 那条前提不成了（深色下深红落在深底上几乎看不见，2026-10-08 实测）。
+ *
+ * 解法：把 SVG 画成纯黑，再用 `mask-image` 让它去染 `--annotation-wavy-stroke`
+ * —— mask 只取 alpha 通道，颜色由 background-color 决定，
+ * 于是这张图第一次跟上了主题。
+ *
+ * 两个容易踩的点：
+ * 1. `--manual-wavy-image` 只声明在 :root。自定义属性在**声明它的元素**上
+ *    完成 var() 代入；挂到后代上会让不同子树拿到不同实例。
+ * 2. getAnnotationOverlayStyle 的 wavy 分支内联了 background-image，
+ *    它会盖掉 mask 产出的可见形状。所以下面用 `background-image: none !important`
+ *    把它清掉，改由 background-color + mask 合成。
+ *
+ * ⚠️ 那个 SVG 里的 `stroke='black'` 是**唯一**的字面色，位置在 tokens.css
+ * 而不是这里：data URI 里的颜色无法令牌化，而按本仓规矩 tokens.css 是唯一色源。
+ * 顺带说明它**不是**守卫的漏洞 —— check-design-tokens 的 COLOR_KEYWORD 只认
+ * `[\s:,(]` 前缀，而这里是引号；把它挪进 tokens.css 是为了让「豁免面」显式，
+ * 而不是靠正则漏过来。
+ */
+[data-annotation-kind="wavy"] {
+  background-image: none !important;
+  background-color: var(--annotation-wavy-stroke);
+  -webkit-mask-image: var(--manual-wavy-image);
+  mask-image: var(--manual-wavy-image);
+  -webkit-mask-repeat: repeat-x;
+  mask-repeat: repeat-x;
+  -webkit-mask-position: left bottom;
+  mask-position: left bottom;
+  -webkit-mask-size: 12px 6px;
+  mask-size: 12px 6px;
 }
 
 .page-link-overlay {
@@ -225,24 +384,54 @@
   pointer-events: none;
 }
 
-.page-link-hit {
+/*
+ * pdf.js 的 AnnotationLayer 依赖官方 viewer.css 里的定位规则；本项目只借用
+ * AnnotationLayerBuilder、没有引那份 CSS，所以必须在这里自己补（和
+ * .page-text-overlay 补 --scale-factor 同理）。不补的话所有链接命中区都会
+ * 堆到页面左上角，表现为「链接明明存在却点不到」。
+ *
+ * 库的 DOM 结构：<div class="annotationLayer"><section style="left/top/…"><a>
+ */
+.page-link-overlay {
+  /* 与 .page-text-overlay 同一条缩放变量链：pdf.js 的 setLayerDimensions 会把
+   * .annotationLayer 的 width/height 写成 `round(down, var(--total-scale-factor) * 612px, …)`。
+   * 这条链不在本项目里声明的话，--total-scale-factor 无源 ⇒ 宽度算成 0 ⇒
+   * section 的百分比（left/top/width/height）全部落在 0 宽的盒子里 ⇒
+   * 链接命中区是 0×0，表现又变成「链接明明在，点了没反应」。
+   * --scale-factor 由 PageCanvas 按画布实测宽度注入，与文本层共用同一来源。 */
+  --scale-factor: 1;
+  --user-unit: 1;
+  --total-scale-factor: calc(var(--scale-factor) * var(--user-unit));
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
+}
+
+.page-link-overlay .annotationLayer {
   position: absolute;
+  top: 0;
+  left: 0;
+}
+
+.page-link-overlay .annotationLayer section {
+  position: absolute;
+}
+
+/* 容器整体 pointer-events: none（不挡文本选择），只有链接本身接收点击。 */
+.page-link-overlay .annotationLayer a {
+  position: absolute;
+  inset: 0;
   pointer-events: auto;
   cursor: pointer;
-  background: transparent;
-  border: none;
-  padding: 0;
-  display: block;
-  touch-action: manipulation;
   text-decoration: none;
+  font-size: 1em;
   outline: none;
 }
 
-.page-link-hit:hover {
+.page-link-overlay .annotationLayer a:hover {
   background: color-mix(in srgb, var(--accent) 15%, transparent);
 }
 
-.page-link-hit:focus-visible {
+.page-link-overlay .annotationLayer a:focus-visible {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 68%, transparent);
 }
 

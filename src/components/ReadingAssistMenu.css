@@ -14,14 +14,20 @@
 .reading-assist-toolbar {
   position: fixed;
   z-index: 130;
-  min-width: 292px;
-  border: 1px solid color-mix(in srgb, var(--border-default) 8%, transparent);
-  border-radius: 11px;
-  background: color-mix(in srgb, var(--surface-panel) 96%, transparent);
+  /* 300px 与提示卡的 300 对齐：态 B 展开后卡片是工具条的下半部分，
+     两者宽度不一致会在右侧留出一条错位的空白。 */
+  min-width: 300px;
+  border: 1px solid var(--border-subtle);
+  border-radius: 12px;
+  /* 实色而非半透明毛玻璃：这张卡浮在 PDF 纸面上，backdrop-filter 会把
+     底下的正文一起糊进卡片里，卡内文字的对比度随纸面内容变化 ——
+     同一张卡在正文上方和空白处的可读性会不一样。 */
+  background: var(--surface-panel);
   color: var(--content-primary);
-  box-shadow: var(--elev-lg);
+  /* xl 而非 lg：这是阅读器里唯一的主浮层（design稿 elevation 四档里最重那档），
+     轻一档会读成工具条而不是「模型在跟你说话」。 */
+  box-shadow: var(--elev-xl);
   animation: reading-assist-enter var(--duration-fast) ease-out;
-  backdrop-filter: blur(14px);
 }
 
 .reading-assist-toolbar.expanded {
@@ -57,67 +63,142 @@
   color: var(--reader-accent);
 }
 
-/* 伴读提示卡。三个层级刻意分明：疑问 > 预览 > 理由，
-   理由最弱 —— 它只是自报家门，不该盖过内容本身。 */
+/* 伴读提示卡（态 B）。三个层级刻意分明：疑问 > 预览 > 理由，
+   理由最弱 —— 它只是自报家门，不该盖过内容本身。
+   数值对齐 design稿 §11.8：卡宽 300 / 圆角 12 / elevation xl。 */
 .reading-assist-companion {
   border-top: 1px solid var(--border-default);
-  padding: 10px 12px 11px;
-  background: color-mix(in srgb, var(--reader-accent-soft) 22%, transparent);
+  padding: 14px 16px 12px;
+  /* 底色用 panel 而非 accent-soft：伴读卡浮在 PDF 白纸上，半透明色叠上去
+     会把纸面染灰、压低正文对比度。设计稿这一层是实白。 */
+  background: var(--surface-panel);
 }
 
 .reading-assist-companion-head {
   display: flex;
   align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  color: var(--reader-accent);
+  justify-content: space-between;
+  gap: 8px;
+  padding-bottom: 9px;
+  border-bottom: 1px solid var(--border-subtle);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--content-primary);
+}
+
+/* 图标 + 「伴读」：标题本体。图标 15px 与设计稿一致（此前是 11px，
+   在 300px 宽的卡里看起来像误排的句点）。 */
+.reading-assist-companion-id {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 「为什么出现」：右上角轻标注。全句在 title 里，视觉上只留这五个字。
+   悬停/聚焦才展开全文 —— 主动提示必须能自报理由，但不该为此占一整行。 */
+.reading-assist-companion-why {
+  flex-shrink: 0;
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--content-muted);
+  cursor: help;
+  border-bottom: 1px dotted var(--border-default);
 }
 
 .reading-assist-companion-question {
-  margin-top: 6px;
+  margin-top: 12px;
   font-size: 13px;
-  font-weight: 700;
+  /* Medium 而非 700：问句本身就是主问，再用重字重会与标题争层级。 */
+  font-weight: 500;
   line-height: 1.5;
   color: var(--content-primary);
 }
 
 .reading-assist-companion-preview {
-  margin-top: 5px;
+  margin-top: 6px;
   font-size: 12px;
   line-height: 1.65;
   color: var(--content-secondary);
+  /* 预览恒定两行。这是「先给一句判断、想深了再展开」的契约 ——
+     一旦不截断，模型话多时这张卡会长到把整段正文都顶出视野。 */
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
-.reading-assist-companion-reason {
-  margin-top: 7px;
-  font-size: 11px;
-  line-height: 1.55;
-  color: var(--content-muted);
+/* 三个动作：实心 → 浅底 → 纯文本，按打扰度递减。
+   它们必须是三种视觉重量而不只是三种颜色：读者在 0.5 秒内靠形状就能判断
+   「哪个是要我决定的、哪个是我可以无视的」。 */
+.reading-assist-companion-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
 }
 
-.reading-assist-companion-reason b {
-  margin-right: 4px;
-  font-weight: 700;
-  color: var(--content-secondary);
-}
-
-.reading-assist-companion-dismiss {
-  height: 26px;
-  margin-top: 8px;
+.reading-assist-companion-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 28px;
+  padding: 0 16px;
   border-radius: 8px;
-  padding: 0 9px;
-  border: 1px solid var(--border-default);
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* 主动作：深底白字。它要读者做决定（「要不要展开」），所以是唯一有实心底的。 */
+.reading-assist-companion-action.primary {
+  background: var(--content-primary);
+  color: var(--surface-panel);
+}
+
+.reading-assist-companion-action.primary:hover {
+  opacity: 0.88;
+}
+
+/* 次动作：浅底。它是同层的备选项，不该和主动作抢重心。 */
+.reading-assist-companion-action.secondary {
   background: var(--surface-sunken);
-  color: var(--content-secondary);
-  font-size: 11px;
-  font-weight: 650;
+  color: var(--content-primary);
+}
+
+.reading-assist-companion-action.secondary:hover {
+  background: color-mix(in srgb, var(--reader-accent-soft) 56%, transparent);
+}
+
+/* 「暂不提示」：纯文本，无底无框。
+   此前是26px 高、带描边的按钮 —— 那会让它读成「第三个按钮」，
+   而它本该是整张卡里最容易被划过去的那一个。读者拒绝一次提示的
+   成本必须足够低，否则「关掉主动功能」就会变成唯一可选项。 */
+.reading-assist-companion-dismiss {
+  margin-left: auto;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--content-muted);
+  font-size: 11.5px;
+  font-weight: 400;
 }
 
 .reading-assist-companion-dismiss:hover {
-  color: var(--content-primary);
-  border-color: color-mix(in srgb, var(--reader-accent) 34%, var(--border-default));
+  color: var(--content-secondary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* 脚注：自报边界。读者有权知道主动提示不会无限出现 ——
+   不知道上限的主动功能，哪怕每次都合理，累计起来也会让人想关掉。 */
+.reading-assist-companion-footnote {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+  font-size: 10px;
+  color: var(--content-muted);
 }
 
 .reading-assist-companion-pending {
@@ -349,6 +430,122 @@
   max-height: 132px;
   margin-top: 8px;
   position: relative;
+}
+
+/* Markdown 回答体：结构由标签承担，不用 pre-wrap（否则块间会出现双倍空行）。 */
+.reading-assist-answer-body {
+  white-space: normal;
+}
+
+.reading-assist-answer-body > :first-child {
+  margin-top: 0;
+}
+
+.reading-assist-answer-body > :last-child {
+  margin-bottom: 0;
+}
+
+.reading-assist-answer-body p {
+  margin: 6px 0;
+}
+
+.reading-assist-answer-body h3,
+.reading-assist-answer-body h4,
+.reading-assist-answer-body h5,
+.reading-assist-answer-body h6 {
+  margin: 8px 0 4px;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.reading-assist-answer-body ul,
+.reading-assist-answer-body ol {
+  margin: 6px 0;
+  padding-left: 18px;
+}
+
+.reading-assist-answer-body li {
+  margin: 2px 0;
+}
+
+.reading-assist-answer-body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  background: var(--surface-hover);
+  border: 1px solid var(--border-subtle);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
+.reading-assist-answer-body pre {
+  margin: 6px 0;
+  padding: 8px;
+  border-radius: 6px;
+  background: var(--surface-hover);
+  border: 1px solid var(--border-subtle);
+  overflow: auto;
+}
+
+.reading-assist-answer-body pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.reading-assist-answer-body a {
+  color: var(--reader-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* ── 态 C：对话区 ──────────────────────────────────────────────────────────
+   标签成对出现（你的追问 / 回答）。纯文本对话里两者视觉完全一致，
+   没有标签时读者分不清哪句是自己说的 —— 尤其在「追问」预填了初稿之后。 */
+.reading-assist-turn-label {
+  margin-bottom: 4px;
+  font-size: 10px;
+  color: var(--content-muted);
+}
+
+.reading-assist-question-block {
+  margin-bottom: 2px;
+}
+
+/* 反馈三项：纯文本、分隔点隔开，与「暂不提示」同一视觉重量 ——
+   它们是可选动作，不该在回答下方摆出三个按钮。 */
+.reading-assist-feedback {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.reading-assist-feedback-item {
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--content-muted);
+  font-size: 11px;
+}
+
+.reading-assist-feedback-item:hover {
+  color: var(--content-primary);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.reading-assist-feedback-sep {
+  color: var(--content-muted);
+  font-size: 11px;
+}
+
+/* 出处脚注：告诉读者这条回答可以沉淀回批注，且出处会自动带上。 */
+.reading-assist-answer-footnote {
+  margin-top: 8px;
+  font-size: 10px;
+  color: var(--content-muted);
 }
 
 .reading-assist-copy-answer {

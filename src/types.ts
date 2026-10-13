@@ -106,6 +106,12 @@ export interface ReaderAnnotation {
   kind: ReaderAnnotationKind;
   rect: ReaderAnnotationRect;
   content?: string;
+  /**
+   * 模型自报的「为什么在这里出现」。伴读批注卡的右上角 chip 用它 ——
+   * 主动行为不自报理由就会被读成噪音。旧数据没有这个字段：卡片的
+   * title 直接缺省即可，不为它写兜底文案。
+   */
+  reason?: string;
   createdAt: string;
   /**
    * `"ai"` = 由自动标注写入；缺省视为 `"manual"`。
@@ -133,6 +139,18 @@ export interface PdfReadingBlock {
   kind: PdfReadingBlockKind;
   text: string;
   rect?: ReaderAnnotationRect;
+  /**
+   * 行级矩形，按阅读顺序排列。
+   *
+   * **为什么需要它**：`rect` 是整块的并集框。学术论文常见「整栏一块」的版面，
+   * 一个 block 横跨 5–10 个自然段；此时 `rect` 既不能用来切段落，
+   * 也不能用来定位标注——波浪线贴在并集框底部，看起来就「跑到整段下面去了」
+   * （2026-10-07 实测）。行级 bbox 来自 pymupdf `get_text("dict")` 的 `lines[].bbox`，
+   * 是解析器给出的几何，不是我们猜的。
+   *
+   * 缺省时消费方必须退回 `rect`，不能当成空数组——老数据与 markdown 来源没有它。
+   */
+  lines?: PdfReadingLine[];
   source: "mineru" | "pdfjs-dom" | "pymupdf" | "markdown";
   sourcePath?: string;
   depth?: number;
@@ -141,4 +159,11 @@ export interface PdfReadingBlock {
   assetUrl?: string;
   altText?: string;
   tableAlign?: Array<"left" | "center" | "right">;
+}
+
+/** 单行文本的几何。坐标与所属块的 `rect` 同一套归一化坐标系。 */
+export interface PdfReadingLine {
+  /** 行内文本，段内换行以 `\n` 分隔（不再压平成空格）。 */
+  text: string;
+  rect: ReaderAnnotationRect;
 }

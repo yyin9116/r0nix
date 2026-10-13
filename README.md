@@ -42,7 +42,7 @@ r0nix 是一个面向科研阅读的本地桌面应用：打开 PDF，顺手查�
 - Windows：`.exe` 或 `.msi`
 - macOS：`.dmg`
 
-安装后启动 `r0nix`。macOS DMG 内含标准的 `Applications` 拖拽入口。当前版本为 `0.0.6`。macOS 在配置 Developer ID 签名和 Apple 公证凭据时会发布正式签名包；手动触发 workflow 且缺少这些凭据时，只生成用于测试的 ad-hoc DMG，首次打开可能需要在 macOS“隐私与安全性”里手动允许。
+安装后启动 `r0nix`。macOS DMG 内含标准的 `Applications` 拖拽入口。当前版本为 `0.0.7`。macOS 在配置 Developer ID 签名和 Apple 公证凭据时会发布正式签名包；手动触发 workflow 且缺少这些凭据时，只生成用于测试的 ad-hoc DMG，首次打开可能需要在 macOS“隐私与安全性”里手动允许。
 
 ## 🔐 阅读辅助和隐私
 

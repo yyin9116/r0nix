@@ -14,12 +14,26 @@ import {
   Trash2,
   Home,
   PlugZap,
+  Sparkles,
+  MessageSquare,
+  Underline as UnderlineIcon,
+  HardDrive,
+  KeyRound,
 } from"lucide-react";
 import { open } from"@tauri-apps/plugin-dialog";
 import type { AppLanguage, QuickLinkItem, UserSettings } from"../services/userSettings";
-import { useEffect, useMemo, useRef, useState } from"react";
+import { COMPANION_INTENSITIES } from"../services/readingCompanion";
+import { useCallback, useEffect, useMemo, useRef, useState } from"react";
 import { testLlmServiceConnection } from"../services/readingAssistant";
 import { ACCENT_TOKENS } from"../theme/accent";
+import {
+  changeWorkspaceRoot,
+  clearWorkspaceCache,
+  fetchWorkspaceInfo,
+  migrateKeychainSecret,
+  revealWorkspace,
+  type WorkspaceInfo,
+} from"../services/workspace";
 import { Button, Card, IconButton, Select, Textarea, TextInput } from"../ui";
 
 interface SettingsProps {
@@ -100,6 +114,22 @@ const I18N = {
     companion:"\u4f34\u8bfb",
     companionDesc:
 "\u505c\u7559\u7ea6 2.5 \u79d2\u540e\u81ea\u52a8\u5c55\u5f00\u9605\u8bfb\u8f85\u52a9\u3002\u884c\u4e3a\u4fe1\u53f7\u4e0d\u4f1a\u79bb\u5f00\u672c\u673a\u3002",
+    companionIntensity:"\u4e3b\u52a8\u63d0\u793a\u5bc6\u5ea6",
+    companionIntensityDesc:
+"\u63a7\u5236\u81ea\u52a8\u5f39\u6c14\u6ce1\u7684\u9891\u7387\uff1a\u5173 = \u4e0d\u91c7\u96c6\u505c\u7559\uff1b\u8f7b = \u53ea\u6311\u6838\u5fc3\u7ed3\u8bba\uff1b\u4e2d = \u7ed3\u8bba\u4e0e\u8bba\u70b9\uff1b\u91cd = \u518d\u52a0\u7591\u96be\u53e5\u4e0e\u94fa\u57ab\u3002",
+    companionAutoAnnotate:"\u81ea\u52a8\u5212\u7ebf\u6807\u8bb0",
+    companionAutoAnnotateDesc:
+"\u6a21\u578b\u5224\u5b9a\u67d0\u6bb5\u96be\u61c2\u65f6\uff0c\u5728\u8be5\u6bb5\u7559\u4e00\u6761\u6ce2\u6d6a\u7ebf\u3002\u5b83\u662f\u9759\u6001\u7684\u3001\u53ef\u9884\u671f\u7684\uff0c\u4e0d\u4f1a\u5f39\u7a97\u6253\u6270\u4f60\u3002",
+    companionAnnotateIntensity:"\u6807\u8bb0\u5bc6\u5ea6",
+    companionAnnotateIntensityDesc:
+"\u63a7\u5236\u6bcf\u9875\u6700\u591a\u7559\u51e0\u6761\u6807\u8bb0\uff1a\u5173 = \u4e00\u6761\u4e0d\u7559\uff08\u63d0\u793a\u7167\u5e38\uff09\uff1b\u8f7b = 1 \u6761\uff1b\u4e2d = 2 \u6761\uff1b\u91cd = \u4e0d\u9650\u3002\u4e0e\u4e3b\u52a8\u63d0\u793a\u7684\u5bc6\u5ea6\u76f8\u4e92\u72ec\u7acb\u3002",
+    companionQuickAsk:"\u6c14\u6ce1\u5185\u5feb\u6377\u63d0\u95ee",
+    companionQuickAskDesc:
+"\u5173\u6389\u540e\u6c14\u6ce1\u4ecd\u7136\u4f1a\u51fa\u73b0\uff0c\u4f46\u4e0d\u518d\u63d0\u4f9b\u6982\u62ec / \u672f\u8bed / \u5ef6\u4f38\u95ee\u9898\u4e0e\u8ffd\u95ee\u8f93\u5165\u6846\u3002",
+    intensityOff:"\u5173",
+    intensityLight:"\u8f7b",
+    intensityMedium:"\u4e2d",
+    intensityHeavy:"\u91cd",
     language:"\u8bed\u8a00",
     languageDesc:"\u5728\u4e2d\u6587\u4e0e\u82f1\u6587\u4e4b\u95f4\u5207\u6362\u754c\u9762\u8bed\u8a00\u3002",
     newTabDefaultUrl:"\u65b0\u6807\u7b7e\u9ed8\u8ba4 URL",
@@ -113,7 +143,28 @@ const I18N = {
     aiModelName:"模型名称",
     aiModelNameDesc:"例如 gpt-4o-mini、claude-3-5-sonnet、ollama/qwen2.5 或 LiteLLM 中配置的模型别名。",
     aiApiKey:"API Key",
-    aiApiKeyDesc:"仅保留在当前会话内，不会写入本地设置；请避免连接不可信的模型服务。",
+    aiApiKeyDesc:"保存在本地存储目录的 secrets.json 中（仅当前账户可读，不进浏览器存储、不再每次启动要求输密码）。",
+    localStorage:"本地存储",
+    localStorageDesc:
+"所有数据 —— 设置、API Key、导入的 PDF、伴读历史 —— 都在这一个目录里。可以整个复制到别处备份，或在访达中直接查看。",
+    workspaceLocation:"存储位置",
+    workspaceUsage:"已用空间",
+    workspaceCustom:"自定义位置",
+    workspaceDefault:"默认位置",
+    revealWorkspace:"在访达中显示",
+    changeWorkspace:"更换位置",
+    changeWorkspaceHint:"选择一个新的空文件夹；现有文件会先复制过去再切换，中途失败不会丢数据。",
+    clearCache:"清理缓存",
+    clearCacheHint:"只删派生缓存（缩略图、渲染中间产物）。文档、设置、密钥和伴读历史都不受影响。",
+    workspaceFiles:"个文件",
+    workspaceTruncated:"（扫描触顶，实际更多）",
+    workspaceUnavailable:"当前环境无法访问本地存储目录。",
+    importKeychain:"从钥匙串导入",
+    importKeychainHint:
+"如果旧版本把 API Key 存进了 macOS 钥匙串，可以搬一次过来。搬完钥匙串里的旧条目会被删除，之后不会再要求你输密码。",
+    keychainImported:"已从钥匙串导入密钥。",
+    keychainNotFound:"钥匙串里没有可导入的密钥。",
+    localStorageActionFailed:"操作失败",
     aiTemperature:"温度",
     aiTemperatureDesc:"翻译建议 0.0-0.3，问答可适当提高。",
     askPrompt:"提问系统提示词",
@@ -173,6 +224,21 @@ const I18N = {
     externalBrowser:"External Browser",
     companion:"Companion",
     companionDesc:"Open reading assist automatically after dwelling on a paragraph for about 2.5s. Behaviour signals never leave this machine.",
+    companionIntensity:"Prompt density",
+    companionIntensityDesc:
+"How often bubbles appear on their own: Off = never sample dwell time; Light = the key takeaway only; Medium = claims and the arguments behind them; Heavy = plus hard sentences and setup.",
+    companionAutoAnnotate:"Automatic markers",
+    companionAutoAnnotateDesc:
+"Leave a wavy marker on passages the model judges hard. Markers are static and predictable — they never pop up at you.",
+    companionAnnotateIntensity:"Marker density",
+    companionAnnotateIntensityDesc:"Markers per page, independent of prompt density: off = none (prompts still show); light = 1; medium = 2; heavy = unlimited.",
+    companionQuickAsk:"Quick questions in the bubble",
+    companionQuickAskDesc:
+"Turning this off keeps the prompts themselves, but drops the summarize / terms / follow-ups buttons and the question box.",
+    intensityOff:"Off",
+    intensityLight:"Light",
+    intensityMedium:"Medium",
+    intensityHeavy:"Heavy",
     language:"Language",
     languageDesc:"Switch UI language between Chinese and English.",
     newTabDefaultUrl:"New tab default URL",
@@ -186,7 +252,28 @@ const I18N = {
     aiModelName:"Model name",
     aiModelNameDesc:"For example gpt-4o-mini, claude-3-5-sonnet, ollama/qwen2.5, or a LiteLLM model alias.",
     aiApiKey:"API Key",
-    aiApiKeyDesc:"Session-only. It is never written to local settings; avoid untrusted model services.",
+    aiApiKeyDesc:"Stored in secrets.json inside the local storage folder (readable only by your account; never in browser storage, and no password prompt at launch).",
+    localStorage:"Local Storage",
+    localStorageDesc:
+"Everything lives in one folder: settings, API key, imported PDFs, and reading history. Copy that folder to back it up, or open it in the file manager.",
+    workspaceLocation:"Storage location",
+    workspaceUsage:"Disk usage",
+    workspaceCustom:"Custom location",
+    workspaceDefault:"Default location",
+    revealWorkspace:"Show in Finder",
+    changeWorkspace:"Change location",
+    changeWorkspaceHint:"Pick a new empty folder; existing files are copied over before the switch, so a failure never loses data.",
+    clearCache:"Clear cache",
+    clearCacheHint:"Removes derived caches only (thumbnails, render intermediates). Documents, settings, the key, and history are untouched.",
+    workspaceFiles:"files",
+    workspaceTruncated:"(scan limit reached, more exist)",
+    workspaceUnavailable:"The local storage folder is not reachable in this environment.",
+    importKeychain:"Import from Keychain",
+    importKeychainHint:
+"If an older version stored your API key in the macOS Keychain, import it once. The old keychain entry is deleted afterwards, so you will not be asked for a password again.",
+    keychainImported:"API key imported from the Keychain.",
+    keychainNotFound:"No key found in the Keychain to import.",
+    localStorageActionFailed:"Action failed",
     aiTemperature:"Temperature",
     aiTemperatureDesc:"Use 0.0-0.3 for translation; higher values may be useful for Q&A.",
     askPrompt:"Ask system prompt",
@@ -217,6 +304,15 @@ const I18N = {
   },
 } as const;
 
+/** 字节数的人类可读格式。刻意不引依赖：一个除法循环不值得一个包。 */
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const exponent = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  const value = bytes / 1024 ** exponent;
+  return `${value >= 100 || exponent === 0 ? Math.round(value) : value.toFixed(1)} ${units[exponent]}`;
+}
+
 export function Settings({
   settings,
   onThemeChange,
@@ -232,8 +328,103 @@ export function Settings({
   const [directoryError, setDirectoryError] = useState("");
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const quickLinksSectionRef = useRef<HTMLElement | null>(null);
+  /**
+   * 本地存储面板状态。
+   *
+   * `workspace` 为 null 有两种含义：非 Tauri 环境，或后端不可用。
+   * 前端不该为「没有工作区」写分支，所以统一降级为不显示操作按钮。
+   */
+  const [workspace, setWorkspace] = useState<WorkspaceInfo | null>(null);
+  const [workspaceBusy, setWorkspaceBusy] = useState(false);
+  const [workspaceNotice, setWorkspaceNotice] = useState("");
+  const [workspaceError, setWorkspaceError] = useState("");
 
   const t = I18N[settings.language];
+
+  const refreshWorkspace = useCallback(async () => {
+    const info = await fetchWorkspaceInfo();
+    setWorkspace(info);
+  }, []);
+
+  // 进设置页就拉一次工作区信息：用户是带着「我的东西到底存在哪」的问题来的，
+  // 这个面板必须自己把答案显示出来，而不是让用户去猜。
+  useEffect(() => {
+    let canceled = false;
+    void fetchWorkspaceInfo().then((info) => {
+      if (!canceled) setWorkspace(info);
+    });
+    return () => {
+      canceled = true;
+    };
+  }, []);
+
+  const runWorkspaceAction = useCallback(
+    async (action: () => Promise<string | null | undefined>) => {
+      setWorkspaceBusy(true);
+      setWorkspaceNotice("");
+      setWorkspaceError("");
+      try {
+        const message = await action();
+        await refreshWorkspace();
+        if (message) setWorkspaceNotice(message);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        setWorkspaceError(`${t.localStorageActionFailed}: ${detail}`);
+      } finally {
+        setWorkspaceBusy(false);
+      }
+    },
+    [refreshWorkspace, t.localStorageActionFailed]
+  );
+
+  const handleRevealWorkspace = useCallback(() => {
+    void runWorkspaceAction(async () => {
+      await revealWorkspace();
+      return undefined;
+    });
+  }, [runWorkspaceAction]);
+
+  const handleChangeWorkspace = useCallback(async () => {
+    try {
+      const selected = await open({ directory: true, multiple: false, title: t.changeWorkspace });
+      if (typeof selected !== "string" || !selected.trim()) return;
+      await runWorkspaceAction(async () => {
+        const next = await changeWorkspaceRoot(selected);
+        if (!next) throw new Error(t.workspaceUnavailable);
+        return t.workspaceLocation;
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setWorkspaceError(`${t.localStorageActionFailed}: ${detail}`);
+    }
+  }, [runWorkspaceAction, t.changeWorkspace, t.localStorageActionFailed, t.workspaceLocation, t.workspaceUnavailable]);
+
+  const handleClearCache = useCallback(() => {
+    void runWorkspaceAction(async () => {
+      const removed = await clearWorkspaceCache();
+      return removed > 0 ? `${removed}` : undefined;
+    });
+  }, [runWorkspaceAction]);
+
+  const handleImportKeychain = useCallback(() => {
+    void runWorkspaceAction(async () => {
+      const key = await migrateKeychainSecret();
+      return key ? t.keychainImported : t.keychainNotFound;
+    });
+  }, [runWorkspaceAction, t.keychainImported, t.keychainNotFound]);
+
+  // 档位清单从 readingCompanion 来，不在这里另写一份 —— 两处各写一份就是第二处真相。
+  const intensityOptions = COMPANION_INTENSITIES.map((value) => ({
+    value,
+    label:
+      value === "off"
+        ? t.intensityOff
+        : value === "light"
+          ? t.intensityLight
+          : value === "medium"
+            ? t.intensityMedium
+            : t.intensityHeavy,
+  }));
 
   const updateSettings = (patch: Partial<UserSettings>) => {
     onSettingsChange({ ...settings, ...patch });
@@ -450,6 +641,67 @@ export function Settings({
               </Button>
             </SettingsRow>
 
+            {/*
+             * 伴读的具体配置**必须**在这里展开，不能只留一个总开关。
+             *
+             * 总开关只能表达「要不要这个功能」，而读者真正想调节的是「它有多吵」：
+             * 密度、要不要留下痕迹、要不要给我提问入口 —— 这三件事的打扰程度完全不同。
+             * 只有一个开关时，觉得吵的人唯一的选择是整个关掉，于是功能等于没做。
+             */}
+            <SettingsRow
+              icon={<Sparkles size={15} />}
+              title={t.companionIntensity}
+              description={t.companionIntensityDesc}
+            >
+              <SelectRow
+                value={settings.companionIntensity}
+                options={intensityOptions}
+                onChange={(value) => updateSettings({ companionIntensity: value })}
+              />
+            </SettingsRow>
+
+            <SettingsRow
+              icon={<UnderlineIcon size={15} />}
+              title={t.companionAutoAnnotate}
+              description={t.companionAutoAnnotateDesc}
+            >
+              <Button
+                size="sm"
+                variant={settings.companionAutoAnnotate ? "accent" : "neutral"}
+                onClick={() => updateSettings({ companionAutoAnnotate: !settings.companionAutoAnnotate })}
+              >
+                {settings.companionAutoAnnotate ? t.enabled : t.disabled}
+              </Button>
+            </SettingsRow>
+
+            {settings.companionAutoAnnotate ? (
+              <SettingsRow
+                icon={<UnderlineIcon size={15} />}
+                title={t.companionAnnotateIntensity}
+                description={t.companionAnnotateIntensityDesc}
+              >
+                <SelectRow
+                  value={settings.companionAutoAnnotateIntensity}
+                  options={intensityOptions}
+                  onChange={(value) => updateSettings({ companionAutoAnnotateIntensity: value })}
+                />
+              </SettingsRow>
+            ) : null}
+
+            <SettingsRow
+              icon={<MessageSquare size={15} />}
+              title={t.companionQuickAsk}
+              description={t.companionQuickAskDesc}
+            >
+              <Button
+                size="sm"
+                variant={settings.companionQuickAsk ? "accent" : "neutral"}
+                onClick={() => updateSettings({ companionQuickAsk: !settings.companionQuickAsk })}
+              >
+                {settings.companionQuickAsk ? t.enabled : t.disabled}
+              </Button>
+            </SettingsRow>
+
             <SettingsRow icon={<Globe size={15} />} title={t.language} description={t.languageDesc}>
               <SelectRow
                 value={settings.language}
@@ -467,6 +719,80 @@ export function Settings({
               />
             </SettingsRow>
           </Card>
+        </section>
+
+        <section>
+          <div className="flex items-center gap-2 mb-6">
+            <HardDrive className="text-content-disabled" size={20} />
+            <h2 className="text-lg font-serif font-semibold text-content-primary">{t.localStorage}</h2>
+          </div>
+
+          <Card className="divide-y divide-border-subtle">
+            <SettingsRow icon={<FolderOpen size={15} />} title={t.workspaceLocation} description={t.localStorageDesc}>
+              {workspace ? (
+                <div className="flex flex-col items-end gap-2">
+                  <code className="max-w-xl break-all rounded-lg bg-surface-panel px-3 py-2 text-right font-mono text-xs text-content-secondary">
+                    {workspace.root}
+                  </code>
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <Button size="sm" onClick={handleRevealWorkspace} disabled={workspaceBusy}>
+                      {t.revealWorkspace}
+                    </Button>
+                    <Button size="sm" onClick={() => void handleChangeWorkspace()} disabled={workspaceBusy}>
+                      {t.changeWorkspace}
+                    </Button>
+                  </div>
+                  <p className="max-w-xl text-right text-xs leading-5 text-content-muted">{t.changeWorkspaceHint}</p>
+                </div>
+              ) : (
+                <p className="text-xs text-content-muted">{t.workspaceUnavailable}</p>
+              )}
+            </SettingsRow>
+
+            {workspace ? (
+              <SettingsRow icon={<HardDrive size={15} />} title={t.workspaceUsage} description={t.clearCacheHint}>
+                <div className="flex flex-col items-end gap-2">
+                  <span className="font-mono text-sm text-content-primary">
+                    {formatBytes(workspace.usage.totalBytes)}
+                    <span className="ml-2 text-xs text-content-muted">
+                      {workspace.usage.fileCount} {t.workspaceFiles}
+                      {workspace.usage.truncated ? ` ${t.workspaceTruncated}` : ""}
+                    </span>
+                  </span>
+                  <div className="flex flex-wrap justify-end gap-2">
+                    <span className="self-center text-xs text-content-muted">
+                      {workspace.isCustom ? t.workspaceCustom : t.workspaceDefault}
+                    </span>
+                    <Button size="sm" onClick={handleClearCache} disabled={workspaceBusy}>
+                      {t.clearCache}
+                    </Button>
+                  </div>
+                </div>
+              </SettingsRow>
+            ) : null}
+
+            {/*
+             * 钥匙串迁移只在**用户主动点击**时触发。
+             * 启动流程绝不碰钥匙串 —— 那正是「每次开软件都要输一次密码」的来源，
+             * 自动跑一次就等于把问题又请回来了。
+             */}
+            <SettingsRow icon={<KeyRound size={15} />} title={t.importKeychain} description={t.importKeychainHint}>
+              <Button size="sm" onClick={handleImportKeychain} disabled={workspaceBusy}>
+                {t.importKeychain}
+              </Button>
+            </SettingsRow>
+          </Card>
+
+          {workspaceNotice || workspaceError ? (
+            <p
+              className={`mt-3 text-right text-xs leading-5 ${
+                workspaceError ? "text-state-danger" : "text-state-ok"
+              }`}
+              role="status"
+            >
+              {workspaceError || workspaceNotice}
+            </p>
+          ) : null}
         </section>
 
         <section>

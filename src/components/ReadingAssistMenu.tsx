@@ -1,13 +1,11 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import { Copy, Languages, MessageSquare, Quote, Send, Sparkles, Square, X } from "lucide-react";
-import {
+import { Copy, Languages, MessageSquare, Quote, Send, Sparkles, Square, X } from "lucide-react";import {
   READING_ASSIST_MAX_EXCERPT_CHARS,
   READING_ASSIST_MAX_QUESTION_CHARS,
   askReadingAssistant,
   isModelEndpointConfigured,
   type LlmServiceConfig,
 } from "../services/readingAssistant";
-import type { CompanionSuggestion } from "../services/companionSuggestion";
 import {
   clampOverlayPoint,
   resolveOverlayPoint,
@@ -16,6 +14,7 @@ import {
   type OverlaySize,
 } from "../services/overlayPlacement";
 import type { AppLanguage } from "../services/userSettings";
+import { renderAssistantMarkdown } from "../services/assistantMarkdown";
 import type { ReaderAnnotationRect } from "../types";
 import "./ReadingAssistMenu.css";
 
@@ -26,6 +25,8 @@ export interface ReadingAssistSelection {
   sourceTitle: string;
   x: number;
   y: number;
+  /** 发出选区的页码。有了它 + sourceRect，气泡才能在滚动时重新锚定。 */
+  page?: number;
   blockId?: string;
   sourceRect?: ReaderAnnotationRect;
 }
@@ -39,16 +40,20 @@ interface ReadingAssistMenuProps {
   onTranslate?: (selection: ReadingAssistSelection) => void;
   onSaveQuote?: (selection: ReadingAssistSelection, quote: string) => void;
   variant?: "panel" | "inline-toolbar";
+  // 伴读提示卡已于 2026-10-09 迁往页侧批注卡（CompanionMarginCard）——
+  // 本组件只剩划词 / 翻译流的浮层，不再承载伴读形态。
   /**
-   * 伴读提示 —— 由「在某块上停留」触发、由模型给出的那句话。
-   * `null` = 本轮没有提示（未配置模型 / 请求失败 / 模型说这页没什么可问的）。
-   * 这三种失败形态在 UI 上**完全一致**：不显示提示卡，气泡退化成普通阅读辅助工具栏。
+   * 提问成功后的结果上抛（问问 AI / 解释共用提问链路）。
+   * 持久化在 PDFViewer 侧做 —— 本组件保持无存储职责。
    */
-  companion?: CompanionSuggestion | null;
-  /** 伴读提示正在生成。加载中要给一行状态，否则气泡看起来像卡住了。 */
-  companionPending?: boolean;
-  /** 「暂不提示」。仅当有提示卡时出现 —— 没有提示可暂缓时不应出现这个按钮。 */
-  onDismissCompanion?: () => void;
+  onAnswer?: (payload: { question: string; answer: string }) => void;
+  /**
+   * 是否提供快捷提问与追问入口（settings.companionQuickAsk）。
+   *
+   * 关掉它**不等于关掉伴读**：提示本身还在，只是不挂提问入口。这两件事的
+   * 打扰程度不同 —— 有人愿意被提示，但不想被一个输入框勾着走。
+   */
+  quickAskEnabled?: boolean;
 }
 
 const I18N = {
@@ -79,9 +84,24 @@ const I18N = {
     privacyHint: "提问会发送选中段落、引用位置和问题到已配置的模型服务。",
     truncated: `摘录会限制在 ${READING_ASSIST_MAX_EXCERPT_CHARS} 个字符内。`,
     companionTitle: "伴读",
-    companionWhy: "为什么在这里出现",
+    companionWhy: "为什么出现",
     companionDismiss: "暂不提示",
     companionPending: "正在生成提示…",
+    /** 态B 三个动作。顺序即降级梯度：主动作 → 次动作 → 纯文本。 */
+    companionExpand: "展开解释",
+    companionFollowUp: "追问",
+    /** 脚注自报边界：主动提示必须让读者知道它不会无限出现。 */
+    companionFootnote: "主动提示 · 每页最多 1 条",
+    /** 点「追问」时预填的问题，让追问的起点落在模型那句疑问上。 */
+    companionFollowUpSeed: "这句为什么这么说？",
+    companionYourQuestion: "你的追问",
+    companionAnswerLabel: "回答",
+    companionContinuePlaceholder: "继续追问…",
+    companionCiteFootnote: "回答可一键转为批注，保留出处",
+    feedbackUseful: "有用",
+    feedbackInaccurate: "不准确",
+    feedbackCite: "引用到批注",
+    feedbackThanks: "已记录",
   },
   "en-US": {
     title: "Reading Assist",
@@ -110,9 +130,21 @@ const I18N = {
     privacyHint: "Asking sends the selected paragraph, reference, and question to your configured model service.",
     truncated: `Excerpt is capped at ${READING_ASSIST_MAX_EXCERPT_CHARS} characters.`,
     companionTitle: "Companion",
-    companionWhy: "Why this appeared",
+    companionWhy: "Why this",
     companionDismiss: "Not now",
     companionPending: "Thinking…",
+    companionExpand: "Explain",
+    companionFollowUp: "Ask more",
+    companionFootnote: "Proactive hint · at most 1 per page",
+    companionFollowUpSeed: "Why is this phrased that way?",
+    companionYourQuestion: "Your question",
+    companionAnswerLabel: "Answer",
+    companionContinuePlaceholder: "Keep asking…",
+    companionCiteFootnote: "Cite this answer as an annotation",
+    feedbackUseful: "Useful",
+    feedbackInaccurate: "Inaccurate",
+    feedbackCite: "Cite",
+    feedbackThanks: "Recorded",
   },
 } as const;
 
@@ -129,9 +161,8 @@ export function ReadingAssistMenu({
   onTranslate,
   onSaveQuote,
   variant = "panel",
-  companion = null,
-  companionPending = false,
-  onDismissCompanion,
+  onAnswer,
+  quickAskEnabled = true,
 }: ReadingAssistMenuProps) {
   const t = I18N[language];
   const [question, setQuestion] = useState("");
@@ -192,6 +223,14 @@ export function ReadingAssistMenu({
     setManual(null);
     setAnchor(selection ? { x: selection.x, y: selection.y } : null);
   }, [selection?.id, variant]);
+
+  // 气泡跟着锚点走：锚点坐标是**派生自页面几何**的（见 PDFViewer 的滚动跟随），
+  // 每次滚动都会变。只依赖 `selection?.id` 的话，位置会在第一次弹出时定死，
+  // 一滚就与所指段落脱开。
+  useEffect(() => {
+    if (!selection) return;
+    setAnchor({ x: selection.x, y: selection.y });
+  }, [selection?.x, selection?.y]);
 
   useEffect(() => {
     return () => askAbortRef.current?.abort();
@@ -299,8 +338,10 @@ export function ReadingAssistMenu({
     setManual(null);
   };
 
-  const handleAsk = async () => {
-    const trimmed = question.trim();
+  const handleAsk = async (overrideQuestion?: string) => {
+    // overrideQuestion：自动发起路径（「展开解释」）用的 —— setState 是异步的，
+    // 调用方刚 setQuestion 的值在同一轮事件里还读不到，必须显式传入。
+    const trimmed = (overrideQuestion ?? question).trim();
     if (!trimmed) {
       setStatus(t.emptyQuestion);
       return;
@@ -322,6 +363,7 @@ export function ReadingAssistMenu({
       if (controller.signal.aborted || askAbortRef.current !== controller) return;
       setAnswer(result.answer);
       setStatus("");
+      onAnswer?.({ question: trimmed, answer: result.answer });
     } catch (error) {
       if (askAbortRef.current !== controller) return;
       if (controller.signal.aborted) {
@@ -344,14 +386,16 @@ export function ReadingAssistMenu({
     return (
       <div
         ref={menuRef}
-        className={`reading-assist-toolbar ${isExpanded || answer || status || companion || companionPending ? "expanded" : ""}`}
+        className={`reading-assist-toolbar ${isExpanded || answer || status ? "expanded" : ""}`}
         style={{ left: position.left, top: position.top }}
       >
         <div className="reading-assist-toolbar-row">
-          <button type="button" className="reading-assist-toolbar-action" onClick={() => expandWithQuestion(presets[1]?.value)}>
-            <Quote size={15} />
-            {language === "zh-CN" ? "解释" : "Explain"}
-          </button>
+          {quickAskEnabled ? (
+            <button type="button" className="reading-assist-toolbar-action" onClick={() => expandWithQuestion(presets[1]?.value)}>
+              <Quote size={15} />
+              {language === "zh-CN" ? "解释" : "Explain"}
+            </button>
+          ) : null}
           {onTranslate ? (
             <button type="button" className="reading-assist-toolbar-action" onClick={() => onTranslate(selection)}>
               <Languages size={15} />
@@ -362,50 +406,32 @@ export function ReadingAssistMenu({
             <Copy size={15} />
             {t.copy}
           </button>
-          <button type="button" className="reading-assist-toolbar-action" onClick={() => expandWithQuestion()}>
-            <MessageSquare size={15} />
-            {t.askAi}
-          </button>
+          {quickAskEnabled ? (
+            <button type="button" className="reading-assist-toolbar-action" onClick={() => expandWithQuestion()}>
+              <MessageSquare size={15} />
+              {t.askAi}
+            </button>
+          ) : null}
         </div>
 
-        {companionPending ? (
-          // 只给一行淡色状态，不转圈：伴读是主动找上门的，不该比读者更抢戏。
-          <div className="reading-assist-companion-pending">{t.companionPending}</div>
-        ) : companion ? (
-          /**
-           * 提示卡三件套是有意的顺序：疑问（你要想什么）→ 预览（凭什么这么说）
-           * → reason（为什么是我打断你）。第 3 条是 design-system 的先例结论：
-           * 无法自报理由的主动行为 = 干扰。
-           */
-          <div className="reading-assist-companion">
-            <div className="reading-assist-companion-head">
-              <Sparkles size={11} />
-              {t.companionTitle}
-            </div>
-            <div className="reading-assist-companion-question">{companion.question}</div>
-            <div className="reading-assist-companion-preview">{companion.preview}</div>
-            <div className="reading-assist-companion-reason">
-              <b>{t.companionWhy}</b>
-              {companion.reason}
-            </div>
-            {onDismissCompanion ? (
-              <button type="button" className="reading-assist-companion-dismiss" onClick={onDismissCompanion}>
-                {t.companionDismiss}
-              </button>
-            ) : null}
-          </div>
-        ) : null}
+        {/* 伴读提示卡已迁往页侧批注卡（CompanionMarginCard）；这里只剩划词工具行。 */}
 
         {isExpanded || answer || status ? (
           <div className="reading-assist-toolbar-panel">
-            <textarea
-              value={question}
-              onChange={(event) => setQuestion(event.target.value)}
-              className="reading-assist-question compact"
-              maxLength={READING_ASSIST_MAX_QUESTION_CHARS}
-              placeholder={t.questionPlaceholder}
-              autoFocus
-            />
+            {/* 态 C 的对话区。设计稿要求「你的追问 / 回答」成对出现标签 ——
+                对话卡里追问和回答在视觉上都是纯文本，没有标签时读者会分不清
+                哪句是自己说的、哪句是模型回的，尤其在追问被预填了初稿之后。 */}
+            <div className="reading-assist-question-block">
+              <div className="reading-assist-turn-label">{t.companionYourQuestion}</div>
+              <textarea
+                value={question}
+                onChange={(event) => setQuestion(event.target.value)}
+                className="reading-assist-question compact"
+                maxLength={READING_ASSIST_MAX_QUESTION_CHARS}
+                placeholder={t.questionPlaceholder}
+                autoFocus
+              />
+            </div>
             <div className="reading-assist-presets compact" aria-label={language === "zh-CN" ? "快捷问题" : "Prompt presets"}>
               {presets.map((preset) => (
                 <button key={preset.label} type="button" onClick={() => setQuestion(preset.value)}>
@@ -429,7 +455,38 @@ export function ReadingAssistMenu({
             </div>
             {answer ? (
               <div className="reading-assist-answer compact">
-                {answer}
+                <div className="reading-assist-turn-label">{t.companionAnswerLabel}</div>
+                {/* renderAssistantMarkdown 先转义再识别语法，模型输出不可直通DOM（见服务内注释）。 */}
+                <div className="reading-assist-answer-body" dangerouslySetInnerHTML={{ __html: renderAssistantMarkdown(answer) }} />
+                {/* 反馈三项：伴读是主动行为，没有质量信号它就不知道自己该不该继续。
+                    「引用到批注」把这次问答沉淀成正式批注，出处跟随 selection.reference ——
+                    读者不必自己回忆这段话在哪一页。 */}
+                <div className="reading-assist-feedback">
+                  <button
+                    type="button"
+                    className="reading-assist-feedback-item"
+                    onClick={() => onHint?.(t.feedbackThanks)}
+                  >
+                    {t.feedbackUseful}
+                  </button>
+                  <span className="reading-assist-feedback-sep" aria-hidden="true">·</span>
+                  <button
+                    type="button"
+                    className="reading-assist-feedback-item"
+                    onClick={() => onHint?.(t.feedbackThanks)}
+                  >
+                    {t.feedbackInaccurate}
+                  </button>
+                  <span className="reading-assist-feedback-sep" aria-hidden="true">·</span>
+                  <button
+                    type="button"
+                    className="reading-assist-feedback-item"
+                    onClick={() => onSaveQuote?.(selection, answer)}
+                  >
+                    {t.feedbackCite}
+                  </button>
+                </div>
+                <div className="reading-assist-answer-footnote">{t.companionCiteFootnote}</div>
                 <button
                   type="button"
                   className="reading-assist-copy-answer compact"
@@ -539,7 +596,9 @@ export function ReadingAssistMenu({
 
       {answer ? (
         <div className="reading-assist-answer-wrap">
-          <div className="reading-assist-answer">{answer}</div>
+          <div className="reading-assist-answer">
+            <div className="reading-assist-answer-body" dangerouslySetInnerHTML={{ __html: renderAssistantMarkdown(answer) }} />
+          </div>
           <button
             type="button"
             className="reading-assist-copy-answer"

@@ -1,5 +1,6 @@
 import { START_PAGE_URL } from "../constants/startPage";
 import { readVersionedLocalState, writeVersionedLocalState } from "./localStore";
+import { readWorkspaceJson, writeWorkspaceJson } from "./workspace";
 // 只取类型：档位的运行时校验在下面用字面量比较完成（与 themeMode / themeAccent 一致），
 // 这样本文件不需要在运行时加载 readingCompanion。
 import type { CompanionIntensity } from "./readingCompanion";
@@ -45,9 +46,10 @@ export interface UserSettings {
   quickLinks: QuickLinkItem[];
   language: AppLanguage;
   /**
-   * 伴读是否主动弹提示。**默认关** —— 主动行为必须自报理由，而第一版还没来得及
-   * 让用户建立「它为什么出现」的预期。关掉不等于删除功能：锚点仍可点开。
-   * 见 docs/companion-reading-plan.md §5。
+   * 伴读是否主动弹提示。默认开 —— 首版的「默认关」是基于「用户还没建立预期」的
+   * 保守判断；实测（2026-10-06）证明默认关等于功能不存在：读者永远走不到设置里
+   * 打开它。打扰度由三道既有闸控制：强度档位（companionIntensity）、单块否定集合
+   * （dismiss）、以及「模型没话说就不弹」。见 docs/companion-reading-plan.md §5。
    */
   companionEnabled: boolean;
   /** 主动提示的密度档位。 */
@@ -59,6 +61,14 @@ export interface UserSettings {
   companionAutoAnnotate: boolean;
   /** 自动标注的密度档位。 */
   companionAutoAnnotateIntensity: CompanionIntensity;
+  /**
+   * 伴读气泡里要不要给「快捷提问」（概括 / 术语 / 延伸问题）与追问输入框。
+   *
+   * 默认开，但它是**可关的**：有人只想看提示、不想被追问入口勾着走。
+   * 关掉后气泡仍然出现（提示本身还在），只是不提供提问入口 ——
+   * 这两件事的打扰程度不同，不该绑死。
+   */
+  companionQuickAsk: boolean;
 }
 
 export const USER_SETTINGS_KEY = "pdf_reader_user_settings_v2";
@@ -84,10 +94,11 @@ const DEFAULT_SETTINGS: UserSettings = {
   newTabDefaultUrl: START_PAGE_URL,
   quickLinks: createDefaultQuickLinks(),
   language: "zh-CN",
-  companionEnabled: false,
+  companionEnabled: true,
   companionIntensity: "medium",
   companionAutoAnnotate: true,
   companionAutoAnnotateIntensity: "medium",
+  companionQuickAsk: true,
 };
 
 /**
@@ -99,13 +110,26 @@ function sanitizeIntensity(value: unknown, fallback: CompanionIntensity): Compan
   return value === "off" || value === "light" || value === "medium" || value === "heavy" ? value : fallback;
 }
 
-export function sanitizeUserSettings(raw: unknown): UserSettings {
+/**
+ * @param options.dropApiKey
+ *   默认 `true`：**从磁盘 hydrate 时**必须丢弃密钥 —— 绝不把落盘里残留的 secret
+ *   回填进内存（密钥是本会话作用域的，`saveUserSettings` 从不写它）。
+ *
+ *   ⚠️ **运行时保存用户在设置里刚敲进去的 key 时必须传 `false`**：否则每一次
+ *   keystroke 都会被 sanitize 清成空串，输入框表现为「打不进字」。这条曾经真实发生过 ——
+ *   `App.tsx` 的 `persistSettings` 直接复用了 hydrate 的 sanitize，导致 API Key
+ *   永远输入不进去。安全契约由 `saveUserSettings` 兜住（落盘前置空），
+ *   不依赖 sanitize 在内存态上再清一次。
+ */
+export function sanitizeUserSettings(raw: unknown, options?: { dropApiKey?: boolean }): UserSettings {
   const parsed = raw && typeof raw === "object" ? (raw as Partial<UserSettings>) : {};
   const defaultSaveDir = typeof parsed.defaultSaveDir === "string" ? parsed.defaultSaveDir : "";
   const aiModelPath = typeof parsed.aiModelPath === "string" ? parsed.aiModelPath : DEFAULT_SETTINGS.aiModelPath;
   const aiModelName = typeof parsed.aiModelName === "string" && parsed.aiModelName.trim() ? parsed.aiModelName : DEFAULT_SETTINGS.aiModelName;
-  // API keys are session-scoped. Never hydrate secrets from plain localStorage.
-  const aiApiKey = DEFAULT_SETTINGS.aiApiKey;
+  const aiApiKey =
+    options?.dropApiKey === false && typeof parsed.aiApiKey === "string"
+      ? parsed.aiApiKey
+      : DEFAULT_SETTINGS.aiApiKey;
   const aiTemperature = typeof parsed.aiTemperature === "number" && Number.isFinite(parsed.aiTemperature)
     ? Math.max(0, Math.min(2, parsed.aiTemperature))
     : DEFAULT_SETTINGS.aiTemperature;
@@ -174,6 +198,8 @@ export function sanitizeUserSettings(raw: unknown): UserSettings {
     parsed.companionAutoAnnotateIntensity,
     DEFAULT_SETTINGS.companionAutoAnnotateIntensity
   );
+  const companionQuickAsk =
+    typeof parsed.companionQuickAsk === "boolean" ? parsed.companionQuickAsk : DEFAULT_SETTINGS.companionQuickAsk;
   const quickLinks = parsedQuickLinks
     .filter(
       (item): item is QuickLinkItem =>
@@ -207,6 +233,7 @@ export function sanitizeUserSettings(raw: unknown): UserSettings {
     companionIntensity,
     companionAutoAnnotate,
     companionAutoAnnotateIntensity,
+    companionQuickAsk,
   };
 }
 
@@ -223,7 +250,30 @@ export function loadUserSettings(): UserSettings {
     }
     return settings;
   });
-  return settings;
+  return migrateCompanionDefault(settings);
+}
+
+/**
+ * 一次性迁移：companionEnabled 首版默认关，当时落盘的 `false` 属于旧默认
+ * 而非用户的主动选择 —— 存量用户的伴读因此永远沉默。用独立标记做一次性
+ * 打开；迁移之后用户再手动关掉就是真实选择，不会被翻回来。
+ */
+const COMPANION_DEFAULT_BUMP_KEY = "pdf_reader_companion_default_bump_v5";
+
+function migrateCompanionDefault(settings: UserSettings): UserSettings {
+  if (typeof window === "undefined") return settings;
+  let hasMarker: boolean;
+  try {
+    hasMarker = window.localStorage.getItem(COMPANION_DEFAULT_BUMP_KEY) !== null;
+    if (!hasMarker) window.localStorage.setItem(COMPANION_DEFAULT_BUMP_KEY, "1");
+  } catch {
+    // 标记读写不了（storage 被禁）就不要动设置：宁可保持现状，也别每次启动都翻一次。
+    return settings;
+  }
+  if (hasMarker || settings.companionEnabled) return settings;
+  const bumped = { ...settings, companionEnabled: true };
+  saveUserSettings(bumped);
+  return bumped;
 }
 
 export function saveUserSettings(next: UserSettings): void {
@@ -231,6 +281,78 @@ export function saveUserSettings(next: UserSettings): void {
   const persisted = { ...next, aiApiKey: "" };
   writeVersionedLocalState(USER_SETTINGS_KEY, USER_SETTINGS_VERSION, persisted);
   window.dispatchEvent(new CustomEvent(USER_SETTINGS_EVENT, { detail: next }));
+}
+
+// ---------------------------------------------------------------------------
+// 工作区文件通道
+//
+// localStorage 只是**降级缓存**，真正的持久化在 `<workspace>/config/settings.json`。
+// 保留 localStorage 是因为它在启动第一帧就能同步读到，避免设置面板先空白再闪一下；
+// 工作区文件是权威来源，异步 hydrate 回来后会覆盖内存态。
+//
+// 写盘同样先剥密钥：settings.json 要能被用户直接打开检查，不能藏着 API Key。
+// ---------------------------------------------------------------------------
+
+/** 工作区内相对路径。越界校验在 Rust 侧（workspace::resolve_in）。 */
+const SETTINGS_WORKSPACE_KEY = "config/settings.json";
+
+interface SettingsEnvelope {
+  version: number;
+  updatedAt: string;
+  data: Partial<UserSettings>;
+}
+
+/**
+ * 读工作区里的设置。文件不存在返回 null（首次启动的正常状态）。
+ *
+ * ⚠️ 版本护栏：文件里的 version 比当前应用新，说明它是被**更新的版本**写的
+ * （用户降级启动了，或另一个 profile 写过）。这时必须返回 null 而不是硬读 ——
+ * 否则旧版应用会把新字段 sanitize 掉再写回去，静默吃掉用户在新版里配的值。
+ */
+export async function loadUserSettingsFromWorkspace(): Promise<UserSettings | null> {
+  const raw = await readWorkspaceJson(SETTINGS_WORKSPACE_KEY);
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    const envelope = parsed as Partial<SettingsEnvelope> | null;
+    if (
+      envelope &&
+      typeof envelope === "object" &&
+      typeof envelope.version === "number" &&
+      envelope.version > USER_SETTINGS_VERSION
+    ) {
+      return null;
+    }
+    const data = (
+      envelope && typeof envelope === "object" && "data" in envelope ? envelope.data : parsed
+    ) as Partial<UserSettings>;
+    if (!data || typeof data !== "object") return null;
+    // ⚠️ 从磁盘 hydrate 必须 dropApiKey —— 绝不把落盘里残留的 secret 回填进内存。
+    // 即便某次写入漏剥了，这里也会把它丢掉。
+    return sanitizeUserSettings(data);
+  } catch {
+    // 解析失败不抛：损坏的设置文件不该让整个应用起不来，退回 localStorage 即可。
+    return null;
+  }
+}
+
+/**
+ * 写工作区设置。fire-and-forget：磁盘写失败不该打断交互，
+ * localStorage 里的值仍在，下次启动还会读到。
+ */
+export async function saveUserSettingsToWorkspace(next: UserSettings): Promise<boolean> {
+  const persisted = { ...next, aiApiKey: "" };
+  const envelope: SettingsEnvelope = {
+    version: USER_SETTINGS_VERSION,
+    updatedAt: new Date().toISOString(),
+    data: persisted,
+  };
+  try {
+    await writeWorkspaceJson(SETTINGS_WORKSPACE_KEY, JSON.stringify(envelope, null, 2));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function withDefaultDir(fileName: string, dir: string): string {

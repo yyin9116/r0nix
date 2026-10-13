@@ -33,6 +33,7 @@
   --color-surface-hover: var(--surface-hover);
   --color-surface-active: var(--surface-active);
   --color-surface-paper: var(--surface-paper);
+  --color-surface-paper-veil: var(--surface-paper-veil);
   --color-border-subtle: var(--border-subtle);
   --color-border-default: var(--border-default);
   --color-border-strong: var(--border-strong);
@@ -110,6 +111,17 @@
      所以下面的深色块里【没有】它的覆写 —— 这是有意为之，不是遗漏。
      它存在的意义是把这 4 处「无法区分是漏迁还是刻意」的白色变成显式语义。 */
   --surface-paper: #ffffff;
+
+  /* 反色偏好下「画布尚未绘制时」的承载底色。
+     深色模式下只有 canvas 会被 filter 反相成深色纸面（见 PDFViewer.css 的
+     .pdf-page-canvas 规则）——滤镜刻意**不**施加在 .pdf-page-block 上，
+     否则文本层、标注层、锚点会被一起反色（深色下强调色近白 → 反成近黑，
+     波浪线直接消失在深色纸面上，2026-10-08 实测）。
+
+     page-block 自身的背景只在这段窗口里可见（canvas 铺满后就盖住了），
+     所以它必须与「反色后的纸面」同色，否则每翻一页都闪一下白。
+     取值因此是 #ffffff 的反色 #000000 —— 与迁移前的整块反色逐像素一致。 */
+  --surface-paper-veil: #ffffff;
 
   /* =======================================================================
    * 描边（3 档）
@@ -189,6 +201,40 @@
   --state-danger-tint: #fef2f2;
   --state-danger-border: #fca5a5;
   --state-danger-fg: #b91c1c;
+
+  /* =======================================================================
+   * 批注色：画在 PDF 纸面上的语义色，与状态色分开。
+   *
+   * 分家的理由：状态色描述「这个 UI 状态」，批注色描述「读者在纸上留的痕迹」。
+   * 后者的深浅不能只看 UI 主题 —— 它必须与**纸面**对比，而纸面在深色模式下
+   * 是被反相过的（见 --surface-paper-veil 与 PDFViewer.css 的 .pdf-page-canvas）。
+   * 所以这组令牌在深色下取「在深色纸上仍可读」的浅色值，而不是翻成深色。
+   *
+   * 这正是 2026-10-08 那批缺陷的成因：readerCore.ts 里 case "text" / "wavy"
+   * 把「纸面不随主题反色」写进了注释并写死色值，而那条前提在滤镜下沉后
+   * 已经不成立了。注释里的推理是对的，前提变了。
+   * ===================================================================== */
+  --annotation-highlight-fill: rgba(250, 204, 21, 0.28);
+  --annotation-highlight-border: rgba(202, 138, 4, 0.35);
+  --annotation-underline-line: rgba(37, 99, 235, 0.9);
+  --annotation-underline-fill: rgba(37, 99, 235, 0.06);
+  --annotation-strike-line: rgba(220, 38, 38, 0.9);
+  --annotation-strike-fill: rgba(220, 38, 38, 0.05);
+  --annotation-note-bg: rgba(24, 24, 27, 0.92);
+  --annotation-note-border: rgba(255, 255, 255, 0.14);
+  --annotation-note-fg: #ffffff;
+  --annotation-wavy-stroke: #b91c1c;
+  /*
+   * 手工 wavy 的波形图（兜底渲染，AI 波浪线不走这条）。
+   *
+   * SVG 里的 `stroke='black'` 是全仓 CSS 侧唯一的字面色，位置就是这里 ——
+   * data URI 内部无法引用外部变量，颜色没法令牌化；而按本仓规矩
+   * tokens.css 是唯一色源，豁免面必须显式，不能靠别处的正则恰好漏过。
+   *
+   * 黑色本身不参与显示：这张图只用作 mask，只取 alpha 通道，
+   * 真正的颜色由 --annotation-wavy-stroke 经 background-color 染上。
+   */
+  --manual-wavy-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='6'><path d='M0 4.5 Q 3 1 6 4.5 T 12 4.5' fill='none' stroke='black' stroke-width='1.6' stroke-linecap='round'/></svg>");
 
   /* =======================================================================
    * 高度：瑞士风格以描边建立层级，阴影只用于真正浮起的层。
@@ -290,6 +336,9 @@
   --content-disabled: #71717a;
   --content-inverse: #09090b;
   --content-primary-hover: #ffffff;
+  /* 深色下承载反色纸面的底色 = #ffffff 的反色。与 --surface-paper 不翻转相反，
+     理由见浅色块里那条注释。 */
+  --surface-paper-veil: #000000;
   /* 深色状态色：tint / border 直接沿用代码里已手工混出的那两个值（#0f2a1d、#3a1f27、#5f1d24），
      因此替换后深色视觉与现状完全一致，只是不再散落各文件。 */
   --state-ok-tint: #0f2a1d;
@@ -298,6 +347,19 @@
   --state-warn-tint: #3a2a12;
   --state-warn-border: #5c4218;
   --state-warn-fg: #fbbf24;
+  /* 深色下纸面被反相成深底，所以批注色反过来取「在深底上仍可读」的浅色。
+     浅色那一组是「在白纸上可读」的深色 —— 两组不是彼此的镜像，
+     而是各自与**当次实际纸面**对比的结果。 */
+  --annotation-highlight-fill: rgba(250, 204, 21, 0.22);
+  --annotation-highlight-border: rgba(250, 204, 21, 0.5);
+  --annotation-underline-line: rgba(96, 165, 250, 0.92);
+  --annotation-underline-fill: rgba(96, 165, 250, 0.12);
+  --annotation-strike-line: rgba(248, 113, 113, 0.92);
+  --annotation-strike-fill: rgba(248, 113, 113, 0.12);
+  --annotation-note-bg: rgba(24, 24, 27, 0.94);
+  --annotation-note-border: rgba(255, 255, 255, 0.18);
+  --annotation-note-fg: #ffffff;
+  --annotation-wavy-stroke: #f87171;
   --state-danger-tint: #3a1f27;
   --state-danger-border: #5f1d24;
   --state-danger-fg: #f87171;

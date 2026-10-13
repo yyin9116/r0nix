@@ -137,13 +137,61 @@ export function buildCompanionSuggestionMessages(
 }
 
 /**
+ * 从模型服务的**原始响应体**里取出 assistant 的正文。
+ *
+ * ⚠️ 为什么必须有这一步：`requestChatCompletionText` 返回的是 HTTP body 原文
+ * （Tauri 与浏览器两条路径都是如此，见 Rust `llm_chat_completion` 的 `Ok(body)`），
+ * 对 OpenAI-compatible 服务来说整个信封长这样：
+ *   `{"id":"…","choices":[{"message":{"content":"[{\"blockId\":…}]"}}]}`
+ * 实测（2026-10-05）：信封被直接喂进 `parseCompanionSuggestions`，于是
+ * `extractJsonPayload` 只能在信封里抠出 `choices` 数组本身（没有 blockId），
+ * 解析结果恒为 `[]` —— 表现是「气泡弹了但没有内容、划线标记永远不出现」，
+ * 而且**不抛错**，光看日志几乎无法定位。
+ *
+ * 只认真正的信封形状（`choices` 数组或 `object` 字段），**不**去猜 `content`
+ * 这类可能与业务字段同名的键 —— 猜错就会把模型给的自定义 JSON 整块吃掉。
+ * 抠不出来就原样返回，交给下游的「失败即降级」。
+ */
+export function unwrapChatCompletionContent(raw: string): string {
+  const trimmed = raw.trim();
+  if (!trimmed.startsWith("{")) return trimmed;
+
+  let payload: unknown;
+  try {
+    payload = JSON.parse(trimmed) as unknown;
+  } catch {
+    return trimmed;
+  }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return trimmed;
+
+  const data = payload as Record<string, unknown>;
+  if (!Array.isArray(data.choices) && typeof data.object !== "string") return trimmed;
+
+  const choices = data.choices;
+  if (!Array.isArray(choices)) return trimmed;
+  for (const choice of choices) {
+    if (!choice || typeof choice !== "object") continue;
+    const record = choice as Record<string, unknown>;
+    const message = record.message;
+    if (message && typeof message === "object") {
+      const content = (message as Record<string, unknown>).content;
+      if (typeof content === "string") return content;
+    }
+    if (typeof record.text === "string") return record.text;
+  }
+  return trimmed;
+}
+
+/**
  * 从模型返回的原文里抠出 JSON 数组。
  *
  * 模型输出必须当作**不可信输入**：可能被 ```json 包裹、可能前后有解释文字、
- * 可能整个是一段散文。这里尽可能宽容，抠不出来就返回 `undefined`，由调用方降级。
+ * 可能整个是一段散文，也可能外面还套着一层 OpenAI 响应信封（见
+ * `unwrapChatCompletionContent`）。这里尽可能宽容，抠不出来就返回 `undefined`，
+ * 由调用方降级。
  */
 function extractJsonPayload(text: string): unknown {
-  const trimmed = text.trim();
+  const trimmed = unwrapChatCompletionContent(text).trim();
   if (!trimmed) return undefined;
 
   const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/);
