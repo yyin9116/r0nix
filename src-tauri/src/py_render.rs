@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use std::env;
 use std::ffi::CStr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Once,
@@ -22,14 +22,30 @@ impl CancellationProbe {
     }
 }
 
+/// 可执行文件同级目录里，内嵌 Python 运行时可能出现的位置。
+///
+/// macOS 的 `.app` 布局和 Windows/Linux 不一样：可执行文件在 `Contents/MacOS/`，
+/// 资源在 `Contents/Resources/`。**只找同级的小写 `resources/` 在 macOS 上永远命中不了。**
+///
+/// 命中不了并不等于「立刻报错」—— 拿不到 runtime 就不设 `PYTHONHOME`，Python 会
+/// 悄悄回落到**编译期写死的构建机 framework 前缀**。于是包在构建机上一切正常，
+/// 换到没装同一版本 python.org 解释器的用户机上，第一次用 PDF 就
+/// `ModuleNotFoundError: encodings` 并以退出码 1 结束进程。
+fn runtime_candidates_for(exe_dir: &Path) -> Vec<PathBuf> {
+    vec![
+        exe_dir.join("..").join("Resources").join("runtime"),
+        exe_dir.join("resources").join("runtime"),
+        exe_dir.join("runtime"),
+        exe_dir.to_path_buf(),
+    ]
+}
+
 fn runtime_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
 
     if let Ok(exe_path) = env::current_exe() {
         if let Some(exe_dir) = exe_path.parent() {
-            candidates.push(exe_dir.join("resources").join("runtime"));
-            candidates.push(exe_dir.join("runtime"));
-            candidates.push(exe_dir.to_path_buf());
+            candidates.extend(runtime_candidates_for(exe_dir));
         }
     }
 
@@ -42,8 +58,14 @@ fn runtime_candidates() -> Vec<PathBuf> {
 }
 
 fn pick_runtime_home() -> Option<PathBuf> {
-    runtime_candidates().into_iter().find(|candidate| {
-        candidate_has_matching_stdlib(candidate) || candidate.join("Lib").join("encodings").exists()
+    runtime_candidates().into_iter().find_map(|candidate| {
+        if !(candidate_has_matching_stdlib(&candidate)
+            || candidate.join("Lib").join("encodings").exists())
+        {
+            return None;
+        }
+        // macOS 那个候选带 `..`；规范化之后再当 PYTHONHOME 用，日志和 sys.prefix 都干净。
+        Some(std::fs::canonicalize(&candidate).unwrap_or(candidate))
     })
 }
 
@@ -61,16 +83,28 @@ fn linked_python_tag() -> Option<String> {
     }
 }
 
+/// CPython 在 Unix 上的标准库目录名带点：`python312` -> `python3.12`。
+/// Windows 用 `Lib/`，所以只有非 Windows 的路径才需要这个转换。
+fn dotted_python_dir(tag: &str) -> Option<String> {
+    let version = tag.strip_prefix("python")?;
+    // 先量长度再切。`split_at(1)` 对空串会 panic（本文件原来的
+    // `&tag[6..7]` 写法对短 tag 也一样），而这里是从 `Py_GetVersion()` 拿来的
+    // 外部字符串 —— 不该因为它形状意外就把进程带走。
+    if version.len() < 2 || !version.is_char_boundary(1) {
+        return None;
+    }
+    let (major, minor) = version.split_at(1);
+    Some(format!("python{major}.{minor}"))
+}
+
 fn candidate_has_matching_stdlib(candidate: &std::path::Path) -> bool {
     let Some(tag) = linked_python_tag() else {
         return false;
     };
     candidate.join(format!("{tag}.zip")).exists()
-        || candidate
-            .join("lib")
-            .join(format!("python{}.{}", &tag[6..7], &tag[7..]))
-            .join("encodings")
-            .exists()
+        || dotted_python_dir(&tag)
+            .map(|dir| candidate.join("lib").join(dir).join("encodings").exists())
+            .unwrap_or(false)
 }
 
 fn ensure_python_runtime() {
@@ -111,14 +145,14 @@ fn ensure_python_runtime() {
             let dynload_dir = if cfg!(windows) {
                 Some(runtime_home.join("DLLs"))
             } else {
-                linked_tag.as_deref().and_then(|tag| {
-                    tag.strip_prefix("python").map(|version| {
-                        runtime_home
-                            .join("lib")
-                            .join(format!("python{version}"))
-                            .join("lib-dynload")
-                    })
-                })
+                // 目录名是 `lib/python3.12/lib-dynload`，不是 `lib/python312/`。
+                // 拼错就 `.exists()` 为假、整条路径不进 PYTHONPATH，于是 lib-dynload 里
+                // 那批 C 扩展（zlib、_struct、_hashlib …）统统不可导入 —— 包明明把
+                // lib-dynload 打进去了，却一次都用不上。
+                linked_tag
+                    .as_deref()
+                    .and_then(dotted_python_dir)
+                    .map(|dir| runtime_home.join("lib").join(dir).join("lib-dynload"))
             };
             if let Some(dynload_dir) = dynload_dir.filter(|path| path.exists()) {
                 python_paths.push(dynload_dir.to_string_lossy().into_owned());
@@ -139,6 +173,83 @@ fn ensure_python_runtime() {
 
         pyo3::prepare_freethreaded_python();
     });
+}
+
+/// `r0nix --check-python-runtime`：让打包后的应用自证「用的是包内那份 Python」。
+///
+/// 为什么需要它：这一整类缺陷在构建机上是**看不见的**。构建机（和 CI runner）装了
+/// python.org 的解释器，所以即使应用找不到内嵌 runtime、没设 `PYTHONHOME`，Python 也会
+/// 回落到编译期写死的 framework 前缀，一切照常；只有到了没装同一版本 Python 的用户机
+/// 上才第一次炸。光跑「进程还活着吗」也抓不住 —— 应用启动阶段根本不碰 Python。
+///
+/// 所以这里不满足于「能 import」：它断言 `sys.base_prefix` **就是包内的 runtime**，
+/// 把「包是自包含的」变成构建产物上一条可以执行的断言。
+pub fn python_runtime_self_check_if_requested() -> Option<i32> {
+    if !env::args().any(|arg| arg == "--check-python-runtime") {
+        return None;
+    }
+
+    Some(match self_check_python_runtime() {
+        Ok(summary) => {
+            println!("python-runtime-check: {summary}");
+            println!("python-runtime-check: ok");
+            0
+        }
+        Err(message) => {
+            eprintln!("python-runtime-check: FAILED -- {message}");
+            1
+        }
+    })
+}
+
+fn self_check_python_runtime() -> Result<String, String> {
+    let home = pick_runtime_home().ok_or_else(|| {
+        format!(
+            "找不到内嵌的 Python 运行时。候选路径：{:#?}",
+            runtime_candidates()
+        )
+    })?;
+    let expected = std::fs::canonicalize(&home).unwrap_or_else(|_| home.clone());
+
+    ensure_python_runtime();
+
+    Python::with_gil(|py| -> PyResult<String> {
+        let sys = py.import_bound("sys")?;
+        let base_prefix: String = sys.getattr("base_prefix")?.extract()?;
+        let actual =
+            std::fs::canonicalize(&base_prefix).unwrap_or_else(|_| PathBuf::from(&base_prefix));
+
+        if actual != expected {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "Python 的 base_prefix 是 {}，不是包内的 {}。包不自包含：\
+                 在没有同一版本 Python 的机器上，第一次用 PDF 就会初始化失败。",
+                actual.display(),
+                expected.display()
+            )));
+        }
+
+        py.import_bound("encodings")?;
+        // 只 import 还不够。让原生层真跑一次 —— 建一个空文档、加一页、读页数：
+        // 这会真正加载包内的 `_mupdf.so` / `libmupdf.dylib`，也就是
+        // `export_page_png` / `get_page_images` 依赖的那条路径。
+        let fitz = py.import_bound("fitz")?;
+        let doc = fitz.call_method0("open")?;
+        doc.call_method0("new_page")?;
+        let page_count: usize = doc.getattr("page_count")?.extract()?;
+        doc.call_method0("close")?;
+        if page_count != 1 {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "PyMuPDF 自检异常：新建文档的页数是 {page_count}，期望 1"
+            )));
+        }
+
+        Ok(format!(
+            "home={} base_prefix={} encodings+PyMuPDF 可用",
+            expected.display(),
+            actual.display()
+        ))
+    })
+    .map_err(|err| err.to_string())
 }
 
 fn close_python_document(doc: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -853,4 +964,40 @@ finally:
         result_obj.extract()
     })
     .map_err(|err| format!("pymupdf reading block extraction failed: {err}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_candidates_cover_the_macos_app_layout() {
+        let exe_dir = Path::new("/Applications/r0nix.app/Contents/MacOS");
+        let candidates = runtime_candidates_for(exe_dir);
+
+        assert!(
+            candidates.contains(&exe_dir.join("..").join("Resources").join("runtime")),
+            "macOS .app 布局必须有候选，否则打包后永远拿不到内嵌 runtime：{candidates:#?}"
+        );
+        assert!(
+            candidates.contains(&exe_dir.join("resources").join("runtime")),
+            "Windows/Linux 的同级 resources/ 布局必须保留：{candidates:#?}"
+        );
+    }
+
+    #[test]
+    fn dotted_python_dir_uses_the_unix_layout() {
+        assert_eq!(
+            dotted_python_dir("python312").as_deref(),
+            Some("python3.12")
+        );
+        assert_eq!(dotted_python_dir("python39").as_deref(), Some("python3.9"));
+        assert_eq!(
+            dotted_python_dir("python311").as_deref(),
+            Some("python3.11")
+        );
+        // 没有版本号就不该编出一个目录名来。
+        assert_eq!(dotted_python_dir("python"), None);
+        assert_eq!(dotted_python_dir("cpython312"), None);
+    }
 }

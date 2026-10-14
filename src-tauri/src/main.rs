@@ -11,6 +11,12 @@ use tauri::{Manager, WindowEvent};
 const MACOS_TRAY_ICON_PNG: &[u8] = include_bytes!("../icons/tray-icon.png");
 
 fn main() {
+    // 打包产物自检：`r0nix --check-python-runtime`。发布流水线用它断言「包里的
+    // Python 真的被用上了」—— 这类缺陷在构建机上永远看不出来，详见 py_render.rs。
+    if let Some(code) = r0nix::py_render::python_runtime_self_check_if_requested() {
+        std::process::exit(code);
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())

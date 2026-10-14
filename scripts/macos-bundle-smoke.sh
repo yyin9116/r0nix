@@ -35,6 +35,20 @@ verify_app() {
     fail "$label: 二进制依赖了开发机的 Python.framework。实际依赖：$(printf '%s' "$links" | tr '\n' '|')"
   fi
 
+  # 光看链接不够 —— 链接对了，Python 仍可能没找到**包内**那份运行时，转而回落到
+  # 编译期写死的框架前缀。让包自己跑一遍自检来证伪：它断言 sys.base_prefix 就是包内
+  # 的 runtime，并要求 encodings 与 fitz 都能导入（见 src-tauri/src/py_render.rs）。
+  #
+  # 放在这里而不是「进程存活」那个脚本里，是因为后者结构性地抓不到这个问题：应用
+  # 启动阶段根本不碰 Python，而 CI runner 上恰好装着同版本的 python.org 解释器，
+  # 于是「找不到内嵌 runtime」在 CI 上完全静默，只在用户机上第一次开 PDF 时崩。
+  local runtime_check
+  if ! runtime_check="$("$binary" --check-python-runtime 2>&1)"; then
+    fail "$label: 内嵌 Python 自检失败，包不是自包含的：$(printf '%s' "$runtime_check" | tr '\n' '|')"
+  fi
+  printf '%s\n' "$runtime_check" | grep -q 'python-runtime-check: ok' \
+    || fail "$label: 自检未打出 ok：$(printf '%s' "$runtime_check" | tr '\n' '|')"
+
   local detritus
   detritus="$(find "$runtime" \( -name '__pycache__' -o -name '*.pyc' \) -print -quit 2>/dev/null)" || detritus=""
   [[ -z "$detritus" ]] || fail "$label: 内嵌运行时残留 Python 字节码：$detritus"
