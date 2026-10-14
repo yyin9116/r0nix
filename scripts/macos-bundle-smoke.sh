@@ -13,8 +13,11 @@ fail() {
 }
 
 verify_app() {
-  local label="$1"
-  local candidate="$2"
+  # 参数顺序是 (app 路径, 标签)。路径在前是刻意的：
+  # `check-release-readiness.mjs` 按字面量断言 `verify_app "$mount_point/r0nix.app"`
+  # 必须存在，用来保证「DMG 里那个 app 真的被检查过」这条约束不被绕过。
+  local candidate="$1"
+  local label="${2:-app}"
   local binary="$candidate/Contents/MacOS/r0nix"
   local runtime="$candidate/Contents/Resources/runtime"
 
@@ -42,7 +45,7 @@ verify_app() {
   fi
 }
 
-verify_app "app" "$app_path"
+verify_app "$app_path" "app"
 
 if [[ -n "$dmg_path" ]]; then
   [[ -f "$dmg_path" ]] || fail "dmg: 文件不存在：$dmg_path"
@@ -59,7 +62,7 @@ if [[ -n "$dmg_path" ]]; then
   hdiutil attach "$dmg_path" -readonly -nobrowse -mountpoint "$mount_point" >/dev/null \
     || fail "dmg: hdiutil attach 失败：$dmg_path"
   mounted=true
-  verify_app "dmg-mounted-app" "$mount_point/r0nix.app"
+  verify_app "$mount_point/r0nix.app" "dmg-mounted-app"
 fi
 
 echo "macos-bundle-smoke: ok"

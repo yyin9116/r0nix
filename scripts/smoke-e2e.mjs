@@ -457,27 +457,43 @@ async function runCompanionRegression(browser) {
       }
       await page.waitForTimeout(200);
     };
-    const waitForCardStill = async () => {
-      let previous = (await card.first().boundingBox())?.y ?? 0;
+    // 判「静止」要按 x 和 y **两个轴都稳定**，而且滚动前后必须用**同一把尺子**量。
+    // 之前 baseline 用轮询等静止、滚动之后却只采样一次 —— 卡片重锚定与
+    // scrollIntoView(smooth) 的尾巴会被误判成「没跟着文档走」。实测出现过恰好 15px
+    // 的假失败（约 1/7 次），两个平台都要跑这条，发版被随机挡住的代价太高。
+    // 断言本身没放宽：容差仍是 8px，只是改量「已静止的位置」。
+    const waitForCardSettled = async () => {
+      let previous = await card.first().boundingBox();
       for (let attempt = 0; attempt < 30; attempt += 1) {
         await delay(120);
-        const current = (await card.first().boundingBox())?.y ?? 0;
-        if (Math.abs(current - previous) < 1) return current;
+        const current = await card.first().boundingBox();
+        if (
+          previous &&
+          current &&
+          Math.abs(current.x - previous.x) < 1 &&
+          Math.abs(current.y - previous.y) < 1
+        ) {
+          return current;
+        }
         previous = current;
       }
       return previous;
     };
-    const cardBoxBefore = { y: await waitForCardStill() };
+    const cardBoxBefore = await waitForCardSettled();
     await setScrollTop(260);
-    const cardBoxScrolled = await card.first().boundingBox();
-    if (!cardBoxScrolled || Math.abs(cardBoxScrolled.y - (cardBoxBefore.y - 260)) > 8) {
+    const cardBoxScrolled = await waitForCardSettled();
+    if (
+      !cardBoxBefore ||
+      !cardBoxScrolled ||
+      Math.abs(cardBoxScrolled.y - (cardBoxBefore.y - 260)) > 8
+    ) {
       throw new Error(
         `Companion margin card does not scroll with the document: before=${JSON.stringify(cardBoxBefore)}, after=${JSON.stringify(cardBoxScrolled)}`
       );
     }
     await setScrollTop(0);
-    const cardBoxRestored = await card.first().boundingBox();
-    if (!cardBoxRestored || Math.abs(cardBoxRestored.y - cardBoxBefore.y) > 6) {
+    const cardBoxRestored = await waitForCardSettled();
+    if (!cardBoxBefore || !cardBoxRestored || Math.abs(cardBoxRestored.y - cardBoxBefore.y) > 6) {
       throw new Error(
         `Companion margin card did not return to its position: before=${JSON.stringify(cardBoxBefore)}, restored=${JSON.stringify(cardBoxRestored)}`
       );
