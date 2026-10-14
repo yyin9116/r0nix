@@ -242,9 +242,14 @@ jobs:
             release-artifacts/**/*.msi
             release-artifacts/**/*.dmg
 
-      - name: Set Release Notes From the Tag
-        # 唯一负责 release 正文的一步：tag 消息体 + GitHub 生成的 changelog。
+      - name: Set Release Notes and Publish State
+        # 唯一负责 release 正文与「是否已发布」的一步：tag 消息体 + GitHub 生成的 changelog。
         # 显式覆写，所以无论 release 是本次新建还是早就在那儿，结果都一致。
+        #
+        # 为什么要显式 --draft=false：**删掉远端 tag 会让 GitHub 把该 release 变成草稿**
+        # （重指 tag 时必然发生）。而 action-gh-release 在「该 tag 已有 release」时是
+        # 沿用它的状态、只换资产，草稿就一直留着了 —— 发布流水线全绿，Release 列表里
+        # 却是 Draft，用户根本看不到。这里把它显式发布出去。
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -268,9 +273,14 @@ jobs:
             cat "${RUNNER_TEMP}/changelog.md"
           } > "$body_file"
 
+          # 显式给出 --draft=false：把「发布状态」也纳入这一步的职责。
+          # 不乱加 --latest —— 发旧版本时它会把 Latest 反而降级；GitHub 自己
+          # 会把最新的非草稿 release 认成 Latest。
           gh release edit "$GITHUB_REF_NAME" \
             --title "$GITHUB_REF_NAME" \
-            --notes-file "$body_file"
+            --notes-file "$body_file" \
+            --draft=false
 
           echo "release 正文首行：$(head -1 "$body_file")"
           echo "release 正文字节数：$(wc -c < "$body_file" | tr -d ' ')"
+          echo "release 发布状态：$(gh release view "$GITHUB_REF_NAME" --json isDraft,isPrerelease,tagName --jq '"tag=\(.tagName) draft=\(.isDraft) prerelease=\(.isPrerelease)"')"
