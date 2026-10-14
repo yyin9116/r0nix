@@ -48,6 +48,9 @@ verify_app() {
   fi
   printf '%s\n' "$runtime_check" | grep -q 'python-runtime-check: ok' \
     || fail "$label: 自检未打出 ok：$(printf '%s' "$runtime_check" | tr '\n' '|')"
+  # 通过时也要留下证据。只印一行 "ok" 的话，日志里看不出 base_prefix 到底指向哪 ——
+  # 而「指向包内 runtime」正是这条断言的实质内容，回归时才会有人去翻它。
+  printf '%s\n' "$runtime_check" | sed -n 's/^python-runtime-check: /  /p'
 
   local detritus
   detritus="$(find "$runtime" \( -name '__pycache__' -o -name '*.pyc' \) -print -quit 2>/dev/null)" || detritus=""
