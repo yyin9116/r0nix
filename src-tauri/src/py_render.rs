@@ -229,24 +229,42 @@ fn self_check_python_runtime() -> Result<String, String> {
         }
 
         py.import_bound("encodings")?;
-        // 只 import 还不够。让原生层真跑一次 —— 建一个空文档、加一页、读页数：
-        // 这会真正加载包内的 `_mupdf.so` / `libmupdf.dylib`，也就是
-        // `export_page_png` / `get_page_images` 依赖的那条路径。
+        // 只 import 还不够。让原生层真跑一次 —— 建文档、加页、读页数，
+        // 再**光栅化一页**。这会真正加载包内的 `_mupdf.so` / `libmupdf.dylib`，
+        // 也就是 `export_page_png` / `get_page_images` 依赖的那条路径。
+        //
+        // 为什么连 get_pixmap 一起做：`export_page_png` 的真实原语是
+        // `load_page` + `get_pixmap`，光栅化器与字体/色彩资源都在这一步才用到。
+        // 只验到「能建文档」的话，包里的渲染链路坏了也照样绿。
         let fitz = py.import_bound("fitz")?;
         let doc = fitz.call_method0("open")?;
+        // 用默认页面尺寸 —— `new_page` 的首个位置参数是 `rect`，塞元组会被当成矩形；
+        // 这里不需要指定尺寸，默认页足够触发一次真实光栅化。
         doc.call_method0("new_page")?;
         let page_count: usize = doc.getattr("page_count")?.extract()?;
-        doc.call_method0("close")?;
         if page_count != 1 {
             return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
                 "PyMuPDF 自检异常：新建文档的页数是 {page_count}，期望 1"
             )));
         }
+        let page = doc.call_method1("load_page", (0_i32,))?;
+        let pixmap = page.call_method0("get_pixmap")?;
+        let width: usize = pixmap.getattr("width")?.extract()?;
+        let height: usize = pixmap.getattr("height")?.extract()?;
+        let png: Vec<u8> = pixmap.call_method1("tobytes", ("png",))?.extract()?;
+        doc.call_method0("close")?;
+        if width == 0 || height == 0 || png.is_empty() {
+            return Err(pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "PyMuPDF 光栅化自检异常：{width}x{height}，PNG {} 字节",
+                png.len()
+            )));
+        }
 
         Ok(format!(
-            "home={} base_prefix={} encodings+PyMuPDF 可用",
+            "home={} base_prefix={} encodings+PyMuPDF 可用（光栅化 {width}x{height}，PNG {} 字节）",
             expected.display(),
-            actual.display()
+            actual.display(),
+            png.len()
         ))
     })
     .map_err(|err| err.to_string())
