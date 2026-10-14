@@ -231,9 +231,46 @@ jobs:
       - name: Publish Release Assets
         uses: softprops/action-gh-release@v2
         with:
-          body_path: ${{ runner.temp }}/release-notes.md
-          generate_release_notes: true
+          # 正文不交给这一步 —— 见下一步。实测：当该 tag 已经存在 release 时，
+          # action-gh-release 会先建一个带正文的 draft，发现已有 release 后改用旧的
+          # 并删掉 draft（日志：`Using release N for tag vX instead of duplicate
+          # draft M`），正文随之丢失。于是「重指 tag / 重跑发布」会静默沿用旧正文，
+          # 而这一步照样是绿的。
+          generate_release_notes: false
           files: |
             release-artifacts/**/*.exe
             release-artifacts/**/*.msi
             release-artifacts/**/*.dmg
+
+      - name: Set Release Notes From the Tag
+        # 唯一负责 release 正文的一步：tag 消息体 + GitHub 生成的 changelog。
+        # 显式覆写，所以无论 release 是本次新建还是早就在那儿，结果都一致。
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          notes_file="${RUNNER_TEMP}/release-notes.md"
+          body_file="${RUNNER_TEMP}/release-body.md"
+
+          # changelog 是可选的（第一个 release 没有上一个 tag）。它拿不到就让正文只剩
+          # tag 消息体，不该因为一段附属文字把整个发布打红。
+          if ! gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+                 -f tag_name="${GITHUB_REF_NAME}" \
+                 -f target_commitish="${GITHUB_SHA}" \
+                 --jq .body > "${RUNNER_TEMP}/changelog.md"; then
+            echo "changelog: 生成失败，正文将只含 tag 消息体" >&2
+            : > "${RUNNER_TEMP}/changelog.md"
+          fi
+
+          {
+            cat "$notes_file"
+            echo
+            cat "${RUNNER_TEMP}/changelog.md"
+          } > "$body_file"
+
+          gh release edit "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$body_file"
+
+          echo "release 正文首行：$(head -1 "$body_file")"
+          echo "release 正文字节数：$(wc -c < "$body_file" | tr -d ' ')"
