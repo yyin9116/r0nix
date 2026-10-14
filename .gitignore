@@ -25,7 +25,6 @@ docs/images/*
 !AGENTS.md
 !README.md
 !readme.md
-!RELEASE_NOTES.md
 !docs/*.md
 .omx/
 .vibe-state.json
