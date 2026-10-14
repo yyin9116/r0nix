@@ -3032,6 +3032,11 @@ mod tests {
         let _ = std::fs::remove_file(path);
     }
 
+    // `report()` 读 `getrusage(RUSAGE_SELF)`，是 Unix 专有接口：Windows 的 libc 里没有
+    // `rusage` / `getrusage` / `RUSAGE_SELF` 这三个符号。这个探针本来就是给 macOS 的
+    // 内存调查用的，所以在非 Unix 平台整段剔除 —— 否则 `--all-targets` 会在 Windows 上
+    // 编译失败（clippy 门禁即挂在这里）。
+    #[cfg(unix)]
     #[test]
     #[ignore = "manual memory probe: prints peak RSS across the PyMuPDF stages"]
     fn probe_pdf_memory_footprint() {
@@ -3119,6 +3124,8 @@ mod tests {
     /// ```
     /// 注意 `ru_maxrss` 是**峰值且单调不减**，所以「drop 之后」不会回落 —— 这不是泄漏，
     /// 只看各步之间的**增量**。
+    // 同上：`report()` 依赖 `getrusage`，Windows 上无此符号。
+    #[cfg(unix)]
     #[test]
     #[ignore = "manual memory probe: peak RSS of the base64 IPC byte path"]
     fn probe_pdf_base64_ipc_peak() {
