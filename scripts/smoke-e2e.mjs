@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { setTimeout as delay } from "node:timers/promises";
@@ -32,6 +32,23 @@ function findBrowserExecutable() {
 }
 
 let server = null;
+
+// 阶段标记 + 看门狗。
+// 一旦卡死，CI 步骤会一直挂在 in_progress（GitHub 默认要 6 小时才超时），
+// 而步骤日志只在结束后才可见 —— 等于拿不到任何线索。这里设一个上限：
+// 超时就把当前阶段打出来并按非零码退出，日志立刻可见、卡点可定位。
+let phase = "startup";
+function markPhase(name) {
+  phase = name;
+  console.log(`[e2e] → ${name}`);
+}
+
+const E2E_DEADLINE_MS = Number(process.env.E2E_DEADLINE_MS || 12 * 60_000);
+// unref：正常跑完时它不拖住退出；卡死时事件循环还活着，它照样会触发。
+setTimeout(() => {
+  console.error(`e2e watchdog: 超过 ${Math.round(E2E_DEADLINE_MS / 1000)}s 仍未结束，卡在阶段「${phase}」`);
+  process.exit(1);
+}, E2E_DEADLINE_MS).unref();
 
 function createPdfFixture(pageCount = 1000) {
   const content = "BT /F1 18 Tf 72 720 Td (P-level PDF fixture paragraph) Tj 0 -28 Td (Stable text layer selection and hover) Tj ET";
@@ -250,7 +267,7 @@ async function runCompanionRegression(browser) {
     await expectVisible(page.getByTitle("切换侧边栏"), "sidebar toggle (companion)");
     await ensureSidebarOpen(page, "library nav (companion)");
 
-    const chooserPromise = page.waitForEvent("filechooser");
+    const chooserPromise = page.waitForEvent("filechooser", { timeout: 15_000 });
     await page.getByRole("button", { name: "打开文件..." }).click();
     await (await chooserPromise).setFiles({
       name: "companion-fixture.pdf",
@@ -545,11 +562,13 @@ async function runCompanionRegression(browser) {
 
 async function run() {
   await ensureServer();
+  markPhase("dev server ready");
   const executablePath = findBrowserExecutable();
   if (!executablePath) {
     throw new Error("No system Chrome/Edge executable found. Set CHROME_PATH before running the browser P-level E2E.");
   }
   const browser = await chromium.launch({ executablePath });
+  markPhase("browser launched");
   if (companionOnly) {
     await runCompanionRegression(browser);
     await browser.close();
@@ -562,6 +581,7 @@ async function run() {
       window.localStorage.clear();
     });
     await page.goto(baseUrl, { waitUntil: "domcontentloaded" });
+    markPhase("app loaded");
 
     await expectVisible(page.getByTitle("切换侧边栏"), "sidebar toggle");
     await ensureSidebarOpen(page, "library nav");
@@ -583,7 +603,10 @@ async function run() {
     await page.getByRole("button", { name: "添加第一条笔记" }).click();
     await expectVisible(page.locator(".react-flow__node"), "React Flow whiteboard card");
 
-    const pdfChooserPromise = page.waitForEvent("filechooser");
+    markPhase("loading the 1000-page virtualization fixture");
+    // `page.waitForEvent` 默认**没有超时** —— 一旦选择器没弹出来就是无限等待。
+    // 加上限，让它以「选择器没出现」这种可读的形式失败。
+    const pdfChooserPromise = page.waitForEvent("filechooser", { timeout: 15_000 });
     await page.getByRole("button", { name: "打开文件..." }).click();
     await (await pdfChooserPromise).setFiles({
       name: "p-level-1000-page-fixture.pdf",
@@ -864,6 +887,7 @@ async function run() {
     // 所以这条守卫必须**按在深处滚动上量**：视口中心的页要有画布、画布要有内容、
     // 页码指示器要指向这一页、虚拟化仍要成立（不能靠「全渲染」蒙混过关）。
     await page.locator('[data-tab-id]').filter({ hasText: "p-level-1000-page-fixture" }).click();
+    markPhase("deep scroll virtualization");
     await expectVisible(page.locator('[data-pdf-page="1"] canvas.pdf-page-canvas'), "PDF canvas before deep scroll");
     await page.evaluate(() => {
       const root = document.querySelector(".pdf-selection-scope");
@@ -935,9 +959,41 @@ async function run() {
     );
 
     // 伴读走独立页面：它要预置 AI 设置并给 fetch 打桩，不能污染上面这批断言。
+    markPhase("companion regression");
     await runCompanionRegression(browser);
   } finally {
     await browser.close();
+  }
+}
+
+/**
+ * 收掉 dev server。
+ *
+ * ⚠️ Windows 上 `shell: true` 让 `server` 指向 `cmd.exe`，而真正在监听端口的是
+ * 它的孙进程 `node`（vite）。TerminateProcess 只杀 `cmd.exe`，孙进程会活下来当
+ * **孤儿**，并继承 CI 步骤的 stdout —— runner 侧一直在等这个输出流 EOF，于是
+ * 步骤永远停在 in_progress（GitHub 默认要 6 小时才判超时）。
+ *
+ * 实测证据：同一轮 Windows 日志里 09:24:06 就打了 `smoke-e2e: ok`（26 秒跑完），
+ * 之后 65 分钟毫无输出，直到被取消才出现 runner 的 "Cleaning up orphan processes"。
+ * 同套件在 macOS（不带 shell）77s 正常跑完退出。
+ *
+ * 所以必须杀掉整棵进程树，不能只 kill 直接子进程。断开管道读端属额外保险。
+ */
+function stopServer() {
+  if (!server) return;
+  server.stdout?.destroy();
+  server.stderr?.destroy();
+  server.removeAllListeners("exit");
+  if (process.platform === "win32") {
+    // npm.cmd → node(vite) 是孙进程，必须连树一起杀（/T），否则留下孤儿占着 stdout
+    try {
+      spawnSync("taskkill", ["/pid", String(server.pid), "/T", "/F"], { stdio: "ignore" });
+    } catch {
+      server.kill("SIGTERM");
+    }
+  } else {
+    server.kill("SIGTERM");
   }
 }
 
@@ -952,7 +1008,12 @@ run()
     process.exitCode = 1;
   })
   .finally(() => {
-    if (server) {
-      server.kill("SIGTERM");
-    }
+    stopServer();
+    // 诊断：2s 后若还没退出，把仍在拖住事件循环的资源名打出来（unref 计时器
+    // 只在事件循环仍活着时触发 —— 这本身就是判据）。
+    setTimeout(() => {
+      console.error(`e2e: 进程未退出，活动资源 = ${JSON.stringify(process.getActiveResourcesInfo?.() ?? [])}`);
+    }, 2_000).unref();
+    // 硬闸：任何残留都不该让 CI 挂满 6 小时。
+    setTimeout(() => process.exit(process.exitCode ?? 0), 5_000).unref();
   });

@@ -60,6 +60,9 @@ jobs:
         run: npm run test:fixtures
 
       - name: Browser P-Level E2E
+        # 脚本内已有 12 分钟看门狗；这是第二道闸：任何原因都不该让这一步挂满
+        # GitHub 默认的 6 小时（macOS 实测全程 77s，15 分钟是充裕上限）。
+        timeout-minutes: 15
         run: npm run test:e2e
 
       - name: Rust Check
